@@ -10,4 +10,6 @@ if [ "$#" -lt 1 ]; then
   exit 1
 fi
 
-mojo run "$@"
+# -I con la raiz del proyecto para que los `from ops...` resuelvan.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mojo run -I "$ROOT" "$@"
