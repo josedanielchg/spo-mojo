@@ -1,0 +1,17 @@
+# Mojo build artifacts
+*.o
+*.so
+__pycache__/
+*.pyc
+
+# scratch outputs from demos/scripts
+*.csv
+!tests/golden/**/*.csv
+
+# editor cruft
+.vscode/
+.idea/
+
+# claude-authored notes/docs kept locally for context, never committed
+*.md
+!tests/golden/**/*.md
