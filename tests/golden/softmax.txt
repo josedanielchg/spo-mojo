@@ -1,0 +1,10 @@
+rows 6
+cols 16
+softmax_in.bin float32 rows x cols
+softmax_out.bin float32 rows x cols
+logsumexp_out.bin float32 rows
+row0 = todo 0 (uniforme)
+row1 = todo 1000 (overflow si no se resta el max)
+row2 = un 1000 y el resto normal (casi one-hot)
+row3 = todo -1000 (underflow si no se resta el max)
+row4,row5 = normal(0, 2) con seed 0
