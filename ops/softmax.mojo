@@ -1,27 +1,33 @@
 """Softmax estable y logsumexp por filas (Puzzle 18).
 
-El truco es restar el maximo de la fila antes de exponenciar: exp(1000) es inf,
-pero exp(1000 - 1000) = 1. Matematicamente da igual porque el factor exp(-m) se
-cancela arriba y abajo; numericamente es la diferencia entre funcionar y no.
+El truco es restar el maximo de la fila antes de exponenciar. exp(1000) es inf
+y inf/inf es nan, pero exp(1000 - 1000) = 1. Matematicamente da igual, porque
+el factor exp(-m) aparece en el numerador y en el denominador y se cancela:
 
-En SPO esto se usa dos veces: para la cabeza categorica del actor y para
-convertir los pesos SMC w/eta en probabilidades de resampling.
+    exp(x_i - m) / SUM_j exp(x_j - m)  ==  exp(x_i) / SUM_j exp(x_j)
+
+Numericamente es la diferencia entre funcionar y devolver nan. El test tiene una
+fila de +1000 y otra de -1000 justo para vigilar esto.
+
+En SPO se usa en dos sitios: la cabeza categorica del actor, y la conversion de
+los pesos SMC w/eta en probabilidades de resampling.
 
 Layout: un bloque por fila (bloque = env, hilo = particula).
-TPB tiene que ser potencia de dos.
+TPB tiene que ser potencia de dos. row_size puede ser mayor que TPB.
 """
 
-from std.gpu import block_idx, thread_idx, barrier
+from std.builtin.debug_assert import debug_assert
+from std.gpu import block_dim, block_idx, thread_idx, barrier
 from std.math import exp, log
 from std.memory import stack_allocation, AddressSpace
 
-comptime dtype = DType.float32
-comptime NEG_INF = Scalar[dtype](-3.4028235e38)
+from ops.common import dtype, NEG_INF, SharedF32, GlobalF32
+from ops.reductions import block_reduce_sum, block_reduce_max
 
 
-def _row_max[TPB: Int](shared: UnsafePointer[Scalar[dtype], MutAnyOrigin, address_space = AddressSpace.SHARED],
-                       a_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+def _row_max[TPB: Int](shared: SharedF32, a_ptr: GlobalF32,
                        base: Int, row_size: Int, tid: Int) -> Scalar[dtype]:
+    """Maximo de la fila, devuelto a todos los hilos. Deja shared reutilizable."""
     acc = NEG_INF
     i = tid
     while i < row_size:
@@ -31,26 +37,13 @@ def _row_max[TPB: Int](shared: UnsafePointer[Scalar[dtype], MutAnyOrigin, addres
         i += TPB
     shared[tid] = acc
     barrier()
-
-    stride = TPB // 2
-    while stride > 0:
-        if tid < stride:
-            other = shared[tid + stride]
-            if other > shared[tid]:
-                shared[tid] = other
-        barrier()
-        stride //= 2
-
-    m = shared[0]
-    # Todos tienen que haber leido shared[0] antes de que nadie lo pise.
-    barrier()
-    return m
+    return block_reduce_max[TPB](shared, tid)
 
 
-def _row_sum_exp[TPB: Int](shared: UnsafePointer[Scalar[dtype], MutAnyOrigin, address_space = AddressSpace.SHARED],
-                           a_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+def _row_sum_exp[TPB: Int](shared: SharedF32, a_ptr: GlobalF32,
                            base: Int, row_size: Int, tid: Int,
                            row_max: Scalar[dtype]) -> Scalar[dtype]:
+    """SUM_i exp(a[i] - row_max), devuelto a todos los hilos."""
     acc = Scalar[dtype](0)
     i = tid
     while i < row_size:
@@ -58,45 +51,46 @@ def _row_sum_exp[TPB: Int](shared: UnsafePointer[Scalar[dtype], MutAnyOrigin, ad
         i += TPB
     shared[tid] = acc
     barrier()
-
-    stride = TPB // 2
-    while stride > 0:
-        if tid < stride:
-            shared[tid] += shared[tid + stride]
-        barrier()
-        stride //= 2
-
-    s = shared[0]
-    barrier()
-    return s
+    return block_reduce_sum[TPB](shared, tid)
 
 
-def softmax_rows[TPB: Int](out_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-                           a_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-                           row_size: Int):
+def softmax_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
+    """out = softmax(a) por filas."""
+    debug_assert(Int(block_dim.x) == TPB, "softmax_rows: block_dim tiene que ser TPB")
+
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
-    tid = thread_idx.x
-    base = block_idx.x * row_size
+    tid = Int(thread_idx.x)
+    row = Int(block_idx.x)
+    base = row * row_size
 
     row_max = _row_max[TPB](shared, a_ptr, base, row_size, tid)
     row_sum = _row_sum_exp[TPB](shared, a_ptr, base, row_size, tid, row_max)
 
+    # Se recalcula el exp en vez de guardarlo de la pasada anterior. Guardarlo
+    # pediria otro array en shared de tamano row_size, y row_size puede ser mayor
+    # que TPB (que es justo lo que shared mide). Prefiero pagar el exp dos veces
+    # que meter un limite artificial; si algun dia duele, se perfila primero.
     i = tid
     while i < row_size:
         out_ptr[base + i] = exp(a_ptr[base + i] - row_max) / row_sum
         i += TPB
 
 
-def logsumexp_rows[TPB: Int](out_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-                             a_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-                             row_size: Int):
-    """log(sum(exp(x))) = m + log(sum(exp(x - m))). Un valor por fila."""
+def logsumexp_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
+    """out[fila] = log(SUM exp(a)), un escalar por fila.
+
+    Identidad usada: log(SUM exp(x)) = m + log(SUM exp(x - m)).
+    En SPO aparece en el temperature loss del M-step (ecuacion 7 del paper).
+    """
+    debug_assert(Int(block_dim.x) == TPB, "logsumexp_rows: block_dim tiene que ser TPB")
+
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
-    tid = thread_idx.x
-    base = block_idx.x * row_size
+    tid = Int(thread_idx.x)
+    row = Int(block_idx.x)
+    base = row * row_size
 
     row_max = _row_max[TPB](shared, a_ptr, base, row_size, tid)
     row_sum = _row_sum_exp[TPB](shared, a_ptr, base, row_size, tid, row_max)
 
     if tid == 0:
-        out_ptr[block_idx.x] = row_max + log(row_sum)
+        out_ptr[row] = row_max + log(row_sum)

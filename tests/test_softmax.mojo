@@ -1,14 +1,21 @@
-"""Softmax y logsumexp contra el golden de numpy (tests/golden/gen/gen_softmax.py).
+"""Softmax y logsumexp contra el golden de numpy.
 
-Las filas 1 y 3 del golden son las importantes: +1000 y -1000 en todas las
-columnas. Sin restar el maximo dan inf/inf y 0/0 respectivamente.
+El golden lo genera tests/golden/gen/gen_softmax.py. Las filas no son aleatorias
+del todo: las cuatro primeras estan puestas a mano para reventar una
+implementacion ingenua.
+  fila 0: todo 0      -> softmax uniforme exacto, 1/COLS
+  fila 1: todo +1000  -> exp(1000) = inf. Sin restar el max sale inf/inf = nan
+  fila 2: un +1000    -> softmax casi one-hot
+  fila 3: todo -1000  -> exp(-1000) = 0. Sin restar el max sale 0/0 = nan
 """
 
 from std.gpu.host import DeviceContext
 from std.math import abs
 
-from ops.softmax import softmax_rows, logsumexp_rows, dtype
+from ops.common import dtype
+from ops.softmax import softmax_rows, logsumexp_rows
 from tests.golden_io import read_f32
+from tests.helpers import upload, zeros, download, assert_close
 
 comptime TPB = 32
 comptime ROWS = 6
@@ -22,19 +29,13 @@ def main() raises:
     want_lse = read_f32("tests/golden/logsumexp_out.bin")
 
     if len(x) != ROWS * COLS:
-        raise Error("golden softmax_in con tamano raro: ", len(x))
+        raise Error("golden softmax_in con tamano raro: ", len(x),
+                    " (regenerar con gen_softmax.py?)")
 
     with DeviceContext() as ctx:
-        a = ctx.enqueue_create_buffer[dtype](ROWS * COLS)
-        a.enqueue_fill(0)
-        with a.map_to_host() as h:
-            for i in range(ROWS * COLS):
-                h[i] = x[i]
-
-        sm = ctx.enqueue_create_buffer[dtype](ROWS * COLS)
-        sm.enqueue_fill(0)
-        lse = ctx.enqueue_create_buffer[dtype](ROWS)
-        lse.enqueue_fill(0)
+        a = upload[dtype](ctx, x)
+        sm = zeros[dtype](ctx, ROWS * COLS)
+        lse = zeros[dtype](ctx, ROWS)
 
         ctx.enqueue_function[softmax_rows[TPB], softmax_rows[TPB]](
             sm.unsafe_ptr(), a.unsafe_ptr(), COLS, grid_dim=ROWS, block_dim=TPB)
@@ -42,40 +43,41 @@ def main() raises:
             lse.unsafe_ptr(), a.unsafe_ptr(), COLS, grid_dim=ROWS, block_dim=TPB)
         ctx.synchronize()
 
-        with sm.map_to_host() as h:
-            for i in range(ROWS * COLS):
-                if abs(h[i] - want_softmax[i]) > TOL:
-                    raise Error("softmax en ", i, ": got=", h[i],
-                                " want=", want_softmax[i])
-        print("PASS softmax_rows vs numpy (", ROWS, "filas x", COLS, ")")
+        got_sm = download[dtype](sm, ROWS * COLS)
+        got_lse = download[dtype](lse, ROWS)
 
-        # La fila uniforme tiene que dar exactamente 1/COLS.
-        with sm.map_to_host() as h:
-            uniform = Scalar[dtype](1.0) / Scalar[dtype](COLS)
-            for c in range(COLS):
-                if abs(h[c] - uniform) > TOL:
-                    raise Error("fila uniforme col ", c, ": got=", h[c])
-        print("PASS softmax fila uniforme = 1/", COLS)
+    # --- 1. elemento a elemento contra numpy ---
+    for r in range(ROWS):
+        for c in range(COLS):
+            assert_close(got_sm[r * COLS + c], want_softmax[r * COLS + c], TOL,
+                         String("softmax fila=", r, " col=", c))
+    print("PASS softmax_rows vs numpy (", ROWS, "filas x", COLS, ")")
 
-        # Suma por fila = 1 en todas, incluidas las de +1000 y -1000.
-        with sm.map_to_host() as h:
-            for r in range(ROWS):
-                total = Scalar[dtype](0)
-                for c in range(COLS):
-                    total += h[r * COLS + c]
-                if abs(total - 1.0) > Scalar[dtype](1e-5):
-                    raise Error("fila ", r, " no suma 1: ", total)
-        print("PASS softmax suma 1 por fila (sin overflow en +-1000)")
+    # --- 2. la fila uniforme tiene que dar exactamente 1/COLS ---
+    uniform = Scalar[dtype](1.0) / Scalar[dtype](COLS)
+    for c in range(COLS):
+        assert_close(got_sm[c], uniform, TOL, String("fila uniforme col=", c))
+    print("PASS softmax fila uniforme = 1/", COLS)
 
-        # logsumexp: tolerancia relativa, porque la fila de 1000 vale ~1002.77
-        # y 1e-6 absoluto es menos que el ulp de float32 en esa magnitud.
-        with lse.map_to_host() as h:
-            for r in range(ROWS):
-                err = abs(h[r] - want_lse[r])
-                scale = abs(want_lse[r])
-                if scale < 1.0:
-                    scale = Scalar[dtype](1.0)
-                if err / scale > Scalar[dtype](1e-6):
-                    raise Error("logsumexp fila ", r, ": got=", h[r],
-                                " want=", want_lse[r])
-        print("PASS logsumexp_rows vs numpy")
+    # --- 3. cada fila suma 1, incluidas las de +-1000 ---
+    # Esta es la que detecta el overflow: si exp desborda, la fila suma nan.
+    for r in range(ROWS):
+        total = Scalar[dtype](0)
+        for c in range(COLS):
+            total += got_sm[r * COLS + c]
+        assert_close(total, 1.0, Scalar[dtype](1e-5),
+                     String("la fila ", r, " no suma 1"))
+    print("PASS softmax suma 1 por fila (sin overflow en +-1000)")
+
+    # --- 4. logsumexp, con tolerancia RELATIVA ---
+    # La fila de +1000 da ~1002.77, y a esa magnitud el ulp de float32 ya es
+    # ~6e-5: pedir 1e-6 absoluto seria pedir mas precision de la que existe.
+    for r in range(ROWS):
+        scale = abs(want_lse[r])
+        if scale < 1.0:
+            scale = Scalar[dtype](1.0)
+        rel = abs(got_lse[r] - want_lse[r]) / scale
+        if rel > TOL:
+            raise Error("logsumexp fila=", r, ": got=", got_lse[r],
+                        " want=", want_lse[r], " (error relativo=", rel, ")")
+    print("PASS logsumexp_rows vs numpy")

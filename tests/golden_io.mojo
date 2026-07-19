@@ -1,14 +1,24 @@
-"""Lector de los goldens: float32 crudo, tal como los escribe numpy con .tofile()."""
+"""Lector de los goldens.
 
-comptime dtype = DType.float32
+Formato: float32 crudo, tal cual lo escribe numpy con .tofile(). Elegi binario
+en vez de CSV porque el decimal redondea y entonces ya no se sabe si una
+diferencia viene del kernel o del texto; el .txt de al lado guarda las shapes.
+"""
+
+from ops.common import dtype
 
 
 def read_f32(path: String) raises -> List[Scalar[dtype]]:
     with open(path, "r") as f:
-        data = f.read_bytes()
-    n = len(data) // 4
-    p = data.unsafe_ptr().bitcast[Scalar[dtype]]()
+        raw = f.read_bytes()
+
+    if len(raw) % 4 != 0:
+        raise Error(path, ": ", len(raw), " bytes no es multiplo de 4, "
+                    "no puede ser un array de float32")
+
+    n = len(raw) // 4
+    ptr = raw.unsafe_ptr().bitcast[Scalar[dtype]]()
     out = List[Scalar[dtype]]()
     for i in range(n):
-        out.append(p[i])
+        out.append(ptr[i])
     return out^

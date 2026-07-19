@@ -1,46 +1,48 @@
 """RNG contador y muestreo categorico por CDF inversa.
 
-Sin estado global: el valor sale de hash(seed, stream, counter). Es la misma idea
-que las keys de JAX y tiene dos ventajas para SPO:
-  - reproducible aunque los hilos corran en cualquier orden (el hilo i usa
-    counter = i, no hay una secuencia compartida que dependa del scheduling),
-  - se puede "splitear" en streams independientes por uso (uno para la accion
-    raiz, otro para el resampling...) sin que se pisen.
+Sin estado global: el valor sale de hash(seed, stream, counter), como las keys
+de JAX. Dos ventajas para SPO:
 
-El mixer es el finalizador lowbias32 (dos rondas de xor-shift/multiply). No es
-critptografico ni falta que hace: solo tiene que pasar los tests estadisticos
-del muestreo.
+  - Reproducible pase lo que pase con el scheduler. El hilo i usa counter = i,
+    asi que no hay una secuencia compartida cuyo resultado dependa del orden en
+    que se ejecuten los hilos. Con un RNG con estado, dos corridas con la misma
+    seed darian numeros distintos a cada hilo.
+  - Se "splitea" en streams independientes por uso (uno para la accion raiz,
+    otro para el resampling, otro para el reset del entorno) sin que se pisen.
 
-Los kernels que muestrean reciben los uniformes YA generados como input. Asi el
-test puede inyectar uniformes a mano y comprobar indices exactos.
+El mixer es el finalizador lowbias32: dos rondas de xor-shift + multiplicacion.
+No es criptografico ni falta que hace; solo tiene que pasar los tests
+estadisticos del muestreo (media, varianza y chi2 estan en test_rng.mojo).
+
+Nota de diseno importante: los kernels que muestrean reciben los uniformes YA
+generados como input, en vez de llamar al RNG por dentro. Asi el test puede
+inyectar uniformes a mano y comprobar indices EXACTOS, sin depender de
+tolerancias estadisticas.
 """
 
+from std.builtin.debug_assert import debug_assert
 from std.gpu import block_dim, block_idx, thread_idx, barrier
 from std.math import exp
 from std.memory import stack_allocation, AddressSpace
 
-comptime dtype = DType.float32
-comptime idx_dtype = DType.int32
+from ops.common import dtype, idx_dtype, NEG_INF, GlobalF32, GlobalI32
+from ops.reductions import block_reduce_max
+from ops.scan import block_scan_inclusive
 
-# 1 / 2^24: los 24 bits altos son justo la mantisa de un float32, asi que
-# el uniforme sale en [0,1) sin huecos ni repeticiones raras.
+# 1 / 2^24. Me quedo con los 24 bits altos porque son justo los que caben en la
+# mantisa de un float32: asi cada valor representable en [0,1) sale con la misma
+# probabilidad. Si usara los 32 bits, la conversion a float redondearia y algunos
+# valores saldrian el doble de veces que otros.
 comptime INV_2P24 = Scalar[dtype](5.9604645e-8)
 
-
-@fieldwise_init
-struct RngKey(Copyable, Movable):
-    """Estilo key de JAX: se pasa por valor y se derivan streams hijos."""
-
-    var seed: UInt32
-    var stream: UInt32
-
-    def split(self, which: UInt32) -> RngKey:
-        """Deriva un stream hijo. Mismo seed, stream distinto."""
-        return RngKey(self.seed, mix32(self.stream ^ (which + 0x9E3779B9)))
+# Proporcion aurea en 32 bits. Es la constante de dispersion de rigor (la misma
+# que usa Fibonacci hashing): mezcla bien los bits altos y bajos.
+comptime GOLDEN32 = UInt32(0x9E3779B9)
 
 
 def mix32(x_in: UInt32) -> UInt32:
-    """Finalizador lowbias32."""
+    """Finalizador lowbias32: mezcla los 32 bits para que un contador 0,1,2,...
+    se convierta en algo que parezca aleatorio."""
     x = x_in
     x ^= x >> 16
     x *= 0x7FEB352D
@@ -51,81 +53,95 @@ def mix32(x_in: UInt32) -> UInt32:
 
 
 def rand_bits(seed: UInt32, stream: UInt32, counter: UInt32) -> UInt32:
+    """Los tres se mezclan en cascada para que cambiar cualquiera de ellos
+    cambie el resultado entero, no solo unos pocos bits."""
     return mix32(seed ^ mix32(stream ^ mix32(counter)))
 
 
 def rand_uniform(seed: UInt32, stream: UInt32, counter: UInt32) -> Scalar[dtype]:
-    """Uniforme en [0, 1)."""
+    """Uniforme en [0, 1). El 1.0 nunca sale, que es lo que quiere la CDF inversa."""
     return Scalar[dtype]((rand_bits(seed, stream, counter) >> 8)) * INV_2P24
 
 
-def fill_uniform(out_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-                 seed: UInt32, stream: UInt32, n: Int):
-    """El hilo i usa counter = i: el resultado no depende del orden de ejecucion."""
-    i = block_dim.x * block_idx.x + thread_idx.x
+@fieldwise_init
+struct RngKey(Copyable, Movable):
+    """Contabilidad de streams al estilo key de JAX, para el lado host.
+
+    Los kernels reciben (seed, stream) por separado en vez de un RngKey: pasar
+    structs como argumento de kernel pide que sean DevicePassable y no aporta
+    nada aqui. Esto es el libro de cuentas de quien usa que stream.
+    """
+
+    var seed: UInt32
+    var stream: UInt32
+
+    def split(self, which: UInt32) -> RngKey:
+        """Deriva un stream hijo: mismo seed, stream distinto e independiente."""
+        return RngKey(self.seed, mix32(self.stream ^ (which + GOLDEN32)))
+
+
+def fill_uniform(out_ptr: GlobalF32, seed: UInt32, stream: UInt32, n: Int):
+    """Rellena out[0..n) con uniformes. Patron map del Puzzle 1 + guard del 3."""
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n:
+        # counter = i (el indice global), no un contador compartido: de ahi
+        # viene la reproducibilidad.
         out_ptr[i] = rand_uniform(seed, stream, UInt32(i))
 
 
-def categorical_from_logits[TPB: Int](
-        out_ptr: UnsafePointer[Scalar[idx_dtype], MutAnyOrigin],
-        logits_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-        u_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-        row_size: Int):
+def categorical_from_logits[TPB: Int](out_ptr: GlobalI32, logits_ptr: GlobalF32,
+                                      u_ptr: GlobalF32, row_size: Int):
     """Una muestra categorica por fila, por CDF inversa.
 
-    softmax estable -> prefix sum -> primer indice con cdf > u.
+    Receta: softmax estable -> prefix sum (= CDF) -> primer indice cuyo tramo
+    contiene al uniforme. Es la composicion de las tres piezas de la fase 2.
 
-    Trabaja con el CDF SIN normalizar y escala el uniforme por el total
-    (u * total) en vez de dividir cada elemento: una division menos por hilo y
-    se evita el caso total==0.
+    Detalle que ahorra trabajo: el CDF se deja SIN normalizar y en vez de dividir
+    cada elemento por el total se escala el uniforme (u * total). Sale una
+    division por bloque en lugar de una por hilo, y de paso desaparece el caso
+    total == 0.
 
-    Pide row_size <= TPB. Lanzar con block_dim=TPB, grid_dim=num_rows.
+    Pide row_size <= TPB. Lanzar con grid_dim=num_filas, block_dim=TPB.
     """
+    debug_assert(row_size <= TPB, "categorical: row_size tiene que caber en TPB")
+    debug_assert(Int(block_dim.x) == TPB, "categorical: block_dim tiene que ser TPB")
+
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
-    tid = thread_idx.x
-    row = block_idx.x
+    tid = Int(thread_idx.x)
+    row = Int(block_idx.x)
     base = row * row_size
 
-    # --- max de la fila (para el softmax estable) ---
-    NEG_INF = Scalar[dtype](-3.4028235e38)
+    # --- 1. maximo de la fila, para el softmax estable ---
     shared[tid] = logits_ptr[base + tid] if tid < row_size else NEG_INF
     barrier()
-    stride = TPB // 2
-    while stride > 0:
-        if tid < stride:
-            other = shared[tid + stride]
-            if other > shared[tid]:
-                shared[tid] = other
-        barrier()
-        stride //= 2
-    row_max = shared[0]
-    barrier()
+    row_max = block_reduce_max[TPB](shared, tid)
 
-    # --- exp(x - max), sin normalizar ---
+    # --- 2. exp(x - max), sin normalizar. Los hilos sobrantes ponen 0 para que
+    #        no aporten masa de probabilidad. ---
     shared[tid] = exp(logits_ptr[base + tid] - row_max) if tid < row_size else Scalar[dtype](0)
     barrier()
 
-    # --- prefix sum inclusivo -> CDF sin normalizar ---
-    offset = 1
-    while offset < TPB:
-        val = shared[tid - offset] if tid >= offset else Scalar[dtype](0)
-        barrier()
-        shared[tid] += val
-        barrier()
-        offset *= 2
+    # --- 3. prefix sum -> CDF sin normalizar ---
+    block_scan_inclusive[TPB](shared, tid)
 
     total = shared[row_size - 1]
     target = u_ptr[row] * total
 
-    # --- primer indice cuyo tramo [cdf_prev, cdf) contiene a target ---
+    # --- 4. cada hilo mira si el target cae en SU tramo [cdf_prev, cdf) ---
+    # Exactamente uno acierta, asi que no hay carrera al escribir out[row].
+    # Un elemento con probabilidad 0 tiene cdf_prev == cdf, tramo vacio, y no
+    # puede salir elegido: correcto.
     if tid < row_size:
         cdf = shared[tid]
         cdf_prev = shared[tid - 1] if tid > 0 else Scalar[dtype](0)
         hit = cdf_prev <= target and target < cdf
-        # Red de seguridad: si el redondeo deja target justo en (o pasado) el
-        # final, se lo queda el ultimo. Sin esto ninguna fila escribiria nada.
+
+        # Red de seguridad por redondeo: el CDF se acumula sumando floats, asi
+        # que el ultimo tramo puede quedarse un ulp por debajo de total y dejar
+        # al target fuera de todos los tramos. Sin esto la fila no escribiria
+        # nada y out[row] se quedaria con basura.
         if tid == row_size - 1 and target >= cdf:
             hit = True
+
         if hit:
             out_ptr[row] = Scalar[idx_dtype](tid)
