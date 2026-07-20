@@ -17,13 +17,19 @@ proposito, asi la mayoria de kernels son un map de un hilo por particula y
 `env = p // num_particles` sale con una division.
 """
 
-from std.gpu import block_dim, block_idx, thread_idx
+from std.builtin.debug_assert import debug_assert
+from std.gpu import block_dim, block_idx, thread_idx, barrier
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.math import exp, log
+from std.memory import stack_allocation, AddressSpace
 
 from ops.common import dtype, idx_dtype, NEG_INF, GlobalF32, GlobalI32
+from ops.reductions import block_reduce_max, block_reduce_sum
 from ops.rng import categorical_from_logits
-from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
+from ops.scan import block_scan_inclusive
+from ops.softmax import softmax_rows
+from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
+                                   SearchScratch, SPOOutput)
 
 comptime TPB = 32
 
@@ -297,3 +303,367 @@ def update_particles(ctx: DeviceContext, particles: Particles,
         outputs.next_value.unsafe_ptr(), outputs.next_prior_logits.unsafe_ptr(),
         p_total, cfg.search_gamma, cfg.search_gae_lambda,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
+
+
+# ---------------------------------------------------------------------------
+# Resampling
+#
+# Es lo que convierte peso en multiplicidad: las particulas prometedoras se
+# copian varias veces y las malas desaparecen. A partir de ahi todas vuelven a
+# tener el mismo peso, y la informacion de "cual era mejor" ya no vive en los
+# pesos sino en cuantas copias hay de cada una.
+# ---------------------------------------------------------------------------
+
+def resample_logits_kernel(logits_out: GlobalF32, weights: GlobalF32,
+                           n_particles: Int, temperature: Scalar[dtype]):
+    """logits = pesos / temperatura. Es `get_resample_logits` de Stoix.
+
+    La temperatura decide lo agresiva que es la busqueda: baja se queda solo con
+    las mejores particulas (y el ESS se hunde), alta reparte casi por igual (y la
+    busqueda casi no mejora al prior). Es el mismo eta que el M-step aprende.
+    """
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p < n_particles:
+        logits_out[p] = weights[p] / temperature
+
+
+def resample_indices_kernel[TPB_P: Int](
+        indices_out: GlobalI32, logits: GlobalF32, uniforms: GlobalF32,
+        num_particles: Int):
+    """Sortea N indices por env, con probabilidad softmax(logits) (CDF inversa).
+
+    Un bloque por env y un hilo por particula. El CDF se construye UNA vez en
+    shared memory y luego los N hilos hacen cada uno su busqueda con su propio
+    uniforme, o sea N muestras del mismo CDF. Esa es la diferencia con
+    `categorical_from_logits`, que saca una sola muestra por fila.
+
+    Como en el muestreo de la fase 2, el CDF se deja sin normalizar y lo que se
+    escala es el uniforme.
+    """
+    debug_assert(num_particles <= TPB_P,
+                 "resample: las particulas de un env tienen que caber en el bloque")
+
+    shared = stack_allocation[TPB_P, Scalar[dtype],
+                              address_space = AddressSpace.SHARED]()
+    tid = Int(thread_idx.x)
+    env = Int(block_idx.x)
+    base = env * num_particles
+
+    # softmax estable -> CDF
+    shared[tid] = logits[base + tid] if tid < num_particles else NEG_INF
+    barrier()
+    row_max = block_reduce_max[TPB_P](shared, tid)
+
+    shared[tid] = exp(logits[base + tid] - row_max) if tid < num_particles else Scalar[dtype](0)
+    barrier()
+    block_scan_inclusive[TPB_P](shared, tid)
+
+    if tid >= num_particles:
+        return
+
+    total = shared[num_particles - 1]
+    target = uniforms[base + tid] * total
+
+    # Barrido lineal: con 16 particulas no compensa una busqueda binaria, y asi
+    # el codigo dice exactamente lo que hace.
+    chosen = num_particles - 1     # por defecto el ultimo, por si el redondeo
+                                   # deja el target justo en el borde
+    for n in range(num_particles):
+        cdf_prev = shared[n - 1] if n > 0 else Scalar[dtype](0)
+        if cdf_prev <= target and target < shared[n]:
+            chosen = n
+            break
+
+    indices_out[base + tid] = Scalar[idx_dtype](chosen)
+
+
+def gather_particles_kernel(
+        # destino (los buffers de scratch)
+        dst_state: GlobalF32, dst_root_actions: GlobalI32,
+        dst_prior_logits: GlobalF32, dst_value: GlobalF32,
+        dst_terminal: GlobalI32, dst_depth: GlobalI32,
+        # origen (las particulas de verdad)
+        src_state: GlobalF32, src_root_actions: GlobalI32,
+        src_prior_logits: GlobalF32, src_value: GlobalF32,
+        src_terminal: GlobalI32, src_depth: GlobalI32,
+        indices: GlobalI32, n_particles: Int, num_particles: Int,
+        state_dim: Int):
+    """dst[i] = src[indices[i]], con los indices dentro del mismo env.
+
+    Va a scratch y no in-place: si escribiera encima, un hilo podria pisar un
+    hueco que otro todavia no ha leido. Es la carrera clasica del gather.
+    """
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p >= n_particles:
+        return
+
+    env = p // num_particles
+    src = env * num_particles + Int(indices[p])
+
+    for d in range(state_dim):
+        dst_state[p * state_dim + d] = src_state[src * state_dim + d]
+    dst_root_actions[p] = src_root_actions[src]
+    dst_prior_logits[p] = src_prior_logits[src]
+    dst_value[p] = src_value[src]
+    dst_terminal[p] = src_terminal[src]
+    dst_depth[p] = src_depth[src]
+
+
+def copy_back_kernel(
+        dst_state: GlobalF32, dst_root_actions: GlobalI32,
+        dst_prior_logits: GlobalF32, dst_value: GlobalF32,
+        dst_terminal: GlobalI32, dst_depth: GlobalI32, dst_weights: GlobalF32,
+        src_state: GlobalF32, src_root_actions: GlobalI32,
+        src_prior_logits: GlobalF32, src_value: GlobalF32,
+        src_terminal: GlobalI32, src_depth: GlobalI32,
+        n_particles: Int, state_dim: Int):
+    """Devuelve el scratch a las particulas y resetea el peso a cero.
+
+    El reset es parte del resampling: tras repartir las copias, todas las
+    particulas vuelven a estar igual de bien consideradas.
+    """
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p >= n_particles:
+        return
+
+    for d in range(state_dim):
+        dst_state[p * state_dim + d] = src_state[p * state_dim + d]
+    dst_root_actions[p] = src_root_actions[p]
+    dst_prior_logits[p] = src_prior_logits[p]
+    dst_value[p] = src_value[p]
+    dst_terminal[p] = src_terminal[p]
+    dst_depth[p] = src_depth[p]
+    dst_weights[p] = Scalar[dtype](0)
+
+
+def resample(ctx: DeviceContext, particles: Particles, scratch: SearchScratch,
+             cfg: SPOConfig, uniforms: DeviceBuffer[dtype]) raises:
+    """Resampling completo. Espeja `resample` de Stoix (ff_spo.py:846).
+
+    OJO CON LA GAE: no se toca. Stoix hace el gather de todo y luego reescribe la
+    gae con la de ANTES del resampling (ff_spo.py:914), asi que en la practica la
+    gae se queda tal cual estaba. El motivo, segun su comentario, es que el loss
+    de la temperatura necesita las ventajas de antes de resamplear para apuntar
+    bien al KL; el precio es que la gae solo cubre hasta el ultimo resampling.
+
+    Aqui eso se implementa simplemente NO copiando la gae, que es lo mismo y
+    ahorra un buffer.
+    """
+    p_total = cfg.num_search_particles()
+    blocks = (p_total + TPB - 1) // TPB
+
+    ctx.enqueue_function[resample_logits_kernel, resample_logits_kernel](
+        scratch.resample_logits.unsafe_ptr(),
+        particles.resample_td_weights.unsafe_ptr(),
+        p_total, cfg.temperature, grid_dim=blocks, block_dim=TPB)
+
+    ctx.enqueue_function[resample_indices_kernel[TPB], resample_indices_kernel[TPB]](
+        scratch.indices.unsafe_ptr(), scratch.resample_logits.unsafe_ptr(),
+        uniforms.unsafe_ptr(), cfg.num_particles,
+        grid_dim=cfg.num_envs, block_dim=TPB)
+
+    ctx.enqueue_function[gather_particles_kernel, gather_particles_kernel](
+        scratch.state.unsafe_ptr(), scratch.root_actions.unsafe_ptr(),
+        scratch.prior_logits.unsafe_ptr(), scratch.value.unsafe_ptr(),
+        scratch.terminal.unsafe_ptr(), scratch.depth.unsafe_ptr(),
+        particles.state.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        particles.prior_logits.unsafe_ptr(), particles.value.unsafe_ptr(),
+        particles.terminal.unsafe_ptr(), particles.depth.unsafe_ptr(),
+        scratch.indices.unsafe_ptr(), p_total, cfg.num_particles, cfg.state_dim,
+        grid_dim=blocks, block_dim=TPB)
+
+    ctx.enqueue_function[copy_back_kernel, copy_back_kernel](
+        particles.state.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        particles.prior_logits.unsafe_ptr(), particles.value.unsafe_ptr(),
+        particles.terminal.unsafe_ptr(), particles.depth.unsafe_ptr(),
+        particles.resample_td_weights.unsafe_ptr(),
+        scratch.state.unsafe_ptr(), scratch.root_actions.unsafe_ptr(),
+        scratch.prior_logits.unsafe_ptr(), scratch.value.unsafe_ptr(),
+        scratch.terminal.unsafe_ptr(), scratch.depth.unsafe_ptr(),
+        p_total, cfg.state_dim, grid_dim=blocks, block_dim=TPB)
+
+
+# ---------------------------------------------------------------------------
+# Metricas y lectura del resultado
+# ---------------------------------------------------------------------------
+
+def ess_entropy_kernel[TPB_P: Int](ess_out: GlobalF32, entropy_out: GlobalF32,
+                                   logits: GlobalF32, num_particles: Int):
+    """ESS y entropia de los pesos normalizados, por env.
+
+    ESS (effective sample size) = 1 / sum(w_i^2) con w normalizado. Dice cuantas
+    particulas estan aportando de verdad:
+        pesos uniformes  -> ESS = N  (todas cuentan igual)
+        un peso se lo lleva todo -> ESS = 1  (la busqueda ha colapsado)
+    Es la senal de cuando toca resamplear, y en la demo se ve caer entre
+    resamplings y recuperarse justo despues.
+
+    Un bloque por env, un hilo por particula.
+    """
+    shared = stack_allocation[TPB_P, Scalar[dtype],
+                              address_space = AddressSpace.SHARED]()
+    tid = Int(thread_idx.x)
+    env = Int(block_idx.x)
+    base = env * num_particles
+
+    active = tid < num_particles
+
+    # softmax estable de los logits
+    shared[tid] = logits[base + tid] if active else NEG_INF
+    barrier()
+    row_max = block_reduce_max[TPB_P](shared, tid)
+
+    e = exp(logits[base + tid] - row_max) if active else Scalar[dtype](0)
+    shared[tid] = e
+    barrier()
+    total = block_reduce_sum[TPB_P](shared, tid)
+
+    w = e / total if active else Scalar[dtype](0)
+
+    # sum(w^2) -> ESS
+    shared[tid] = w * w
+    barrier()
+    sum_sq = block_reduce_sum[TPB_P](shared, tid)
+
+    # -sum(w log w) -> entropia. El TINY evita log(0) en las particulas que se
+    # quedaron sin masa; Stoix usa el mismo truco con finfo.tiny.
+    TINY = Scalar[dtype](1e-30)
+    shared[tid] = -w * log(w + TINY) if active else Scalar[dtype](0)
+    barrier()
+    ent = block_reduce_sum[TPB_P](shared, tid)
+
+    if tid == 0:
+        ess_out[env] = Scalar[dtype](1) / sum_sq
+        entropy_out[env] = ent
+
+
+def select_action_kernel(action_out: GlobalI32, root_actions: GlobalI32,
+                         chosen: GlobalI32, num_envs: Int, num_particles: Int):
+    """La accion final del env es la accion RAIZ de la particula sorteada."""
+    env = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if env < num_envs:
+        action_out[env] = root_actions[env * num_particles + Int(chosen[env])]
+
+
+def copy_f32_kernel(dst: GlobalF32, src: GlobalF32, n: Int):
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i < n:
+        dst[i] = src[i]
+
+
+def mean_over_particles_kernel(out_mean: GlobalF32, values: GlobalF32,
+                               num_envs: Int, num_particles: Int):
+    """Media por env. num_particles es 16, asi que un hilo por env va sobrado."""
+    env = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if env >= num_envs:
+        return
+    total = Scalar[dtype](0)
+    for n in range(num_particles):
+        total += values[env * num_particles + n]
+    out_mean[env] = total / Scalar[dtype](num_particles)
+
+
+def compute_ess_entropy(ctx: DeviceContext, particles: Particles,
+                        scratch: SearchScratch, output: SPOOutput,
+                        cfg: SPOConfig, depth: Int) raises:
+    """Mide ESS y entropia con los pesos ACTUALES y los guarda en la fila `depth`."""
+    p_total = cfg.num_search_particles()
+    ctx.enqueue_function[resample_logits_kernel, resample_logits_kernel](
+        scratch.resample_logits.unsafe_ptr(),
+        particles.resample_td_weights.unsafe_ptr(),
+        p_total, cfg.temperature,
+        grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
+
+    row = depth * cfg.num_envs
+    ctx.enqueue_function[ess_entropy_kernel[TPB], ess_entropy_kernel[TPB]](
+        output.ess.unsafe_ptr() + row, output.entropy.unsafe_ptr() + row,
+        scratch.resample_logits.unsafe_ptr(), cfg.num_particles,
+        grid_dim=cfg.num_envs, block_dim=TPB)
+
+
+def readout_weighted(ctx: DeviceContext, particles: Particles,
+                     scratch: SearchScratch, output: SPOOutput, cfg: SPOConfig,
+                     uniforms: DeviceBuffer[dtype]) raises:
+    """Lee el resultado de la busqueda. Espeja `readout_weighted` de Stoix (ff_spo.py:465).
+
+    La politica mejorada q queda representada por dos cosas juntas:
+      - `sampled_actions`: las N acciones raiz que sobrevivieron (con repeticiones
+        si el resampling copio alguna varias veces),
+      - `sampled_action_weights`: softmax(peso/temperatura) de cada una.
+    Su histograma ponderado ES q. La accion que se ejecuta se sortea de ahi.
+
+    `uniforms` solo necesita num_envs valores (uno por env), pero se pasa un
+    buffer de P por comodidad: se leen los primeros num_envs.
+    """
+    p_total = cfg.num_search_particles()
+    blocks_p = (p_total + TPB - 1) // TPB
+
+    # logits = peso / temperatura, los mismos que usa el resampling
+    ctx.enqueue_function[resample_logits_kernel, resample_logits_kernel](
+        scratch.resample_logits.unsafe_ptr(),
+        particles.resample_td_weights.unsafe_ptr(),
+        p_total, cfg.temperature, grid_dim=blocks_p, block_dim=TPB)
+
+    # pesos normalizados de cada accion raiz
+    ctx.enqueue_function[softmax_rows[TPB], softmax_rows[TPB]](
+        output.sampled_action_weights.unsafe_ptr(),
+        scratch.resample_logits.unsafe_ptr(), cfg.num_particles,
+        grid_dim=cfg.num_envs, block_dim=TPB)
+
+    # una particula por env, sorteada con esos pesos
+    ctx.enqueue_function[categorical_from_logits[TPB], categorical_from_logits[TPB]](
+        output.action.unsafe_ptr(), scratch.resample_logits.unsafe_ptr(),
+        uniforms.unsafe_ptr(), cfg.num_particles,
+        grid_dim=cfg.num_envs, block_dim=TPB)
+
+    # ...y su accion raiz es la que se ejecuta. Se reusa output.action como
+    # destino: entra el indice de particula y sale la accion.
+    ctx.enqueue_function[select_action_kernel, select_action_kernel](
+        output.action.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        output.action.unsafe_ptr(), cfg.num_envs, cfg.num_particles,
+        grid_dim=(cfg.num_envs + TPB - 1) // TPB, block_dim=TPB)
+
+    ctx.enqueue_function[copy_actions_kernel, copy_actions_kernel](
+        output.sampled_actions.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        p_total, grid_dim=blocks_p, block_dim=TPB)
+
+    ctx.enqueue_function[copy_f32_kernel, copy_f32_kernel](
+        output.sampled_advantages.unsafe_ptr(), particles.gae.unsafe_ptr(),
+        p_total, grid_dim=blocks_p, block_dim=TPB)
+
+    # El valor de la raiz, NO el del final del rollout: es lo que Stoix mete en
+    # SPOOutput.value (jnp.mean(root.particle_values, axis=-1)).
+    ctx.enqueue_function[mean_over_particles_kernel, mean_over_particles_kernel](
+        output.value.unsafe_ptr(), output.root_values.unsafe_ptr(),
+        cfg.num_envs, cfg.num_particles,
+        grid_dim=(cfg.num_envs + TPB - 1) // TPB, block_dim=TPB)
+
+
+def snapshot_root_values(ctx: DeviceContext, particles: Particles,
+                         output: SPOOutput, cfg: SPOConfig) raises:
+    """Guarda V(s_raiz) justo despues de sembrar, antes de que el rollout lo pise."""
+    p_total = cfg.num_search_particles()
+    ctx.enqueue_function[copy_f32_kernel, copy_f32_kernel](
+        output.root_values.unsafe_ptr(), particles.value.unsafe_ptr(), p_total,
+        grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
+
+
+def smc_depth_close(ctx: DeviceContext, particles: Particles,
+                    outputs: StepOutputs, scratch: SearchScratch,
+                    output: SPOOutput, cfg: SPOConfig, depth: Int,
+                    resample_uniforms: DeviceBuffer[dtype]) raises:
+    """Todo lo que va DESPUES del paso del modelo en una profundidad.
+
+    Es la parte generica de `one_step_rollout` de Stoix (ff_spo.py:568): sirve
+    igual para el juguete, CartPole o el MLP. Un modelo nuevo solo tiene que
+    llamar a su recurrent_fn y luego a esto.
+
+    El orden importa: ESS se mide con los pesos ya actualizados pero ANTES de
+    resamplear, que es donde se ve el colapso que justifica el resampling.
+    """
+    update_particles(ctx, particles, outputs, cfg)
+    compute_ess_entropy(ctx, particles, scratch, output, cfg, depth)
+
+    # Modo 'period' de Stoix: resamplea cuando (depth+1) es multiplo del periodo.
+    if (depth + 1) % cfg.resample_period == 0:
+        resample(ctx, particles, scratch, cfg, resample_uniforms)

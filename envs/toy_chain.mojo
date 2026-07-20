@@ -32,8 +32,12 @@ from std.gpu import block_dim, block_idx, thread_idx
 from std.gpu.host import DeviceContext, DeviceBuffer
 
 from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32
-from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
-from systems.spo.smc_search import sample_next_actions
+from ops.rng import fill_uniform
+from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
+                                   SearchScratch, SPOOutput)
+from systems.spo.smc_search import (sample_next_actions, root_fn,
+                                    snapshot_root_values, smc_depth_close,
+                                    readout_weighted)
 
 # Las dos acciones. El orden importa para los tests: BAD es la 0.
 comptime ACTION_BAD = 0
@@ -204,3 +208,73 @@ def toy_recurrent_fn(ctx: DeviceContext, particles: Particles,
         p_total, grid_dim=blocks, block_dim=TPB_TOY)
 
     sample_next_actions(ctx, outputs, cfg, uniforms)
+
+
+def toy_search(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
+               scratch: SearchScratch, output: SPOOutput, cfg: SPOConfig,
+               toy_cfg: ToyChainConfig, root_state: DeviceBuffer[dtype],
+               seed: UInt32) raises:
+    """Una busqueda SMC completa sobre el juguete: de la raiz a la accion.
+
+    Es el unico sitio con codigo especifico del modelo en toda la busqueda, y son
+    dos lineas dentro del bucle: `toy_recurrent_fn` (el modelo) y
+    `smc_depth_close` (generico). Cambiar a CartPole sera cambiar la primera.
+
+    Equivale a `SPO.search` + `SPO.rollout` de Stoix juntas.
+    """
+    p_total = cfg.num_search_particles()
+    blocks_env = (cfg.num_envs + TPB_TOY - 1) // TPB_TOY
+    blocks_p = (p_total + TPB_TOY - 1) // TPB_TOY
+
+    # --- el modelo evaluado en la raiz (un estado por env) ---
+    root_logits = ctx.enqueue_create_buffer[dtype](cfg.num_envs * NUM_ACTIONS)
+    root_logits.enqueue_fill(0)
+    root_value = ctx.enqueue_create_buffer[dtype](cfg.num_envs)
+    root_value.enqueue_fill(0)
+
+    ctx.enqueue_function[toy_policy_logits_kernel, toy_policy_logits_kernel](
+        root_logits.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
+        grid_dim=blocks_env, block_dim=TPB_TOY)
+    ctx.enqueue_function[toy_value_kernel, toy_value_kernel](
+        root_value.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
+        toy_cfg.chain_length, toy_cfg.value_scale,
+        grid_dim=blocks_env, block_dim=TPB_TOY)
+
+    # Dos buffers de uniformes que se rellenan de nuevo en cada profundidad. Se
+    # pueden reutilizar sin miedo porque el stream es unico y ejecuta en orden:
+    # el segundo relleno no puede adelantar al kernel que leyo el primero.
+    u_action = ctx.enqueue_create_buffer[dtype](p_total)
+    u_action.enqueue_fill(0)
+    u_resample = ctx.enqueue_create_buffer[dtype](p_total)
+    u_resample.enqueue_fill(0)
+
+    # Streams separados por uso, para que el muestreo de acciones y el del
+    # resampling no compartan secuencia.
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        u_action.unsafe_ptr(), seed, UInt32(0), p_total,
+        grid_dim=blocks_p, block_dim=TPB_TOY)
+
+    root_fn(ctx, particles, outputs, cfg, root_state, root_logits, root_value,
+            u_action)
+    snapshot_root_values(ctx, particles, output, cfg)
+
+    # --- el bucle de profundidad ---
+    # Es un bucle en HOST que solo encola kernels: no hay ni un synchronize
+    # dentro (Puzzle 14). El host no necesita leer nada hasta el final.
+    for d in range(cfg.search_depth):
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            u_action.unsafe_ptr(), seed, UInt32(100 + d), p_total,
+            grid_dim=blocks_p, block_dim=TPB_TOY)
+        toy_recurrent_fn(ctx, particles, outputs, cfg, toy_cfg, u_action)
+
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            u_resample.unsafe_ptr(), seed, UInt32(900 + d), p_total,
+            grid_dim=blocks_p, block_dim=TPB_TOY)
+        smc_depth_close(ctx, particles, outputs, scratch, output, cfg, d,
+                        u_resample)
+
+    # --- la accion final ---
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        u_action.unsafe_ptr(), seed, UInt32(7777), p_total,
+        grid_dim=blocks_p, block_dim=TPB_TOY)
+    readout_weighted(ctx, particles, scratch, output, cfg, u_action)

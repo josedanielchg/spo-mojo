@@ -188,3 +188,99 @@ struct StepOutputs(Movable):
         self.next_prior_logits.enqueue_fill(0)
         self.action_logits = ctx.enqueue_create_buffer[dtype](p * config.num_actions)
         self.action_logits.enqueue_fill(0)
+
+
+struct SearchScratch(Movable):
+    """Buffers auxiliares del resampling.
+
+    El resampling es un gather: la particula i pasa a ser una copia de la
+    particula idx[i]. Hacerlo in-place seria una carrera de libro (un hilo puede
+    escribir su destino antes de que otro haya leido ese mismo hueco), asi que
+    hace falta un buffer intermedio por campo.
+
+    Solo estan los SEIS campos que se copian. `resample_td_weights` no hace falta
+    porque se resetea a cero, y `gae` tampoco porque se preserva SIN gatherear
+    (ver la nota en resample()).
+    """
+
+    var state: DeviceBuffer[dtype]
+    var root_actions: DeviceBuffer[idx_dtype]
+    var prior_logits: DeviceBuffer[dtype]
+    var value: DeviceBuffer[dtype]
+    var terminal: DeviceBuffer[idx_dtype]
+    var depth: DeviceBuffer[idx_dtype]
+
+    var indices: DeviceBuffer[idx_dtype]
+    """[P] a que particula copia cada hueco."""
+
+    var resample_logits: DeviceBuffer[dtype]
+    """[P] los pesos SMC divididos por la temperatura."""
+
+    def __init__(out self, ctx: DeviceContext, config: SPOConfig) raises:
+        p = config.num_search_particles()
+        self.state = ctx.enqueue_create_buffer[dtype](p * config.state_dim)
+        self.state.enqueue_fill(0)
+        self.root_actions = ctx.enqueue_create_buffer[idx_dtype](p)
+        self.root_actions.enqueue_fill(0)
+        self.prior_logits = ctx.enqueue_create_buffer[dtype](p)
+        self.prior_logits.enqueue_fill(0)
+        self.value = ctx.enqueue_create_buffer[dtype](p)
+        self.value.enqueue_fill(0)
+        self.terminal = ctx.enqueue_create_buffer[idx_dtype](p)
+        self.terminal.enqueue_fill(0)
+        self.depth = ctx.enqueue_create_buffer[idx_dtype](p)
+        self.depth.enqueue_fill(0)
+        self.indices = ctx.enqueue_create_buffer[idx_dtype](p)
+        self.indices.enqueue_fill(0)
+        self.resample_logits = ctx.enqueue_create_buffer[dtype](p)
+        self.resample_logits.enqueue_fill(0)
+
+
+struct SPOOutput(Movable):
+    """El resultado publico de una busqueda. Espeja SPOOutput de spo_types.py."""
+
+    var action: DeviceBuffer[idx_dtype]
+    """[num_envs] la accion que se ejecuta de verdad en el entorno."""
+
+    var sampled_actions: DeviceBuffer[idx_dtype]
+    """[P] las N acciones raiz que sobrevivieron. Su histograma ES la politica
+    mejorada q, que es lo que el M-step intenta imitar."""
+
+    var sampled_action_weights: DeviceBuffer[dtype]
+    """[P] el peso de cada una: softmax(w/temperatura) por env."""
+
+    var value: DeviceBuffer[dtype]
+    """[num_envs] la media de V(s_raiz) sobre las particulas."""
+
+    var sampled_advantages: DeviceBuffer[dtype]
+    """[P] la gae de cada particula. Alimenta el loss de la temperatura."""
+
+    var root_values: DeviceBuffer[dtype]
+    """[P] copia de V(s_raiz) por particula, guardada antes de que el rollout
+    pise particles.value."""
+
+    var ess: DeviceBuffer[dtype]
+    """[search_depth, num_envs] tamano de muestra efectivo en cada profundidad."""
+
+    var entropy: DeviceBuffer[dtype]
+    """[search_depth, num_envs] entropia de los pesos en cada profundidad."""
+
+    def __init__(out self, ctx: DeviceContext, config: SPOConfig) raises:
+        p = config.num_search_particles()
+        self.action = ctx.enqueue_create_buffer[idx_dtype](config.num_envs)
+        self.action.enqueue_fill(0)
+        self.sampled_actions = ctx.enqueue_create_buffer[idx_dtype](p)
+        self.sampled_actions.enqueue_fill(0)
+        self.sampled_action_weights = ctx.enqueue_create_buffer[dtype](p)
+        self.sampled_action_weights.enqueue_fill(0)
+        self.value = ctx.enqueue_create_buffer[dtype](config.num_envs)
+        self.value.enqueue_fill(0)
+        self.sampled_advantages = ctx.enqueue_create_buffer[dtype](p)
+        self.sampled_advantages.enqueue_fill(0)
+        self.root_values = ctx.enqueue_create_buffer[dtype](p)
+        self.root_values.enqueue_fill(0)
+        metrics = config.search_depth * config.num_envs
+        self.ess = ctx.enqueue_create_buffer[dtype](metrics)
+        self.ess.enqueue_fill(0)
+        self.entropy = ctx.enqueue_create_buffer[dtype](metrics)
+        self.entropy.enqueue_fill(0)
