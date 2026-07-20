@@ -1,0 +1,252 @@
+"""La siembra de la busqueda: root_fn.
+
+Tres niveles de comprobacion, de mas exacto a mas estadistico:
+  1. el broadcast: cada particula se lleva el estado y el valor de SU env,
+  2. con uniformes inyectados, las acciones salen exactas,
+  3. con el RNG de verdad, las frecuencias siguen al prior.
+"""
+
+from std.gpu.host import DeviceContext
+from std.math import abs, log
+
+from ops.common import dtype, idx_dtype
+from ops.rng import fill_uniform
+from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
+from systems.spo.smc_search import root_fn
+from tests.helpers import upload, zeros, download, assert_close, assert_eq_int
+
+comptime TPB = 32
+comptime TOL = Scalar[dtype](1e-6)
+
+
+def make_config(num_envs: Int, num_particles: Int, num_actions: Int,
+                state_dim: Int) -> SPOConfig:
+    """Config pequena y a medida de cada test, no la del paper."""
+    return SPOConfig(
+        num_envs=num_envs, num_particles=num_particles, num_actions=num_actions,
+        state_dim=state_dim, search_depth=4, resample_period=4,
+        temperature=0.5, search_gamma=1.0, search_gae_lambda=1.0)
+
+
+def test_broadcast(ctx: DeviceContext) raises:
+    """Cada particula arranca con el estado y el valor de su env, no del vecino."""
+    num_envs = 3
+    num_particles = 4
+    state_dim = 2
+    cfg = make_config(num_envs, num_particles, 2, state_dim)
+    p_total = cfg.num_search_particles()
+
+    # Estados bien distintos por env para que un cruce se note: env e -> (10e, 10e+1)
+    root_state = List[Scalar[dtype]]()
+    for e in range(num_envs):
+        root_state.append(Scalar[dtype](10 * e))
+        root_state.append(Scalar[dtype](10 * e + 1))
+
+    root_value = List[Scalar[dtype]]()
+    for e in range(num_envs):
+        root_value.append(Scalar[dtype](100 + e))
+
+    root_logits = List[Scalar[dtype]]()
+    for _ in range(num_envs * 2):
+        root_logits.append(0.0)
+
+    us = List[Scalar[dtype]]()
+    for _ in range(p_total):
+        us.append(0.1)
+
+    particles = Particles(ctx, cfg)
+    outputs = StepOutputs(ctx, cfg)
+    root_fn(ctx, particles, outputs, cfg,
+            upload[dtype](ctx, root_state), upload[dtype](ctx, root_logits),
+            upload[dtype](ctx, root_value), upload[dtype](ctx, us))
+    ctx.synchronize()
+
+    got_state = download[dtype](particles.state, p_total * state_dim)
+    got_value = download[dtype](particles.value, p_total)
+
+    for p in range(p_total):
+        e = p // num_particles
+        assert_close(got_state[p * state_dim + 0], Scalar[dtype](10 * e), TOL,
+                     String("estado[0] de la particula ", p))
+        assert_close(got_state[p * state_dim + 1], Scalar[dtype](10 * e + 1), TOL,
+                     String("estado[1] de la particula ", p))
+        assert_close(got_value[p], Scalar[dtype](100 + e), TOL,
+                     String("valor de la particula ", p))
+    print("PASS broadcast de estado y valor a las particulas de cada env")
+
+
+def test_exact_actions_with_injected_uniforms(ctx: DeviceContext) raises:
+    """Con logits fijos y uniformes elegidos a mano, las acciones son exactas.
+
+    Prior [0.25, 0.75] -> CDF [0.25, 1.0]. Un uniforme < 0.25 da la accion 0 y
+    cualquiera por encima da la 1.
+    """
+    num_envs = 1
+    num_particles = 6
+    cfg = make_config(num_envs, num_particles, 2, 1)
+    p_total = cfg.num_search_particles()
+
+    root_logits = List[Scalar[dtype]]()
+    root_logits.append(log(Scalar[dtype](0.25)))
+    root_logits.append(log(Scalar[dtype](0.75)))
+
+    us = List[Scalar[dtype]]()
+    want = List[Int]()
+    us.append(0.0);   want.append(0)   # borde inferior
+    us.append(0.20);  want.append(0)   # dentro de [0, 0.25)
+    us.append(0.249); want.append(0)   # pegado al corte, por debajo
+    us.append(0.26);  want.append(1)   # pasado el corte
+    us.append(0.90);  want.append(1)
+    us.append(0.999); want.append(1)   # borde superior
+
+    root_state = List[Scalar[dtype]]()
+    root_state.append(0.0)
+    root_value = List[Scalar[dtype]]()
+    root_value.append(0.0)
+
+    particles = Particles(ctx, cfg)
+    outputs = StepOutputs(ctx, cfg)
+    root_fn(ctx, particles, outputs, cfg,
+            upload[dtype](ctx, root_state), upload[dtype](ctx, root_logits),
+            upload[dtype](ctx, root_value), upload[dtype](ctx, us))
+    ctx.synchronize()
+
+    got = download[idx_dtype](particles.root_actions, p_total)
+    for p in range(p_total):
+        assert_eq_int(Int(got[p]), want[p], String("u=", us[p], " -> accion"))
+    print("PASS acciones exactas con uniformes inyectados")
+
+
+def test_log_probs_match_prior(ctx: DeviceContext) raises:
+    """El campo prior_logits guarda log pi(a|s) de la accion de cada particula."""
+    num_envs = 1
+    num_particles = 6
+    cfg = make_config(num_envs, num_particles, 2, 1)
+    p_total = cfg.num_search_particles()
+
+    p0 = Scalar[dtype](0.25)
+    p1 = Scalar[dtype](0.75)
+    root_logits = List[Scalar[dtype]]()
+    root_logits.append(log(p0))
+    root_logits.append(log(p1))
+
+    us = List[Scalar[dtype]]()
+    us.append(0.1); us.append(0.2); us.append(0.24)
+    us.append(0.3); us.append(0.5); us.append(0.9)
+
+    root_state = List[Scalar[dtype]]()
+    root_state.append(0.0)
+    root_value = List[Scalar[dtype]]()
+    root_value.append(0.0)
+
+    particles = Particles(ctx, cfg)
+    outputs = StepOutputs(ctx, cfg)
+    root_fn(ctx, particles, outputs, cfg,
+            upload[dtype](ctx, root_state), upload[dtype](ctx, root_logits),
+            upload[dtype](ctx, root_value), upload[dtype](ctx, us))
+    ctx.synchronize()
+
+    actions = download[idx_dtype](particles.root_actions, p_total)
+    logps = download[dtype](particles.prior_logits, p_total)
+    for p in range(p_total):
+        want = log(p0) if Int(actions[p]) == 0 else log(p1)
+        assert_close(logps[p], want, Scalar[dtype](1e-5),
+                     String("log_prob de la particula ", p))
+    print("PASS prior_logits = log pi(a|s) de la accion elegida")
+
+
+def test_action_frequencies_follow_prior(ctx: DeviceContext) raises:
+    """Con el RNG real, la fraccion de particulas por accion sigue al prior.
+
+    Muchas particulas en un solo env: asi la muestra es grande y el test mide de
+    verdad la distribucion, no el ruido.
+    """
+    num_envs = 1
+    num_particles = 20000
+    cfg = make_config(num_envs, num_particles, 2, 1)
+    p_total = cfg.num_search_particles()
+
+    want_p1 = Scalar[dtype](0.75)
+    root_logits = List[Scalar[dtype]]()
+    root_logits.append(log(Scalar[dtype](0.25)))
+    root_logits.append(log(want_p1))
+
+    root_state = List[Scalar[dtype]]()
+    root_state.append(0.0)
+    root_value = List[Scalar[dtype]]()
+    root_value.append(0.0)
+
+    uniforms = zeros[dtype](ctx, p_total)
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        uniforms.unsafe_ptr(), UInt32(99), UInt32(0), p_total,
+        grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
+
+    particles = Particles(ctx, cfg)
+    outputs = StepOutputs(ctx, cfg)
+    root_fn(ctx, particles, outputs, cfg,
+            upload[dtype](ctx, root_state), upload[dtype](ctx, root_logits),
+            upload[dtype](ctx, root_value), uniforms)
+    ctx.synchronize()
+
+    actions = download[idx_dtype](particles.root_actions, p_total)
+    ones = 0
+    for p in range(p_total):
+        a = Int(actions[p])
+        if a < 0 or a > 1:
+            raise Error("accion invalida en ", p, ": ", a)
+        if a == 1:
+            ones += 1
+
+    frac = Scalar[dtype](ones) / Scalar[dtype](p_total)
+    if abs(frac - want_p1) > 0.01:
+        raise Error("fraccion de la accion 1: ", frac, ", esperada ", want_p1)
+    print("PASS frecuencias de accion ~ prior (accion 1 en el", frac, "de las particulas)")
+
+
+def test_accumulators_start_at_zero(ctx: DeviceContext) raises:
+    """La siembra no toca los acumuladores: peso, gae, terminal y depth a cero.
+
+    Importa porque el peso SMC se acumula en el sitio: si root_fn dejara basura,
+    la primera profundidad ya arrancaria sesgada.
+    """
+    cfg = make_config(2, 8, 2, 1)
+    p_total = cfg.num_search_particles()
+
+    root_state = List[Scalar[dtype]]()
+    root_value = List[Scalar[dtype]]()
+    for _ in range(2):
+        root_state.append(1.0)
+        root_value.append(5.0)
+    root_logits = List[Scalar[dtype]]()
+    for _ in range(2 * 2):
+        root_logits.append(0.0)
+    us = List[Scalar[dtype]]()
+    for i in range(p_total):
+        us.append(Scalar[dtype](i) / Scalar[dtype](p_total))
+
+    particles = Particles(ctx, cfg)
+    outputs = StepOutputs(ctx, cfg)
+    root_fn(ctx, particles, outputs, cfg,
+            upload[dtype](ctx, root_state), upload[dtype](ctx, root_logits),
+            upload[dtype](ctx, root_value), upload[dtype](ctx, us))
+    ctx.synchronize()
+
+    weights = download[dtype](particles.resample_td_weights, p_total)
+    gae = download[dtype](particles.gae, p_total)
+    terminal = download[idx_dtype](particles.terminal, p_total)
+    depth = download[idx_dtype](particles.depth, p_total)
+    for p in range(p_total):
+        assert_close(weights[p], 0.0, TOL, String("peso inicial ", p))
+        assert_close(gae[p], 0.0, TOL, String("gae inicial ", p))
+        assert_eq_int(Int(terminal[p]), 0, String("terminal inicial ", p))
+        assert_eq_int(Int(depth[p]), 0, String("depth inicial ", p))
+    print("PASS los acumuladores arrancan a cero")
+
+
+def main() raises:
+    with DeviceContext() as ctx:
+        test_broadcast(ctx)
+        test_exact_actions_with_injected_uniforms(ctx)
+        test_log_probs_match_prior(ctx)
+        test_action_frequencies_follow_prior(ctx)
+        test_accumulators_start_at_zero(ctx)
