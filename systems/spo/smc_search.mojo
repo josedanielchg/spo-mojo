@@ -118,6 +118,15 @@ def log_prob_of_action_kernel(log_prob_out: GlobalF32, logits: GlobalF32,
     log_prob_out[p] = logits[base + chosen] - (biggest + log(total))
 
 
+def copy_actions_kernel(dst: GlobalI32, src: GlobalI32, n: Int):
+    """Copia plana de acciones. Hace falta porque la accion vive en dos sitios:
+    `root_actions` la guarda para siempre (es la que se acabara ejecutando en el
+    entorno real) y `next_action` es el carry que se pisa en cada profundidad."""
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i < n:
+        dst[i] = src[i]
+
+
 def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
             cfg: SPOConfig, root_state: DeviceBuffer[dtype],
             root_logits: DeviceBuffer[dtype], root_value: DeviceBuffer[dtype],
@@ -171,5 +180,41 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
         particles.root_actions.unsafe_ptr(), p_total, cfg.num_actions,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
+    # 5. La accion de la raiz es tambien la que se ejecuta en la profundidad 0.
+    #    Stoix arranca su scan con carry = (particles, particles.root_actions);
+    #    aqui el carry es outputs.next_action, asi que hay que sembrarlo.
+    ctx.enqueue_function[copy_actions_kernel, copy_actions_kernel](
+        outputs.next_action.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        p_total, grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
+
     # Nada de ctx.synchronize() aqui: los cuatro kernels van al mismo stream y se
     # ejecutan en orden (leccion del Puzzle 14). Solo sincroniza quien lea.
+
+
+def sample_next_actions(ctx: DeviceContext, outputs: StepOutputs, cfg: SPOConfig,
+                        uniforms: DeviceBuffer[dtype]) raises:
+    """La mitad generica del recurrent_fn: elegir la accion de la profundidad siguiente.
+
+    En Stoix el `recurrent_fn` hace cuatro cosas: avanzar el entorno, evaluar
+    actor y critico en el estado nuevo, muestrear la siguiente accion, y plegar
+    gamma/truncacion. Las que dependen del modelo (avanzar, evaluar, plegar) van
+    en el kernel del modelo; estas dos, que son iguales para todos, viven aqui.
+
+    Entra `outputs.action_logits` [P, num_actions] (ya escrito por el
+    policy_logits_kernel del modelo sobre el estado NUEVO) y salen
+    `next_action` y `next_prior_logits`.
+
+    `uniforms` tiene que traer P valores frescos: uno por particula. Reusar los
+    de la profundidad anterior correlacionaria las trayectorias.
+    """
+    p_total = cfg.num_search_particles()
+
+    ctx.enqueue_function[categorical_from_logits[TPB], categorical_from_logits[TPB]](
+        outputs.next_action.unsafe_ptr(), outputs.action_logits.unsafe_ptr(),
+        uniforms.unsafe_ptr(), cfg.num_actions,
+        grid_dim=p_total, block_dim=TPB)
+
+    ctx.enqueue_function[log_prob_of_action_kernel, log_prob_of_action_kernel](
+        outputs.next_prior_logits.unsafe_ptr(), outputs.action_logits.unsafe_ptr(),
+        outputs.next_action.unsafe_ptr(), p_total, cfg.num_actions,
+        grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)

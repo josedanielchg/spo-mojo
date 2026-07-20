@@ -29,8 +29,11 @@ se obtiene V == 0, que es el caso "sin critico" que usara la demo de CartPole.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
+from std.gpu.host import DeviceContext, DeviceBuffer
 
 from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32
+from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
+from systems.spo.smc_search import sample_next_actions
 
 # Las dos acciones. El orden importa para los tests: BAD es la 0.
 comptime ACTION_BAD = 0
@@ -39,6 +42,8 @@ comptime NUM_ACTIONS = 2
 
 # El pasillo es unidimensional: el estado es solo la posicion.
 comptime STATE_DIM = 1
+
+comptime TPB_TOY = 32
 
 
 # Los kernels reciben los campos sueltos, no el struct: un struct solo se puede
@@ -159,3 +164,43 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
     reward_out[i] = reward
     discount_out[i] = rec_discount
     next_value_out[i] = bootstrap_value
+
+
+def toy_recurrent_fn(ctx: DeviceContext, particles: Particles,
+                     outputs: StepOutputs, cfg: SPOConfig,
+                     toy_cfg: ToyChainConfig,
+                     uniforms: DeviceBuffer[dtype]) raises:
+    """El recurrent_fn del juguete: avanza las P particulas una profundidad.
+
+    Es el equivalente de `make_recurrent_fn(environment_step, ...)` de Stoix
+    (ff_spo.py:234), que tambien se construye por modelo porque cierra sobre el
+    `environment_step` concreto. Las tres llamadas son:
+
+        1. dinamica + plegado de gamma/truncacion   (kernel de ESTE modelo)
+        2. logits del prior en el estado NUEVO      (kernel de ESTE modelo)
+        3. muestrear la accion siguiente            (generico, compartido)
+
+    La accion que se ejecuta es `outputs.next_action` de la profundidad anterior;
+    en la profundidad 0 la pone root_fn en `particles.root_actions`, asi que el
+    llamador decide cual pasar en `action_in`.
+
+    Importante: NO toca `particles.value`. El error TD de la actualizacion de
+    pesos necesita el V(s) viejo, y el nuevo se queda en `outputs.next_value`
+    hasta que update_particles lo mueva.
+    """
+    p_total = cfg.num_search_particles()
+    blocks = (p_total + TPB_TOY - 1) // TPB_TOY
+
+    ctx.enqueue_function[toy_recurrent_kernel, toy_recurrent_kernel](
+        particles.state.unsafe_ptr(), outputs.next_action.unsafe_ptr(),
+        outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
+        outputs.next_value.unsafe_ptr(), p_total,
+        toy_cfg.chain_length, toy_cfg.horizon, toy_cfg.value_scale,
+        cfg.search_gamma,
+        grid_dim=blocks, block_dim=TPB_TOY)
+
+    ctx.enqueue_function[toy_policy_logits_kernel, toy_policy_logits_kernel](
+        outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),
+        p_total, grid_dim=blocks, block_dim=TPB_TOY)
+
+    sample_next_actions(ctx, outputs, cfg, uniforms)

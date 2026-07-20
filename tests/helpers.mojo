@@ -38,6 +38,17 @@ def filled[dt: DType](ctx: DeviceContext, n: Int,
     return buf^
 
 
+def write_into[dt: DType](buf: DeviceBuffer[dt],
+                          values: List[Scalar[dt]]) raises:
+    """Escribe en un buffer que YA existe, en vez de crear uno nuevo como upload().
+
+    Hace falta cuando el buffer es campo de un struct (Particles, StepOutputs) y
+    lo que se quiere es dictarle un estado de partida al test."""
+    with buf.map_to_host() as h:
+        for i in range(len(values)):
+            h[i] = values[i]
+
+
 def download[dt: DType](buf: DeviceBuffer[dt], n: Int) raises -> List[Scalar[dt]]:
     """Copia n elementos del device al host."""
     out = List[Scalar[dt]]()
