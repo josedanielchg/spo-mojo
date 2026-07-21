@@ -24,7 +24,7 @@ from envs.toy_chain import (default_toy_chain, ToyChain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
 from systems.spo.particles import SearchWorkspace
 from systems.spo.spo_types import SPOConfig
-from systems.spo.smc_search import search
+from systems.spo.search import search
 from tests.helpers import upload, download
 
 comptime SEED = UInt32(20260719)

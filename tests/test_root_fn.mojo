@@ -13,7 +13,7 @@ from ops.common import dtype, idx_dtype
 from ops.rng import fill_uniform
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.spo_types import SPOConfig
-from systems.spo.smc_search import root_fn
+from systems.spo.root import root_fn
 from tests.helpers import upload, zeros, download, assert_close, assert_eq_int
 
 comptime TPB = 32
@@ -161,7 +161,7 @@ def test_action_frequencies_follow_prior(ctx: DeviceContext) raises:
 
     La muestra grande se consigue con MUCHOS ENVS, no con muchas particulas por
     env: las particulas de un env tienen que caber en un bloque (ver
-    TPB_PARTICLES en smc_search.mojo). 1250 envs x 16 particulas = 20000 muestras,
+    TPB_PARTICLES en launch.mojo). 1250 envs x 16 particulas = 20000 muestras,
     que es lo mismo pero respetando el limite real de la busqueda.
     """
     num_envs = 1250

@@ -13,7 +13,7 @@ from std.gpu.host import DeviceContext
 from ops.common import dtype, idx_dtype
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.spo_types import SPOConfig
-from systems.spo.smc_search import update_particles
+from systems.spo.weighting import update_particles
 from tests.helpers import download, write_into, assert_close, assert_eq_int
 
 comptime TOL = Scalar[dtype](1e-6)

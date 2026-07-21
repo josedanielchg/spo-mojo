@@ -15,7 +15,7 @@ from envs.toy_chain import (toy_value, default_toy_chain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.spo_types import SPOConfig
-from systems.spo.smc_search import sample_next_actions
+from systems.spo.root import sample_next_actions
 from tests.helpers import upload, download, write_into, assert_close, assert_eq_int
 
 comptime TOL = Scalar[dtype](1e-6)

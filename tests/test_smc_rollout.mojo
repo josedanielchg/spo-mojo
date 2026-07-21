@@ -14,7 +14,9 @@ from envs.toy_chain import (default_toy_chain, ToyChain,
 from systems.spo.particles import (Particles, StepOutputs, SearchScratch,
                                    SPOOutput, SearchWorkspace)
 from systems.spo.spo_types import SPOConfig
-from systems.spo.smc_search import resample, compute_ess_entropy, search
+from systems.spo.metrics import compute_ess_entropy
+from systems.spo.resampling import resample
+from systems.spo.search import search
 from tests.helpers import (upload, zeros, download, write_into, assert_close,
                            assert_eq_int)
 
