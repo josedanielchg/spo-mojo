@@ -33,9 +33,6 @@ from ops.common import dtype, idx_dtype, NEG_INF, SharedF32, GlobalF32, GlobalI3
 def block_reduce_sum[TPB: Int](shared: SharedF32, tid: Int) -> Scalar[dtype]:
     stride = TPB // 2
     while stride > 0:
-        # El que escribe (tid < stride) nunca es el que otro esta leyendo
-        # (tid + stride >= stride), asi que basta un barrier por ronda. En el
-        # scan no se puede hacer esto porque ahi los rangos si se solapan.
         if tid < stride:
             shared[tid] += shared[tid + stride]
         barrier()

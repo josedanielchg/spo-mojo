@@ -61,13 +61,7 @@ def check_search_config(cfg: SPOConfig) raises:
 def broadcast_state_kernel(particle_state: GlobalF32, root_state: GlobalF32,
                            n_particles: Int, num_particles: Int, state_dim: Int):
     """Copia el estado del env a cada una de sus N particulas.
-
-    Es el `broadcast_tree` de Stoix (ff_spo.py:215). Alli es una linea porque JAX
-    hace el broadcast solo; aqui hay que copiar de verdad, y esa copia es la
-    esencia de la busqueda: cada particula necesita SU propio mundo para poder
-    diverger del de las demas.
-
-    Un hilo por (particula, componente del estado).
+    Es el `broadcast_tree` de Stoix. Un hilo por (particula, componente del estado).
     """
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     total = n_particles * state_dim
@@ -119,14 +113,16 @@ def log_prob_of_action_kernel(log_prob_out: GlobalF32, logits: GlobalF32,
                               num_actions: Int):
     """log pi(a|s) de la accion que le toco a cada particula.
 
+    Esta función calcula qué probabilidad daba la política a la acción que 
+    eligió cada partícula. No elige la acción. La acción ya fue elegida por 
+    categorical_from_logits.
+    
     log_softmax(logits)[a] = logits[a] - logsumexp(logits), con el max restado
     para no desbordar (misma receta que ops/softmax.mojo, pero aqui el bucle es
     de un solo hilo sobre num_actions, que son 2 o 4; montar un bloque entero
     para eso seria desperdiciarlo).
 
-    En Stoix esto es `pi.log_prob(sampled_actions)`. No hace falta para la
-    busqueda en si (el comentario de Stoix dice "not strictly necessary"), pero
-    se guarda porque es el prior contra el que el M-step mide el KL.
+    En Stoix esto es `pi.log_prob(sampled_actions)`.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n_particles:
@@ -163,14 +159,13 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
             uniforms: DeviceBuffer[dtype]) raises:
     """Siembra la busqueda: N particulas por env, una accion cada una.
 
-    Equivale al `root_fn` de Stoix (ff_spo.py:163) menos el ruido Dirichlet, que
-    en ff_spo.yaml viene con fraccion 0.0, o sea desactivado.
+    Equivale al `root_fn` de Stoix
 
     Entradas (las calcula el modelo sobre los estados RAIZ, uno por env):
         root_state  [num_envs, state_dim]
-        root_logits [num_envs, num_actions]  el prior en la raiz
+        root_logits [num_envs, num_actions]  puntuaciones de la política para cada acción
         root_value  [num_envs]               V(s_raiz)
-        uniforms    [P]                      uno por particula, para muestrear
+        uniforms    [P]                      numeros aleatorios para sortear acciones
 
     Salida: `particles` queda listo para la profundidad 0. Los campos que se
     acumulan (peso, gae, terminal, depth) arrancan a cero, como en
@@ -179,48 +174,50 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
     check_search_config(cfg)
     p_total = cfg.num_search_particles()
 
-    # Cada particula se lleva una copia del mundo y del valor de la raiz.
-    state_elems = p_total * cfg.state_dim
+    # 1. Copiamos el estado raiz de cada entorno a todas sus particulas.
+    # Cada particula necesita su propia copia para poder simular un futuro distinto.
+    state_elems = p_total * cfg.state_dim   # Total de componentes que copiamos.
     ctx.enqueue_function[broadcast_state_kernel, broadcast_state_kernel](
         particles.state.unsafe_ptr(), root_state.unsafe_ptr(),
         p_total, cfg.num_particles, cfg.state_dim,
         grid_dim=(state_elems + TPB - 1) // TPB, block_dim=TPB)
 
+    # 2. Copiamos tambien el valor V(estado raiz). Las particulas de un mismo
+    # entorno empiezan con el mismo valor porque todavia comparten estado.
     ctx.enqueue_function[broadcast_value_kernel, broadcast_value_kernel](
         particles.value.unsafe_ptr(), root_value.unsafe_ptr(),
         p_total, cfg.num_particles,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
-    # Los logits del prior, replicados para poder muestrear por filas.
+    # 3. Copiamos a cada particula las puntuaciones de todas las acciones que
+    # da la politica actual. Son logits, no probabilidades ni politicas antiguas.
     logit_elems = p_total * cfg.num_actions
     ctx.enqueue_function[broadcast_logits_kernel, broadcast_logits_kernel](
         outputs.action_logits.unsafe_ptr(), root_logits.unsafe_ptr(),
         p_total, cfg.num_particles, cfg.num_actions,
         grid_dim=(logit_elems + TPB - 1) // TPB, block_dim=TPB)
 
-    # Una accion por particula. Aqui es donde las N particulas de un mismo
-    # entorno se separan: mismo estado y misma distribucion, pero distinto
-    # uniforme.
+    # 4. Sorteamos la primera accion de cada particula. Todas parten de la misma
+    # distribucion, pero usan numeros aleatorios distintos y pueden elegir
+    # acciones diferentes. El resultado se guarda en root_actions.
     ctx.enqueue_function[categorical_from_logits[TPB], categorical_from_logits[TPB]](
         particles.root_actions.unsafe_ptr(), outputs.action_logits.unsafe_ptr(),
         uniforms.unsafe_ptr(), cfg.num_actions,
         grid_dim=p_total, block_dim=TPB)
 
-    # Y su log-prob bajo el prior.
+    # 5. Para cada particula guardamos log(probabilidad) de la accion que acaba
+    # de elegir segun la politica original. Esto no vuelve a elegir la accion.
     ctx.enqueue_function[log_prob_of_action_kernel, log_prob_of_action_kernel](
         particles.prior_logits.unsafe_ptr(), outputs.action_logits.unsafe_ptr(),
         particles.root_actions.unsafe_ptr(), p_total, cfg.num_actions,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
-    # La accion de la raiz es tambien la que se ejecuta en la profundidad 0.
-    # Stoix arranca su scan con carry = (particles, particles.root_actions), y
-    # aqui ese carry es outputs.next_action, asi que hay que sembrarlo.
+    # 6. Preparamos el primer paso: la accion raiz es la que se ejecuta en la
+    # profundidad 0. root_actions se conserva hasta el final; next_action ira
+    # cambiando para indicar la accion que toca ejecutar en cada profundidad.
     ctx.enqueue_function[copy_actions_kernel, copy_actions_kernel](
         outputs.next_action.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
         p_total, grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
-
-    # Nada de ctx.synchronize() aqui: los cuatro kernels van al mismo stream y se
-    # ejecutan en orden. Ya sincronizara quien necesite leer los resultados.
 
 
 def sample_next_actions(ctx: DeviceContext, outputs: StepOutputs, cfg: SPOConfig,
@@ -463,7 +460,7 @@ def resample(ctx: DeviceContext, particles: Particles, scratch: SearchScratch,
              cfg: SPOConfig, uniforms: DeviceBuffer[dtype]) raises:
     """Resampling completo. Espeja `resample` de Stoix (ff_spo.py:846).
 
-La gae no se toca, y conviene fijarse en eso. Stoix hace el gather de todo
+    La gae no se toca, y conviene fijarse en eso. Stoix hace el gather de todo
     y luego reescribe la gae con la de antes del resampling (ff_spo.py:914), asi
     que en la practica se queda tal cual estaba. El motivo, segun su comentario,
     es que el loss de la temperatura necesita las ventajas de antes de resamplear

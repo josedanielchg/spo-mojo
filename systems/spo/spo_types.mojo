@@ -1,44 +1,14 @@
-"""Tipos de la busqueda SPO. Espeja stoix/systems/spo/spo_types.py.
+"""Tipos de la busqueda SPO. Similar a stoix/systems/spo/spo_types.py.
 
-Mantengo los nombres de Stoix (`Particles`, `resample_td_weights`, `root_actions`...)
+Mantenemos los nombres de Stoix (`Particles`, `resample_td_weights`, `root_actions`...)
 para poder poner los dos ficheros uno al lado del otro y comparar.
 
 Sobre por que la interfaz del modelo no es un trait: en Stoix la clase SPO recibe
 un `recurrent_fn` abstracto y no sabe si detras hay una red neuronal, un entorno o
-un MDP de juguete. Queria lo mismo aqui, pero en Mojo 1.0.0b1 no se puede. Probe
-pasar el modelo como parametro comptime de tipo funcion y el compilador no acepta
-el tipo, ni con `capturing` ni con `escaping` (esta ultima ya ni existe). Pasar un
-kernel entero como parametro tampoco vale, porque `enqueue_function` no consigue
-inferir su `signature_func`. Los intentos estan en docs/api_notes.md.
+un MDP de juguete. Pero en Mojo 1.0.0b1 no se puede. 
 
 Asi que un modelo son tres kernels con firma fija, y el resto del nucleo SMC
 (pesos, GAE, resampling, ESS, readout) es codigo compartido que no se duplica.
-
-El contrato de los tres kernels, con P = num_envs * num_particles:
-
-  1. policy_logits_kernel(logits_out, state, n_particles)
-        logits_out: [P, num_actions]  logits del prior en el estado de cada particula
-        state:      [P, state_dim]
-     Un hilo por particula.
-
-  2. value_kernel(value_out, state, n_particles)
-        value_out:  [P]   V(s) de cada particula
-     Un hilo por particula.
-
-  3. recurrent_kernel(state, action, reward_out, discount_out, next_value_out,
-                      n_particles, ...config del modelo...)
-        Avanza cada particula un paso y devuelve lo que la busqueda necesita:
-          reward_out:     [P]  recompensa del paso
-          discount_out:   [P]  el `rec_discount` de Stoix, ya con la truncacion
-                               plegada: discount * (1 - truncated)
-          next_value_out: [P]  el `bootstrap_value` de Stoix:
-                               discount_real * search_gamma * V(s')
-        `state` se actualiza in-place.
-     Un hilo por particula.
-
-El plegado de gamma y de la truncacion vive dentro del kernel del modelo, igual
-que en el `recurrent_fn` de Stoix, para que el nucleo SMC no tenga que saber nada
-del entorno.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -53,14 +23,30 @@ struct SPOConfig(Copyable, Movable):
     var num_envs: Int
     var num_particles: Int
     var num_actions: Int
+
     var state_dim: Int
+    """Es la cantidad de números necesarios para representar el estado de un entorno."""
+
     var search_depth: Int
+    
     var resample_period: Int
     """Cada cuantos pasos se hace resampling (modo 'period' de Stoix)."""
+    
     var temperature: Scalar[dtype]
-    """Temperatura fija. En la fase 8 pasa a ser el softplus del dual aprendido."""
+    """Temperatura fija. Luego la haremos dinamica de acuerdo a lo aprendido por la politica."""
+
     var search_gamma: Scalar[dtype]
-    var search_gae_lambda: Scalar[dtype]
+    """Indica cuánto importan las recompensas futuras:
+        gamma = 1.0 implica que futuro y presente pesan igual
+        gamma = 0.9 entonces cada paso futuro pesa un 90% del anterior
+    """
+
+    var search_gae_lambda: Scalar[dtype]    
+    """Controla cuánto se acumulan los errores TD de varios pasos para calcular la ventaja. 
+            lambda bajo = ventaja más basada en pasos cercanos
+            lambda alto = considera más profundamente la trayectoria completa
+    """
+
 
     def num_search_particles(self) -> Int:
         """P = envs * particulas. Es el tamano de casi todos los buffers."""
@@ -87,7 +73,7 @@ def default_config(num_envs: Int, state_dim: Int, num_actions: Int) -> SPOConfig
 
 
 struct Particles(Movable):
-    """Las P = envs*particulas trayectorias hipoteticas, como struct-of-arrays.
+    """Las P = envs*particulas trayectorias hipoteticas, como struct-of-arrays (SoA).
 
     Stoix usa un NamedTuple de arrays [NumEnvs, NumParticles, ...] y deja que JAX
     haga el tree_map. Aqui cada campo es un DeviceBuffer plano de P elementos y el
@@ -104,10 +90,11 @@ struct Particles(Movable):
     """[P] la accion de profundidad 0. Es lo unico que al final se ejecuta."""
 
     var resample_td_weights: DeviceBuffer[dtype]
-    """[P] suma de errores TD desde el ultimo resampling. Es el log-peso SMC."""
+    """[P] suma de errores TD desde el ultimo resampling. Peso bajo trayectoria prometedora"""
 
     var prior_logits: DeviceBuffer[dtype]
-    """[P] log-prob de la accion de la particula bajo el prior. Informativo."""
+    """[P] Se guarda el logaritmo de la probabilidad de la acción elegida. log π(acción elegida | estado)
+    Servira para comparar posteriormente la politica original con la politica mejorada durante el M-step."""
 
     var value: DeviceBuffer[dtype]
     """[P] V(s) del estado actual de la particula."""
@@ -237,7 +224,7 @@ struct SPOOutput(Movable):
     """El resultado publico de una busqueda. Espeja SPOOutput de spo_types.py."""
 
     var action: DeviceBuffer[idx_dtype]
-    """[num_envs] la accion que se ejecuta de verdad en el entorno."""
+    """[num_envs] la accion que se ejecuta de verdad en el entorno. Una sola por env"""
 
     var sampled_actions: DeviceBuffer[idx_dtype]
     """[P] las N acciones raiz que sobrevivieron. Su histograma es la politica

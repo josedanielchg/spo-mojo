@@ -1,19 +1,18 @@
 """Prefix sum por filas, inclusivo y exclusivo.
 
-En SPO esto acaba siendo el CDF del resampling: partiendo de los pesos, el
-prefix sum inclusivo da los cortes contra los que se compara el uniforme. El
-exclusivo sirve para calcular posiciones de escritura, como en un histograma.
+En SPO usamos el inclusivo para construir la CDF del resampling. La CDF divide
+los pesos de las partículas en intervalos. Generamos un número aleatorio y
+elegimos la partícula cuyo intervalo contiene ese número.
 
-Igual que en reductions.mojo, primero va el primitivo de bloque y luego los
-kernels que lo envuelven.
+Cada bloque GPU procesa una fila y cada hilo procesa una posición. Toda la fila
+debe caber dentro del bloque, por eso row_size no puede ser mayor que TPB. En
+SPO cada fila contiene las partículas de un entorno, normalmente 16, así que
+caben dentro de un bloque de 32 o más hilos.
 
-El limite es row_size <= TPB. Un scan de verdad para arrays mas grandes que un
-bloque necesita tres pasadas (scan por bloque, scan de los totales, y sumar el
-offset), y aqui no hace falta porque la fila es el numero de particulas, 16.
-
-El algoritmo es Hillis-Steele: log2(TPB) pasadas y cada una toca todos los
-hilos, o sea O(n log n) sumas frente a las O(n) de un scan de Blelloch. Para
-16-32 elementos el trabajo de mas no se nota y el codigo es la mitad de largo.
+Primero se implementa block_scan_inclusive, que trabaja directamente sobre la
+memoria compartida de un bloque. Después se implementan inclusive_scan_rows y
+exclusive_scan_rows, que cargan las filas, llaman al primitivo y escriben los
+resultados.
 """
 
 from std.builtin.debug_assert import debug_assert
@@ -31,12 +30,6 @@ def block_scan_inclusive[TPB: Int](shared: SharedF32, tid: Int):
     """
     offset = 1
     while offset < TPB:
-        # Aqui si hacen falta dos barriers por ronda, al contrario que en la
-        # reduccion en arbol. Motivo: el hilo tid escribe shared[tid] mientras
-        # el hilo tid+offset quiere leer ese MISMO shared[tid]. Los rangos de
-        # lectura y escritura se solapan, asi que hay que separar en el tiempo
-        # "todos leen" de "todos escriben".
-        #
         # Sin el barrier de en medio el bug es de los peores: no revienta, solo
         # da un resultado distinto segun como el scheduler ordene los warps.
         val = shared[tid - offset] if tid >= offset else Scalar[dtype](0)

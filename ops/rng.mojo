@@ -1,4 +1,4 @@
-"""RNG contador y muestreo categorico por CDF inversa.
+"""RNG contador y muestreo categorico por CDF (Cumulative distribution function) inversa.
 
 Sin estado global: el valor sale de hash(seed, stream, counter), como las keys
 de JAX. Dos ventajas para SPO:
@@ -84,8 +84,7 @@ def fill_uniform(out_ptr: GlobalF32, seed: UInt32, stream: UInt32, n: Int):
     """Rellena out[0..n) con uniformes. Un hilo por valor, con su guard."""
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n:
-        # counter = i (el indice global), no un contador compartido: de ahi
-        # viene la reproducibilidad.
+        # counter = i (el indice global), no un contador compartido: de ahi viene la reproducibilidad.
         out_ptr[i] = rand_uniform(seed, stream, UInt32(i))
 
 

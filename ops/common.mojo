@@ -6,12 +6,12 @@ los junto aqui. Cambiar el proyecto a float16 deberia ser tocar una linea.
 
 from std.memory import AddressSpace
 
-# El plan dice float32 en todo el proyecto: la GPU de portatil no tiene tensor
+# Vamos a usar float32 en todo el proyecto: la GPU de portatil no tiene tensor
 # cores utiles para float64 y para CartPole sobra de largo.
 comptime dtype = DType.float32
 
 # Indices (acciones elegidas, particulas seleccionadas en el resampling).
-# int32 en vez de int64 porque nunca vamos a tener mas de 2^31 particulas y
+# int32 en vez de int64 porque nunca vamos a tener mas de 2^31 particulas (al menos en mi maquina) y
 # asi ocupa la mitad al copiar de device a host.
 comptime idx_dtype = DType.int32
 
