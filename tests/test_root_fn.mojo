@@ -158,23 +158,27 @@ def test_log_probs_match_prior(ctx: DeviceContext) raises:
 def test_action_frequencies_follow_prior(ctx: DeviceContext) raises:
     """Con el RNG real, la fraccion de particulas por accion sigue al prior.
 
-    Muchas particulas en un solo env: asi la muestra es grande y el test mide de
-    verdad la distribucion, no el ruido.
+    La muestra grande se consigue con MUCHOS ENVS, no con muchas particulas por
+    env: las particulas de un env tienen que caber en un bloque (ver
+    TPB_PARTICLES en smc_search.mojo). 1250 envs x 16 particulas = 20000 muestras,
+    que es lo mismo pero respetando el limite real de la busqueda.
     """
-    num_envs = 1
-    num_particles = 20000
+    num_envs = 1250
+    num_particles = 16
     cfg = make_config(num_envs, num_particles, 2, 1)
     p_total = cfg.num_search_particles()
 
     want_p1 = Scalar[dtype](0.75)
     root_logits = List[Scalar[dtype]]()
-    root_logits.append(log(Scalar[dtype](0.25)))
-    root_logits.append(log(want_p1))
+    for _ in range(num_envs):
+        root_logits.append(log(Scalar[dtype](0.25)))
+        root_logits.append(log(want_p1))
 
     root_state = List[Scalar[dtype]]()
-    root_state.append(0.0)
     root_value = List[Scalar[dtype]]()
-    root_value.append(0.0)
+    for _ in range(num_envs):
+        root_state.append(0.0)
+        root_value.append(0.0)
 
     uniforms = zeros[dtype](ctx, p_total)
     ctx.enqueue_function[fill_uniform, fill_uniform](

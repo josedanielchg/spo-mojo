@@ -293,6 +293,55 @@ def test_search_is_reproducible(ctx: DeviceContext) raises:
     print("PASS la busqueda es reproducible con la misma seed")
 
 
+def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
+    """Regresion: con N grande la busqueda tiene que seguir mejorando, no empeorar.
+
+    Este test existe por un bug de verdad. Los kernels cuya fila es la dimension
+    de particulas (resampling, ESS, softmax del readout) usan UN bloque por env,
+    asi que N tiene que caber en el bloque. Con bloques de 32 y N=64 la busqueda
+    devolvia q(GOOD)=0.75, PEOR que con N=16 (0.99), y sin avisar de nada.
+
+    Lo caza el debug_assert del kernel, pero solo con -D ASSERT=all; por eso
+    ademas hay una comprobacion en host (check_search_config) y este test.
+    """
+    toy_cfg = default_toy_config()
+    q = List[Scalar[dtype]]()
+
+    counts = List[Int]()
+    counts.append(4); counts.append(16); counts.append(64)
+
+    for i in range(len(counts)):
+        n = counts[i]
+        cfg = make_config(num_envs=16, num_particles=n, depth=4, period=4)
+        particles = Particles(ctx, cfg)
+        outputs = StepOutputs(ctx, cfg)
+        scratch = SearchScratch(ctx, cfg)
+        output = SPOOutput(ctx, cfg)
+
+        root_state = List[Scalar[dtype]]()
+        for _ in range(cfg.num_envs):
+            root_state.append(0.0)
+
+        toy_search(ctx, particles, outputs, scratch, output, cfg, toy_cfg,
+                   upload[dtype](ctx, root_state), UInt32(4321))
+        ctx.synchronize()
+
+        p_total = cfg.num_search_particles()
+        actions = download[idx_dtype](output.sampled_actions, p_total)
+        weights = download[dtype](output.sampled_action_weights, p_total)
+        total = Scalar[dtype](0)
+        for p in range(p_total):
+            if Int(actions[p]) == ACTION_GOOD:
+                total += weights[p]
+        q.append(total / Scalar[dtype](cfg.num_envs))
+        print("      N =", n, "-> q(GOOD) =", q[i])
+
+    if q[1] < q[0] or q[2] < q[1]:
+        raise Error("mas particulas deberia mejorar (o al menos no empeorar): ",
+                    q[0], " ", q[1], " ", q[2])
+    print("PASS mas particulas no empeora la busqueda")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_resample_indices_are_exact(ctx)
@@ -300,4 +349,5 @@ def main() raises:
         test_ess_uniform_vs_concentrated(ctx)
         test_ess_drops_and_recovers_after_resampling(ctx)
         test_search_improves_a_uniform_prior(ctx)
+        test_more_particles_is_not_worse(ctx)
         test_search_is_reproducible(ctx)

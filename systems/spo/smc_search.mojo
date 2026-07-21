@@ -32,6 +32,30 @@ from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
                                    SearchScratch, SPOOutput)
 
 comptime TPB = 32
+"""Bloque de los kernels que son un map plano: un hilo por particula."""
+
+comptime TPB_PARTICLES = 128
+"""Bloque de los kernels cuya FILA es la dimension de particulas (resampling,
+ESS, softmax del readout). Ahi el bloque entero trabaja sobre las N particulas de
+un env, asi que N tiene que caber dentro.
+
+Es 128 y no 32 para que la demo pueda barrer N = 64. Los hilos de mas no cuestan
+nada: los guards los desactivan y la GPU no lanza warps enteros ociosos.
+Con N = 16 (lo del paper) sobra de largo."""
+
+
+def check_search_config(cfg: SPOConfig) raises:
+    """Comprueba en HOST lo que los kernels no pueden comprobar solos.
+
+    Existe porque este error ya me mordio: con N = 64 y bloques de 32 la busqueda
+    devolvia una politica PEOR que con N = 16, sin avisar de nada. El
+    debug_assert del kernel lo caza, pero solo si alguien corre con -D ASSERT=all;
+    esta comprobacion salta siempre y dice exactamente que hacer."""
+    if cfg.num_particles > TPB_PARTICLES:
+        raise Error("num_particles=", cfg.num_particles, " no cabe en un bloque de ",
+                    TPB_PARTICLES, ". Sube TPB_PARTICLES (potencia de dos) o baja N.")
+    if cfg.num_actions > TPB:
+        raise Error("num_actions=", cfg.num_actions, " no cabe en un bloque de ", TPB)
 
 
 def broadcast_state_kernel(particle_state: GlobalF32, root_state: GlobalF32,
@@ -152,6 +176,7 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
     acumulan (peso, gae, terminal, depth) arrancan a cero, como en
     `init_particles` de Stoix.
     """
+    check_search_config(cfg)
     p_total = cfg.num_search_particles()
 
     # 1. Cada particula se lleva una copia del mundo y del valor de la raiz.
@@ -457,10 +482,11 @@ def resample(ctx: DeviceContext, particles: Particles, scratch: SearchScratch,
         particles.resample_td_weights.unsafe_ptr(),
         p_total, cfg.temperature, grid_dim=blocks, block_dim=TPB)
 
-    ctx.enqueue_function[resample_indices_kernel[TPB], resample_indices_kernel[TPB]](
+    ctx.enqueue_function[resample_indices_kernel[TPB_PARTICLES],
+                         resample_indices_kernel[TPB_PARTICLES]](
         scratch.indices.unsafe_ptr(), scratch.resample_logits.unsafe_ptr(),
         uniforms.unsafe_ptr(), cfg.num_particles,
-        grid_dim=cfg.num_envs, block_dim=TPB)
+        grid_dim=cfg.num_envs, block_dim=TPB_PARTICLES)
 
     ctx.enqueue_function[gather_particles_kernel, gather_particles_kernel](
         scratch.state.unsafe_ptr(), scratch.root_actions.unsafe_ptr(),
@@ -575,10 +601,11 @@ def compute_ess_entropy(ctx: DeviceContext, particles: Particles,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
     row = depth * cfg.num_envs
-    ctx.enqueue_function[ess_entropy_kernel[TPB], ess_entropy_kernel[TPB]](
+    ctx.enqueue_function[ess_entropy_kernel[TPB_PARTICLES],
+                         ess_entropy_kernel[TPB_PARTICLES]](
         output.ess.unsafe_ptr() + row, output.entropy.unsafe_ptr() + row,
         scratch.resample_logits.unsafe_ptr(), cfg.num_particles,
-        grid_dim=cfg.num_envs, block_dim=TPB)
+        grid_dim=cfg.num_envs, block_dim=TPB_PARTICLES)
 
 
 def readout_weighted(ctx: DeviceContext, particles: Particles,
@@ -605,16 +632,17 @@ def readout_weighted(ctx: DeviceContext, particles: Particles,
         p_total, cfg.temperature, grid_dim=blocks_p, block_dim=TPB)
 
     # pesos normalizados de cada accion raiz
-    ctx.enqueue_function[softmax_rows[TPB], softmax_rows[TPB]](
+    ctx.enqueue_function[softmax_rows[TPB_PARTICLES], softmax_rows[TPB_PARTICLES]](
         output.sampled_action_weights.unsafe_ptr(),
         scratch.resample_logits.unsafe_ptr(), cfg.num_particles,
-        grid_dim=cfg.num_envs, block_dim=TPB)
+        grid_dim=cfg.num_envs, block_dim=TPB_PARTICLES)
 
     # una particula por env, sorteada con esos pesos
-    ctx.enqueue_function[categorical_from_logits[TPB], categorical_from_logits[TPB]](
+    ctx.enqueue_function[categorical_from_logits[TPB_PARTICLES],
+                         categorical_from_logits[TPB_PARTICLES]](
         output.action.unsafe_ptr(), scratch.resample_logits.unsafe_ptr(),
         uniforms.unsafe_ptr(), cfg.num_particles,
-        grid_dim=cfg.num_envs, block_dim=TPB)
+        grid_dim=cfg.num_envs, block_dim=TPB_PARTICLES)
 
     # ...y su accion raiz es la que se ejecuta. Se reusa output.action como
     # destino: entra el indice de particula y sale la accion.
