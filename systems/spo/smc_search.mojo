@@ -25,13 +25,15 @@ from std.math import exp, log
 from std.memory import stack_allocation, AddressSpace
 
 from ops.common import dtype, idx_dtype, NEG_INF, GlobalF32, GlobalI32
+from ops.copy import copy_kernel
 from ops.reductions import block_reduce_max, block_reduce_sum
 from ops.rng import categorical_from_logits, fill_uniform
 from ops.scan import block_scan_inclusive
 from ops.softmax import softmax_rows
-from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
-                                   SearchScratch, SPOOutput, SearchWorkspace,
-                                   SearchModel)
+from systems.spo.particles import (Particles, StepOutputs, SearchScratch,
+                                   SPOOutput, SearchWorkspace)
+from systems.spo.search_model import SearchModel
+from systems.spo.spo_types import SPOConfig
 
 comptime TPB = 32
 """Bloque de los kernels que son un map plano: un hilo por particula."""
@@ -146,15 +148,6 @@ def log_prob_of_action_kernel(log_prob_out: GlobalF32, logits: GlobalF32,
     log_prob_out[p] = logits[base + chosen] - (biggest + log(total))
 
 
-def copy_actions_kernel(dst: GlobalI32, src: GlobalI32, n: Int):
-    """Copia plana de acciones. Hace falta porque la accion vive en dos sitios:
-    `root_actions` la guarda para siempre (es la que se acabara ejecutando en el
-    entorno real) y `next_action` es el carry que se pisa en cada profundidad."""
-    i = Int(block_dim.x * block_idx.x + thread_idx.x)
-    if i < n:
-        dst[i] = src[i]
-
-
 def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
             cfg: SPOConfig, root_state: DeviceBuffer[dtype],
             root_logits: DeviceBuffer[dtype], root_value: DeviceBuffer[dtype],
@@ -217,7 +210,7 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
     # 6. Preparamos el primer paso: la accion raiz es la que se ejecuta en la
     # profundidad 0. root_actions se conserva hasta el final; next_action ira
     # cambiando para indicar la accion que toca ejecutar en cada profundidad.
-    ctx.enqueue_function[copy_actions_kernel, copy_actions_kernel](
+    ctx.enqueue_function[copy_kernel[idx_dtype], copy_kernel[idx_dtype]](
         outputs.next_action.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
         p_total, grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
@@ -564,12 +557,6 @@ def select_action_kernel(action_out: GlobalI32, root_actions: GlobalI32,
         action_out[env] = root_actions[env * num_particles + Int(chosen[env])]
 
 
-def copy_f32_kernel(dst: GlobalF32, src: GlobalF32, n: Int):
-    i = Int(block_dim.x * block_idx.x + thread_idx.x)
-    if i < n:
-        dst[i] = src[i]
-
-
 def mean_over_particles_kernel(out_mean: GlobalF32, values: GlobalF32,
                                num_envs: Int, num_particles: Int):
     """Media por env. num_particles es 16, asi que un hilo por env va sobrado."""
@@ -644,11 +631,11 @@ def readout_weighted(ctx: DeviceContext, particles: Particles,
         output.action.unsafe_ptr(), cfg.num_envs, cfg.num_particles,
         grid_dim=(cfg.num_envs + TPB - 1) // TPB, block_dim=TPB)
 
-    ctx.enqueue_function[copy_actions_kernel, copy_actions_kernel](
+    ctx.enqueue_function[copy_kernel[idx_dtype], copy_kernel[idx_dtype]](
         output.sampled_actions.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
         p_total, grid_dim=blocks_p, block_dim=TPB)
 
-    ctx.enqueue_function[copy_f32_kernel, copy_f32_kernel](
+    ctx.enqueue_function[copy_kernel[dtype], copy_kernel[dtype]](
         output.sampled_advantages.unsafe_ptr(), particles.gae.unsafe_ptr(),
         p_total, grid_dim=blocks_p, block_dim=TPB)
 
@@ -664,7 +651,7 @@ def snapshot_root_values(ctx: DeviceContext, particles: Particles,
                          output: SPOOutput, cfg: SPOConfig) raises:
     """Guarda V(s_raiz) justo despues de sembrar, antes de que el rollout lo pise."""
     p_total = cfg.num_search_particles()
-    ctx.enqueue_function[copy_f32_kernel, copy_f32_kernel](
+    ctx.enqueue_function[copy_kernel[dtype], copy_kernel[dtype]](
         output.root_values.unsafe_ptr(), particles.value.unsafe_ptr(), p_total,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 

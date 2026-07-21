@@ -11,7 +11,8 @@ Con search_gamma = search_gae_lambda = 1, el factor de la GAE es discount^depth.
 from std.gpu.host import DeviceContext
 
 from ops.common import dtype, idx_dtype
-from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.spo_types import SPOConfig
 from systems.spo.smc_search import update_particles
 from tests.helpers import download, write_into, assert_close, assert_eq_int
 

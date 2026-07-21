@@ -36,8 +36,9 @@ from std.gpu import block_dim, block_idx, thread_idx
 from std.gpu.host import DeviceContext, DeviceBuffer
 
 from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32
-from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
-                                   SearchModel)
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.search_model import SearchModel
+from systems.spo.spo_types import SPOConfig
 
 # Las dos acciones. El orden importa para los tests: BAD es la 0.
 comptime ACTION_BAD = 0
@@ -154,7 +155,7 @@ struct ToyChain(SearchModel, Copyable, Movable):
     El struct se queda SIEMPRE en el host: lo que baja a la GPU son sus tres
     numeros sueltos, dentro de los `enqueue_function` de sus propios metodos. Por
     eso la busqueda puede ser generica sobre el modelo sin que ningun kernel
-    cruce la frontera (ver el contrato en spo_types.mojo).
+    cruce la frontera (ver el contrato en search_model.mojo).
     """
 
     var chain_length: Int

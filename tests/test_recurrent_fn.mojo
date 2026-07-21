@@ -13,7 +13,8 @@ from std.math import abs, log
 from ops.common import dtype, idx_dtype
 from envs.toy_chain import (toy_value, default_toy_chain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
-from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.spo_types import SPOConfig
 from systems.spo.smc_search import sample_next_actions
 from tests.helpers import upload, download, write_into, assert_close, assert_eq_int
 

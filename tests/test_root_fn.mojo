@@ -11,7 +11,8 @@ from std.math import abs, log
 
 from ops.common import dtype, idx_dtype
 from ops.rng import fill_uniform
-from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.spo_types import SPOConfig
 from systems.spo.smc_search import root_fn
 from tests.helpers import upload, zeros, download, assert_close, assert_eq_int
 

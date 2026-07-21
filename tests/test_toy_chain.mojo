@@ -19,8 +19,8 @@ from envs.toy_chain import (toy_recurrent_kernel, toy_value_kernel,
                             toy_policy_logits_kernel, toy_value,
                             default_toy_chain, ToyChain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
-from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
-                                   default_config)
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.spo_types import SPOConfig, default_config
 from tests.helpers import upload, zeros, download, assert_close
 
 comptime TPB = 32
