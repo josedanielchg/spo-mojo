@@ -46,21 +46,21 @@ def main() raises:
         got_sm = download[dtype](sm, ROWS * COLS)
         got_lse = download[dtype](lse, ROWS)
 
-    # --- 1. elemento a elemento contra numpy ---
+    # Elemento a elemento contra numpy.
     for r in range(ROWS):
         for c in range(COLS):
             assert_close(got_sm[r * COLS + c], want_softmax[r * COLS + c], TOL,
                          String("softmax fila=", r, " col=", c))
     print("PASS softmax_rows vs numpy (", ROWS, "filas x", COLS, ")")
 
-    # --- 2. la fila uniforme tiene que dar exactamente 1/COLS ---
+    # La fila uniforme tiene que dar exactamente 1/COLS.
     uniform = Scalar[dtype](1.0) / Scalar[dtype](COLS)
     for c in range(COLS):
         assert_close(got_sm[c], uniform, TOL, String("fila uniforme col=", c))
     print("PASS softmax fila uniforme = 1/", COLS)
 
-    # --- 3. cada fila suma 1, incluidas las de +-1000 ---
-    # Esta es la que detecta el overflow: si exp desborda, la fila suma nan.
+    # Cada fila tiene que sumar 1, incluidas las de +-1000. Esta comprobacion
+    # es la que detecta el overflow: si exp desborda, la fila suma nan.
     for r in range(ROWS):
         total = Scalar[dtype](0)
         for c in range(COLS):
@@ -69,9 +69,9 @@ def main() raises:
                      String("la fila ", r, " no suma 1"))
     print("PASS softmax suma 1 por fila (sin overflow en +-1000)")
 
-    # --- 4. logsumexp, con tolerancia RELATIVA ---
-    # La fila de +1000 da ~1002.77, y a esa magnitud el ulp de float32 ya es
-    # ~6e-5: pedir 1e-6 absoluto seria pedir mas precision de la que existe.
+    # El logsumexp se compara con tolerancia relativa. La fila de +1000 da
+    # ~1002.77, y a esa magnitud el ulp de float32 ya es ~6e-5: pedir 1e-6
+    # absoluto seria pedir mas precision de la que existe.
     for r in range(ROWS):
         scale = abs(want_lse[r])
         if scale < 1.0:

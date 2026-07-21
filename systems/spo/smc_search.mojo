@@ -63,7 +63,7 @@ def broadcast_state_kernel(particle_state: GlobalF32, root_state: GlobalF32,
     """Copia el estado del env a cada una de sus N particulas.
 
     Es el `broadcast_tree` de Stoix (ff_spo.py:215). Alli es una linea porque JAX
-    hace el broadcast solo; aqui hay que copiar de verdad, y esa copia ES la
+    hace el broadcast solo; aqui hay que copiar de verdad, y esa copia es la
     esencia de la busqueda: cada particula necesita SU propio mundo para poder
     diverger del de las demas.
 
@@ -179,7 +179,7 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
     check_search_config(cfg)
     p_total = cfg.num_search_particles()
 
-    # 1. Cada particula se lleva una copia del mundo y del valor de la raiz.
+    # Cada particula se lleva una copia del mundo y del valor de la raiz.
     state_elems = p_total * cfg.state_dim
     ctx.enqueue_function[broadcast_state_kernel, broadcast_state_kernel](
         particles.state.unsafe_ptr(), root_state.unsafe_ptr(),
@@ -191,35 +191,36 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
         p_total, cfg.num_particles,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
-    # 2. Los logits del prior, replicados para poder muestrear por filas.
+    # Los logits del prior, replicados para poder muestrear por filas.
     logit_elems = p_total * cfg.num_actions
     ctx.enqueue_function[broadcast_logits_kernel, broadcast_logits_kernel](
         outputs.action_logits.unsafe_ptr(), root_logits.unsafe_ptr(),
         p_total, cfg.num_particles, cfg.num_actions,
         grid_dim=(logit_elems + TPB - 1) // TPB, block_dim=TPB)
 
-    # 3. Una accion por particula. Aqui es donde N particulas del mismo env se
-    #    separan: mismo estado, misma distribucion, distinto uniforme.
+    # Una accion por particula. Aqui es donde las N particulas de un mismo
+    # entorno se separan: mismo estado y misma distribucion, pero distinto
+    # uniforme.
     ctx.enqueue_function[categorical_from_logits[TPB], categorical_from_logits[TPB]](
         particles.root_actions.unsafe_ptr(), outputs.action_logits.unsafe_ptr(),
         uniforms.unsafe_ptr(), cfg.num_actions,
         grid_dim=p_total, block_dim=TPB)
 
-    # 4. Y su log-prob bajo el prior.
+    # Y su log-prob bajo el prior.
     ctx.enqueue_function[log_prob_of_action_kernel, log_prob_of_action_kernel](
         particles.prior_logits.unsafe_ptr(), outputs.action_logits.unsafe_ptr(),
         particles.root_actions.unsafe_ptr(), p_total, cfg.num_actions,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
-    # 5. La accion de la raiz es tambien la que se ejecuta en la profundidad 0.
-    #    Stoix arranca su scan con carry = (particles, particles.root_actions);
-    #    aqui el carry es outputs.next_action, asi que hay que sembrarlo.
+    # La accion de la raiz es tambien la que se ejecuta en la profundidad 0.
+    # Stoix arranca su scan con carry = (particles, particles.root_actions), y
+    # aqui ese carry es outputs.next_action, asi que hay que sembrarlo.
     ctx.enqueue_function[copy_actions_kernel, copy_actions_kernel](
         outputs.next_action.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
         p_total, grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
     # Nada de ctx.synchronize() aqui: los cuatro kernels van al mismo stream y se
-    # ejecutan en orden (leccion del Puzzle 14). Solo sincroniza quien lea.
+    # ejecutan en orden. Ya sincronizara quien necesite leer los resultados.
 
 
 def sample_next_actions(ctx: DeviceContext, outputs: StepOutputs, cfg: SPOConfig,
@@ -252,13 +253,13 @@ def sample_next_actions(ctx: DeviceContext, outputs: StepOutputs, cfg: SPOConfig
 
 
 def update_particles_kernel(
-        # --- estado de la particula, se actualiza in-place ---
+        # estado de la particula, se actualiza in-place
         weights: GlobalF32, gae: GlobalF32, value: GlobalF32,
         terminal: GlobalI32, depth: GlobalI32, prior_logits: GlobalF32,
-        # --- lo que produjo el paso del modelo ---
+        # lo que produjo el paso del modelo
         reward: GlobalF32, discount: GlobalF32, next_value: GlobalF32,
         next_prior_logits: GlobalF32,
-        # --- config ---
+        # config
         n_particles: Int, search_gamma: Scalar[dtype],
         search_gae_lambda: Scalar[dtype]):
     """Cierra una profundidad: peso SMC, GAE, y el relevo de estado.
@@ -279,34 +280,34 @@ def update_particles_kernel(
     was_terminal = Int(terminal[p]) != 0
     step_discount = discount[p]
 
-    # --- error TD ---
-    # No se multiplica por gamma: ya viene plegado dentro de next_value
-    # (el bootstrap_value del modelo). Es el comentario de Stoix
-    # "We do not multiply by discount as we do it in the recurrent_fn".
+    # El error TD no se multiplica por gamma porque ya viene plegado dentro de
+    # next_value, que es el bootstrap_value que devolvio el modelo. Stoix lo
+    # comenta igual: "We do not multiply by discount as we do it in the
+    # recurrent_fn".
     td_error = reward[p] + next_value[p] - old_value
 
-    # --- peso SMC ---
-    # La mascara terminal congela el peso de las particulas ya muertas: lo que
-    # les pase despues de morir no debe cambiar su evidencia acumulada.
+    # La mascara terminal congela el peso de las particulas ya muertas, porque
+    # lo que les pase despues de morir no deberia cambiar su evidencia.
     mask = Scalar[dtype](0) if was_terminal else Scalar[dtype](1)
     weights[p] = weights[p] + td_error * mask
 
-    # --- GAE hacia adelante ---
-    # Al reves de la GAE de siempre, que va hacia atras en el tiempo: aqui la
-    # busqueda avanza y no se puede mirar al futuro, asi que cada profundidad
-    # anade su delta ya descontado por (gamma*lambda*discount)^profundidad.
+    # La GAE va al reves de lo habitual. Normalmente se calcula hacia atras en
+    # el tiempo, pero aqui la busqueda avanza y no se puede mirar al futuro, asi
+    # que cada profundidad anade su delta descontado por
+    # (gamma*lambda*discount)^profundidad.
     #
-    # Ojo: aqui NO hay mascara terminal, igual que en Stoix. Lo que congela a una
-    # particula muerta es que su `discount` es 0, y entonces el factor se anula
-    # solo... salvo en la profundidad 0, donde el exponente es 0 y el factor vale
-    # 1 pase lo que pase. Ese caso es correcto: el primer paso siempre cuenta.
+    # Fijate en que no hay mascara terminal, igual que en Stoix. Lo que congela a
+    # una particula muerta es que su discount vale 0 y entonces el factor se
+    # anula solo. La excepcion es la profundidad 0, donde el exponente es 0 y el
+    # factor vale 1 pase lo que pase, y eso es correcto: el primer paso siempre
+    # cuenta entero aunque la particula muera en el.
     decay_base = search_gamma * search_gae_lambda * step_discount
     decay = Scalar[dtype](1)
     for _ in range(old_depth):
         decay *= decay_base
     gae[p] = gae[p] + td_error * decay
 
-    # --- relevo: lo nuevo pasa a ser lo actual ---
+    # Y el relevo: lo nuevo pasa a ser lo actual.
     value[p] = next_value[p]
     prior_logits[p] = next_prior_logits[p]
     depth[p] = Scalar[idx_dtype](old_depth + 1)
@@ -330,22 +331,19 @@ def update_particles(ctx: DeviceContext, particles: Particles,
         grid_dim=(p_total + TPB - 1) // TPB, block_dim=TPB)
 
 
-# ---------------------------------------------------------------------------
-# Resampling
-#
-# Es lo que convierte peso en multiplicidad: las particulas prometedoras se
-# copian varias veces y las malas desaparecen. A partir de ahi todas vuelven a
-# tener el mismo peso, y la informacion de "cual era mejor" ya no vive en los
-# pesos sino en cuantas copias hay de cada una.
-# ---------------------------------------------------------------------------
+# El resampling es lo que convierte peso en multiplicidad: las particulas
+# prometedoras se copian varias veces y las malas desaparecen. Despues todas
+# vuelven a tener el mismo peso, y la informacion de cual era mejor ya no vive en
+# los pesos sino en cuantas copias hay de cada una.
 
 def resample_logits_kernel(logits_out: GlobalF32, weights: GlobalF32,
                            n_particles: Int, temperature: Scalar[dtype]):
-    """logits = pesos / temperatura. Es `get_resample_logits` de Stoix.
+    """logits = pesos / temperatura, el `get_resample_logits` de Stoix.
 
-    La temperatura decide lo agresiva que es la busqueda: baja se queda solo con
-    las mejores particulas (y el ESS se hunde), alta reparte casi por igual (y la
-    busqueda casi no mejora al prior). Es el mismo eta que el M-step aprende.
+    La temperatura decide lo agresiva que es la busqueda. Con una temperatura
+    baja solo sobreviven las mejores particulas y el ESS se hunde; con una alta
+    se reparte casi por igual y la busqueda apenas mejora al prior. Es el mismo
+    eta que el M-step acabara aprendiendo.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n_particles:
@@ -357,9 +355,9 @@ def resample_indices_kernel[TPB_P: Int](
         num_particles: Int):
     """Sortea N indices por env, con probabilidad softmax(logits) (CDF inversa).
 
-    Un bloque por env y un hilo por particula. El CDF se construye UNA vez en
-    shared memory y luego los N hilos hacen cada uno su busqueda con su propio
-    uniforme, o sea N muestras del mismo CDF. Esa es la diferencia con
+    Un bloque por env y un hilo por particula. El CDF se construye una sola vez
+    en shared memory y luego cada uno de los N hilos hace su busqueda con su
+    propio uniforme, o sea N muestras del mismo CDF. Esa es la diferencia con
     `categorical_from_logits`, que saca una sola muestra por fila.
 
     Como en el muestreo de la fase 2, el CDF se deja sin normalizar y lo que se
@@ -389,7 +387,7 @@ def resample_indices_kernel[TPB_P: Int](
     total = shared[num_particles - 1]
     target = uniforms[base + tid] * total
 
-    # Barrido lineal: con 16 particulas no compensa una busqueda binaria, y asi
+    # Barrido lineal. Con 16 particulas no compensa una busqueda binaria y asi
     # el codigo dice exactamente lo que hace.
     chosen = num_particles - 1     # por defecto el ultimo, por si el redondeo
                                    # deja el target justo en el borde
@@ -465,14 +463,15 @@ def resample(ctx: DeviceContext, particles: Particles, scratch: SearchScratch,
              cfg: SPOConfig, uniforms: DeviceBuffer[dtype]) raises:
     """Resampling completo. Espeja `resample` de Stoix (ff_spo.py:846).
 
-    OJO CON LA GAE: no se toca. Stoix hace el gather de todo y luego reescribe la
-    gae con la de ANTES del resampling (ff_spo.py:914), asi que en la practica la
-    gae se queda tal cual estaba. El motivo, segun su comentario, es que el loss
-    de la temperatura necesita las ventajas de antes de resamplear para apuntar
-    bien al KL; el precio es que la gae solo cubre hasta el ultimo resampling.
+La gae no se toca, y conviene fijarse en eso. Stoix hace el gather de todo
+    y luego reescribe la gae con la de antes del resampling (ff_spo.py:914), asi
+    que en la practica se queda tal cual estaba. El motivo, segun su comentario,
+    es que el loss de la temperatura necesita las ventajas de antes de resamplear
+    para apuntar bien al KL; el precio es que la gae solo cubre hasta el ultimo
+    resampling.
 
-    Aqui eso se implementa simplemente NO copiando la gae, que es lo mismo y
-    ahorra un buffer.
+    Aqui sale mas simple: basta con no copiarla, que es lo mismo y ahorra un
+    buffer.
     """
     p_total = cfg.num_search_particles()
     blocks = (p_total + TPB - 1) // TPB
@@ -509,20 +508,15 @@ def resample(ctx: DeviceContext, particles: Particles, scratch: SearchScratch,
         p_total, cfg.state_dim, grid_dim=blocks, block_dim=TPB)
 
 
-# ---------------------------------------------------------------------------
-# Metricas y lectura del resultado
-# ---------------------------------------------------------------------------
-
 def ess_entropy_kernel[TPB_P: Int](ess_out: GlobalF32, entropy_out: GlobalF32,
                                    logits: GlobalF32, num_particles: Int):
     """ESS y entropia de los pesos normalizados, por env.
 
-    ESS (effective sample size) = 1 / sum(w_i^2) con w normalizado. Dice cuantas
-    particulas estan aportando de verdad:
-        pesos uniformes  -> ESS = N  (todas cuentan igual)
-        un peso se lo lleva todo -> ESS = 1  (la busqueda ha colapsado)
-    Es la senal de cuando toca resamplear, y en la demo se ve caer entre
-    resamplings y recuperarse justo despues.
+    El ESS (effective sample size) es 1 / sum(w_i^2) con los pesos normalizados,
+    y dice cuantas particulas estan aportando de verdad. Con pesos uniformes vale
+    N, porque todas cuentan igual; cuando un peso se lo lleva todo baja a 1 y la
+    busqueda ha colapsado. Es la senal de cuando toca resamplear, y en la demo se
+    ve caer entre resamplings y recuperarse justo despues.
 
     Un bloque por env, un hilo por particula.
     """
@@ -592,7 +586,7 @@ def mean_over_particles_kernel(out_mean: GlobalF32, values: GlobalF32,
 def compute_ess_entropy(ctx: DeviceContext, particles: Particles,
                         scratch: SearchScratch, output: SPOOutput,
                         cfg: SPOConfig, depth: Int) raises:
-    """Mide ESS y entropia con los pesos ACTUALES y los guarda en la fila `depth`."""
+    """Mide ESS y entropia con los pesos de ahora y los guarda en la fila `depth`."""
     p_total = cfg.num_search_particles()
     ctx.enqueue_function[resample_logits_kernel, resample_logits_kernel](
         scratch.resample_logits.unsafe_ptr(),
@@ -617,7 +611,7 @@ def readout_weighted(ctx: DeviceContext, particles: Particles,
       - `sampled_actions`: las N acciones raiz que sobrevivieron (con repeticiones
         si el resampling copio alguna varias veces),
       - `sampled_action_weights`: softmax(peso/temperatura) de cada una.
-    Su histograma ponderado ES q. La accion que se ejecuta se sortea de ahi.
+    Su histograma ponderado es q, y la accion que se ejecuta se sortea de ahi.
 
     `uniforms` solo necesita num_envs valores (uno por env), pero se pasa un
     buffer de P por comodidad: se leen los primeros num_envs.
@@ -659,7 +653,7 @@ def readout_weighted(ctx: DeviceContext, particles: Particles,
         output.sampled_advantages.unsafe_ptr(), particles.gae.unsafe_ptr(),
         p_total, grid_dim=blocks_p, block_dim=TPB)
 
-    # El valor de la raiz, NO el del final del rollout: es lo que Stoix mete en
+    # El valor de la raiz, no el del final del rollout: es lo que Stoix mete en
     # SPOOutput.value (jnp.mean(root.particle_values, axis=-1)).
     ctx.enqueue_function[mean_over_particles_kernel, mean_over_particles_kernel](
         output.value.unsafe_ptr(), output.root_values.unsafe_ptr(),
@@ -680,13 +674,13 @@ def smc_depth_close(ctx: DeviceContext, particles: Particles,
                     outputs: StepOutputs, scratch: SearchScratch,
                     output: SPOOutput, cfg: SPOConfig, depth: Int,
                     resample_uniforms: DeviceBuffer[dtype]) raises:
-    """Todo lo que va DESPUES del paso del modelo en una profundidad.
+    """Todo lo que va despues del paso del modelo en una profundidad.
 
     Es la parte generica de `one_step_rollout` de Stoix (ff_spo.py:568): sirve
     igual para el juguete, CartPole o el MLP. Un modelo nuevo solo tiene que
     llamar a su recurrent_fn y luego a esto.
 
-    El orden importa: ESS se mide con los pesos ya actualizados pero ANTES de
+    El orden importa: el ESS se mide con los pesos ya actualizados pero antes de
     resamplear, que es donde se ve el colapso que justifica el resampling.
     """
     update_particles(ctx, particles, outputs, cfg)

@@ -1,6 +1,6 @@
 """MDP de juguete: un pasillo con dos acciones. El primer SearchModel.
 
-Sirve para validar la busqueda SMC ANTES de que existan las redes o CartPole. Es
+Sirve para validar la busqueda SMC antes de que existan las redes o CartPole. Es
 deterministico y su politica optima se sabe de memoria, asi que los tests pueden
 comprobar numeros exactos en vez de tolerancias.
 
@@ -13,9 +13,9 @@ Dos formas distintas de que un episodio acabe, y esa es justo la gracia:
   * TERMINAL de verdad (accion BAD): no hay futuro. discount real = 0, asi que el
     bootstrap_value tambien es 0.
   * TRUNCACION (llegar al horizonte): el episodio se corta por un limite de
-    tiempo, pero el estado SI tenia futuro. discount real = 1, el `rec_discount`
+    tiempo, pero el estado si tenia futuro. El discount real es 1, el `rec_discount`
     que ve la busqueda es 0 (la particula deja de simular) pero el
-    bootstrap_value NO es 0: arrastra search_gamma * V(s').
+    bootstrap_value no es 0: arrastra search_gamma * V(s').
 
 Confundir esos dos casos es el bug silencioso clasico de RL, y es la razon de que
 el juguete tenga los dos caminos desde el primer dia. Por eso el horizonte
@@ -50,11 +50,10 @@ comptime STATE_DIM = 1
 comptime TPB_TOY = 32
 
 
-# Los kernels reciben los campos sueltos, no el struct: un struct solo se puede
-# pasar a un kernel si implementa DevicePassable, que pide `device_type` y el
-# metodo privado `_to_device_type`. No compensa esa ceremonia para tres numeros,
-# asi que ToyChainConfig se queda como contabilidad del lado host y cada kernel
-# declara lo que necesita.
+# Los kernels reciben los campos sueltos en vez del struct entero. Para pasar un
+# struct a un kernel hay que implementar DevicePassable, que pide un alias
+# device_type y el metodo privado _to_device_type, y no compensa esa ceremonia
+# para tres numeros. Asi que esto se queda como contabilidad del lado host.
 @fieldwise_init
 struct ToyChainConfig(Copyable, Movable):
     var chain_length: Int
@@ -131,7 +130,7 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
     pos = state[i * STATE_DIM]
     a = Int(action[i])
 
-    # --- dinamica ---
+    # Primero la dinamica del entorno.
     reward = Scalar[dtype](0)
     next_pos = pos
     discount_real = Scalar[dtype](1)   # el discount "de verdad" del entorno
@@ -149,9 +148,9 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
         last = True
         discount_real = 0.0
 
-    # --- lo mismo que hace Stoix con el timestep ---
-    # truncado = "termino" Y "el discount real no es 0". Un terminal de verdad
-    # trae discount 0, asi que no cuenta como truncado.
+    # Y ahora lo mismo que hace Stoix con el timestep: algo esta truncado si
+    # termino pero su discount real no es 0. Un terminal de verdad trae discount
+    # 0, asi que nunca cuenta como truncado.
     truncated = last and discount_real != 0.0
 
     # El discount que ve la busqueda: 0 en cuanto la particula deja de simular,
@@ -188,7 +187,7 @@ def toy_recurrent_fn(ctx: DeviceContext, particles: Particles,
     en la profundidad 0 la pone root_fn en `particles.root_actions`, asi que el
     llamador decide cual pasar en `action_in`.
 
-    Importante: NO toca `particles.value`. El error TD de la actualizacion de
+    No toca `particles.value`, y eso importa: el error TD de la actualizacion de
     pesos necesita el V(s) viejo, y el nuevo se queda en `outputs.next_value`
     hasta que update_particles lo mueva.
     """
@@ -226,7 +225,7 @@ def toy_search(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
     blocks_env = (cfg.num_envs + TPB_TOY - 1) // TPB_TOY
     blocks_p = (p_total + TPB_TOY - 1) // TPB_TOY
 
-    # --- el modelo evaluado en la raiz (un estado por env) ---
+    # El modelo evaluado en la raiz, un estado por entorno.
     root_logits = ctx.enqueue_create_buffer[dtype](cfg.num_envs * NUM_ACTIONS)
     root_logits.enqueue_fill(0)
     root_value = ctx.enqueue_create_buffer[dtype](cfg.num_envs)
@@ -258,9 +257,9 @@ def toy_search(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
             u_action)
     snapshot_root_values(ctx, particles, output, cfg)
 
-    # --- el bucle de profundidad ---
-    # Es un bucle en HOST que solo encola kernels: no hay ni un synchronize
-    # dentro (Puzzle 14). El host no necesita leer nada hasta el final.
+    # El bucle de profundidad vive en el host pero solo encola kernels: no hay
+    # ni un synchronize dentro, porque el host no necesita leer nada hasta el
+    # final y el stream ya los ejecuta en orden.
     for d in range(cfg.search_depth):
         ctx.enqueue_function[fill_uniform, fill_uniform](
             u_action.unsafe_ptr(), seed, UInt32(100 + d), p_total,
@@ -273,7 +272,7 @@ def toy_search(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
         smc_depth_close(ctx, particles, outputs, scratch, output, cfg, d,
                         u_resample)
 
-    # --- la accion final ---
+    # Y por ultimo la accion que se ejecuta de verdad.
     ctx.enqueue_function[fill_uniform, fill_uniform](
         u_action.unsafe_ptr(), seed, UInt32(7777), p_total,
         grid_dim=blocks_p, block_dim=TPB_TOY)

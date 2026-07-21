@@ -20,7 +20,7 @@ comptime TOL = Scalar[dtype](1e-6)
 
 
 def make_config(num_particles: Int) -> SPOConfig:
-    """Un solo env con `num_particles` particulas: asi el indice p ES la particula."""
+    """Un solo env con `num_particles` particulas: asi el indice p es la particula."""
     return SPOConfig(
         num_envs=1, num_particles=num_particles, num_actions=NUM_ACTIONS,
         state_dim=STATE_DIM, search_depth=4, resample_period=4,
@@ -69,20 +69,20 @@ def test_one_depth_all_three_endings(ctx: DeviceContext) raises:
     next_value = download[dtype](outputs.next_value, p_total)
     old_value = download[dtype](particles.value, p_total)
 
-    # --- [0] paso normal: sigue viva y arrastra V(1) = 7 ---
+    # La primera hace un paso normal: sigue viva y arrastra V(1) = 7.
     assert_close(state[0], 1.0, TOL, "normal: posicion")
     assert_close(reward[0], 1.0, TOL, "normal: recompensa")
     assert_close(discount[0], 1.0, TOL, "normal: sigue viva")
     assert_close(next_value[0], 7.0, TOL, "normal: bootstrap = V(1)")
 
-    # --- [1] truncacion: deja de simular PERO conserva V(4) = 4 ---
+    # La segunda se trunca: deja de simular pero conserva V(4) = 4.
     assert_close(state[1], 4.0, TOL, "truncada: posicion")
     assert_close(reward[1], 1.0, TOL, "truncada: el paso dio recompensa")
     assert_close(discount[1], 0.0, TOL, "truncada: rec_discount 0")
     assert_close(next_value[1], 4.0, TOL,
-                 "truncada: el bootstrap NO es 0, habia futuro")
+                 "truncada: el bootstrap no es 0, habia futuro")
 
-    # --- [2] terminal: deja de simular y ademas pierde el futuro ---
+    # La tercera muere de verdad: deja de simular y ademas pierde el futuro.
     assert_close(reward[2], 0.0, TOL, "terminal: sin recompensa")
     assert_close(discount[2], 0.0, TOL, "terminal: rec_discount 0")
     assert_close(next_value[2], 0.0, TOL, "terminal: bootstrap 0")
@@ -94,7 +94,7 @@ def test_one_depth_all_three_endings(ctx: DeviceContext) raises:
     if next_value[1] == next_value[2]:
         raise Error("truncada y terminal NO deberian compartir bootstrap")
 
-    # --- el valor viejo sigue intacto: lo necesita el error TD ---
+    # Y el valor viejo tiene que seguir intacto, porque lo necesita el error TD.
     assert_close(old_value[0], 8.0, TOL, "recurrent_fn no debe tocar particles.value")
     assert_close(old_value[1], 5.0, TOL, "recurrent_fn no debe tocar particles.value")
 

@@ -81,7 +81,7 @@ struct RngKey(Copyable, Movable):
 
 
 def fill_uniform(out_ptr: GlobalF32, seed: UInt32, stream: UInt32, n: Int):
-    """Rellena out[0..n) con uniformes. Patron map del Puzzle 1 + guard del 3."""
+    """Rellena out[0..n) con uniformes. Un hilo por valor, con su guard."""
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n:
         # counter = i (el indice global), no un contador compartido: de ahi
@@ -111,26 +111,26 @@ def categorical_from_logits[TPB: Int](out_ptr: GlobalI32, logits_ptr: GlobalF32,
     row = Int(block_idx.x)
     base = row * row_size
 
-    # --- 1. maximo de la fila, para el softmax estable ---
+    # Primero el maximo de la fila, que es lo que hace estable al softmax.
     shared[tid] = logits_ptr[base + tid] if tid < row_size else NEG_INF
     barrier()
     row_max = block_reduce_max[TPB](shared, tid)
 
-    # --- 2. exp(x - max), sin normalizar. Los hilos sobrantes ponen 0 para que
-    #        no aporten masa de probabilidad. ---
+    # Ahora exp(x - max), sin normalizar. Los hilos sobrantes ponen 0 para no
+    # aportar masa de probabilidad.
     shared[tid] = exp(logits_ptr[base + tid] - row_max) if tid < row_size else Scalar[dtype](0)
     barrier()
 
-    # --- 3. prefix sum -> CDF sin normalizar ---
+    # El prefix sum convierte eso en un CDF, tambien sin normalizar.
     block_scan_inclusive[TPB](shared, tid)
 
     total = shared[row_size - 1]
     target = u_ptr[row] * total
 
-    # --- 4. cada hilo mira si el target cae en SU tramo [cdf_prev, cdf) ---
-    # Exactamente uno acierta, asi que no hay carrera al escribir out[row].
-    # Un elemento con probabilidad 0 tiene cdf_prev == cdf, tramo vacio, y no
-    # puede salir elegido: correcto.
+    # Y cada hilo mira si el target cae en su tramo [cdf_prev, cdf). Exactamente
+    # uno acierta, asi que no hay carrera al escribir out[row]. Un elemento con
+    # probabilidad 0 tiene cdf_prev == cdf, o sea un tramo vacio, y por tanto no
+    # puede salir elegido, que es justo lo que queremos.
     if tid < row_size:
         cdf = shared[tid]
         cdf_prev = shared[tid - 1] if tid > 0 else Scalar[dtype](0)

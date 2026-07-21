@@ -3,20 +3,16 @@
 Mantengo los nombres de Stoix (`Particles`, `resample_td_weights`, `root_actions`...)
 para poder poner los dos ficheros uno al lado del otro y comparar.
 
----------------------------------------------------------------------------
-La interfaz `SearchModel`: por que NO es un trait
----------------------------------------------------------------------------
-En Stoix la clase SPO recibe un `recurrent_fn` abstracto y no sabe si detras hay
-una red neuronal, un entorno o un MDP de juguete. Queria lo mismo aqui con un
-trait de Mojo, pero en 1.0.0b1 no se puede: probe pasar el modelo como parametro
-comptime de tipo funcion (`comptime StepFn = def(...) -> ...`) y el compilador no
-acepta el tipo, ni en la variante `capturing` ni en la `escaping` (esta ultima ya
-ni existe). Tampoco vale pasar un kernel entero como parametro: `enqueue_function`
-no consigue inferir su `signature_func`. Los intentos estan en docs/api_notes.md.
+Sobre por que la interfaz del modelo no es un trait: en Stoix la clase SPO recibe
+un `recurrent_fn` abstracto y no sabe si detras hay una red neuronal, un entorno o
+un MDP de juguete. Queria lo mismo aqui, pero en Mojo 1.0.0b1 no se puede. Probe
+pasar el modelo como parametro comptime de tipo funcion y el compilador no acepta
+el tipo, ni con `capturing` ni con `escaping` (esta ultima ya ni existe). Pasar un
+kernel entero como parametro tampoco vale, porque `enqueue_function` no consigue
+inferir su `signature_func`. Los intentos estan en docs/api_notes.md.
 
-Asi que el plan B del plan, pero acotado lo maximo posible: **un modelo = tres
-kernels con firma fija**, y TODO el nucleo SMC (pesos, GAE, resampling, ESS,
-readout) es codigo compartido que no se duplica.
+Asi que un modelo son tres kernels con firma fija, y el resto del nucleo SMC
+(pesos, GAE, resampling, ESS, readout) es codigo compartido que no se duplica.
 
 El contrato de los tres kernels, con P = num_envs * num_particles:
 
@@ -40,9 +36,9 @@ El contrato de los tres kernels, con P = num_envs * num_particles:
         `state` se actualiza in-place.
      Un hilo por particula.
 
-El plegado de gamma y truncacion vive DENTRO del kernel del modelo, igual que en
-el `recurrent_fn` de Stoix, para que el nucleo SMC no tenga que saber nada del
-entorno.
+El plegado de gamma y de la truncacion vive dentro del kernel del modelo, igual
+que en el `recurrent_fn` de Stoix, para que el nucleo SMC no tenga que saber nada
+del entorno.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -161,8 +157,9 @@ struct StepOutputs(Movable):
 
     var next_value: DeviceBuffer[dtype]
     """[P] el bootstrap_value de Stoix: discount_real * search_gamma * V(s').
-    Ojo con la diferencia: en una truncacion `discount` es 0 pero esto NO, porque
-    el estado truncado si tiene futuro y hay que arrastrar su valor."""
+    Cuidado con la diferencia respecto al campo de arriba: en una truncacion el
+    discount vale 0 pero esto no, porque el estado truncado si tiene futuro y hay
+    que arrastrar su valor."""
 
     var next_action: DeviceBuffer[idx_dtype]
     """[P] la accion que la particula ejecutara en la SIGUIENTE profundidad."""
@@ -194,12 +191,12 @@ struct SearchScratch(Movable):
     """Buffers auxiliares del resampling.
 
     El resampling es un gather: la particula i pasa a ser una copia de la
-    particula idx[i]. Hacerlo in-place seria una carrera de libro (un hilo puede
-    escribir su destino antes de que otro haya leido ese mismo hueco), asi que
-    hace falta un buffer intermedio por campo.
+    particula idx[i]. Hacerlo in-place seria una carrera de libro, porque un hilo
+    puede escribir su destino antes de que otro haya leido ese mismo hueco, asi
+    que hace falta un buffer intermedio por campo.
 
-    Solo estan los SEIS campos que se copian. `resample_td_weights` no hace falta
-    porque se resetea a cero, y `gae` tampoco porque se preserva SIN gatherear
+    Solo estan los seis campos que se copian. `resample_td_weights` no hace falta
+    porque se resetea a cero, y `gae` tampoco porque se preserva sin reordenar
     (ver la nota en resample()).
     """
 
@@ -243,8 +240,8 @@ struct SPOOutput(Movable):
     """[num_envs] la accion que se ejecuta de verdad en el entorno."""
 
     var sampled_actions: DeviceBuffer[idx_dtype]
-    """[P] las N acciones raiz que sobrevivieron. Su histograma ES la politica
-    mejorada q, que es lo que el M-step intenta imitar."""
+    """[P] las N acciones raiz que sobrevivieron. Su histograma es la politica
+    mejorada q, que es justo lo que el M-step intenta imitar."""
 
     var sampled_action_weights: DeviceBuffer[dtype]
     """[P] el peso de cada una: softmax(w/temperatura) por env."""

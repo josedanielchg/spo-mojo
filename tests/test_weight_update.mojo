@@ -56,7 +56,7 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
     v0.append(10.0)
     write_into[dtype](particles.value, v0)
 
-    # --- profundidad 0 ---
+    # Profundidad 0.
     r = List[Scalar[dtype]]();  r.append(1.0)
     d = List[Scalar[dtype]]();  d.append(1.0)     # sigue viva
     nv = List[Scalar[dtype]](); nv.append(12.0)
@@ -73,7 +73,7 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
     assert_eq_int(Int(download[idx_dtype](particles.depth, 1)[0]), 1,
                   "profundidad 0: depth++")
 
-    # --- profundidad 1 ---
+    # Profundidad 1.
     r2 = List[Scalar[dtype]]();  r2.append(2.0)
     d2 = List[Scalar[dtype]]();  d2.append(1.0)
     nv2 = List[Scalar[dtype]](); nv2.append(11.0)
@@ -93,8 +93,8 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
 def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
     """Una particula que muere deja de acumular a partir de la profundidad siguiente.
 
-    El paso que la mata SI cuenta (todavia no estaba muerta al entrar), y a partir
-    de ahi su peso queda congelado.
+    El paso que la mata si cuenta, porque todavia no estaba muerta al entrar, y
+    a partir de ahi su peso queda congelado.
 
     Profundidad 0:  V=10, r=1, V'=0, discount=0 (muere)
                     td = 1 + 0 - 10 = -9 ; peso = -9 ; terminal <- 1
@@ -120,7 +120,7 @@ def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
     assert_eq_int(Int(download[idx_dtype](particles.terminal, 1)[0]), 1,
                   "discount 0 tiene que marcar terminal")
 
-    # --- profundidad 1: ya muerta, todo lo que venga se ignora ---
+    # Profundidad 1: ya esta muerta, asi que todo lo que venga se ignora.
     r2 = List[Scalar[dtype]]();  r2.append(100.0)   # recompensa enorme a proposito
     d2 = List[Scalar[dtype]]();  d2.append(0.0)
     nv2 = List[Scalar[dtype]](); nv2.append(50.0)

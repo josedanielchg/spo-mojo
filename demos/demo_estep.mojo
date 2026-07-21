@@ -112,7 +112,7 @@ def main() raises:
         print(" Todo lo que mejore la politica viene de simular.")
         print()
 
-        # --- 1. prior vs q, la configuracion del paper ---
+        # La configuracion del paper: prior contra politica mejorada.
         short = default_toy_config()
         # Para el panel del ESS hace falta un pasillo largo: con el corto todas
         # las particulas se truncan en la profundidad 4 y a partir de ahi sus
@@ -132,7 +132,7 @@ def main() raises:
               "   ", bar(base.q_good, 20), " ", base.q_good)
         print()
 
-        # --- 2. ESS y entropia por profundidad ---
+        # Como evoluciona la salud de la busqueda con la profundidad.
         deep = run_search(ctx, 16, 0.5, 8, 4, long_chain)
         print(" 2. Salud de la busqueda por profundidad (ESS de 16, periodo 4)")
         print("    (pasillo largo, para que las particulas no mueran antes de tiempo)")
@@ -146,7 +146,7 @@ def main() raises:
                   deep.ess[d], "   ", deep.entropy[d], mark)
         print()
 
-        # --- 3. barrido de temperatura ---
+        # Barrido de temperatura.
         print(" 3. Que hace la temperatura eta")
         print("    Baja = solo sobreviven las mejores (mas mejora, menos ESS).")
         print("    Alta = todas parecidas (menos mejora, mas ESS).")
@@ -160,7 +160,7 @@ def main() raises:
                   "   ", st.ess[len(st.ess) - 1])
         print()
 
-        # --- 4. barrido de particulas ---
+        # Barrido del numero de particulas.
         print(" 4. Que hace el numero de particulas N")
         print("    Mas particulas = mejor estimacion de la politica mejorada.")
         print()
@@ -172,7 +172,7 @@ def main() raises:
             print("      ", counts[i], "    ", bar(st.q_good, 20), " ", st.q_good)
         print()
 
-        # --- CSV para las graficas ---
+        # Los numeros crudos a disco, por si quiero mirarlos luego.
         with open("results/estep_policy.csv", "w") as f:
             f.write(String("setting,temperature,num_particles,action,probability\n"))
             f.write(String("prior,0.5,16,BAD,", prior_good, "\n"))

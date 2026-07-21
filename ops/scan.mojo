@@ -1,19 +1,19 @@
-"""Prefix sum por filas, inclusivo y exclusivo (Hillis-Steele, Puzzle 14).
+"""Prefix sum por filas, inclusivo y exclusivo.
 
-En SPO esto es el CDF del resampling: partiendo de los pesos, el prefix sum
-inclusivo da los cortes contra los que se compara el uniforme. El exclusivo
-sirve para posiciones de escritura (el caso del histograma).
+En SPO esto acaba siendo el CDF del resampling: partiendo de los pesos, el
+prefix sum inclusivo da los cortes contra los que se compara el uniforme. El
+exclusivo sirve para calcular posiciones de escritura, como en un histograma.
 
-Igual que reductions.mojo, primero el primitivo de bloque y luego los kernels
-que lo envuelven.
+Igual que en reductions.mojo, primero va el primitivo de bloque y luego los
+kernels que lo envuelven.
 
-Limite: row_size <= TPB. Un scan de verdad para arrays mas grandes que un
-bloque necesita tres pasadas (scan por bloque -> scan de los totales -> sumar
-el offset), y aqui no hace falta: la fila es el numero de particulas (16).
+El limite es row_size <= TPB. Un scan de verdad para arrays mas grandes que un
+bloque necesita tres pasadas (scan por bloque, scan de los totales, y sumar el
+offset), y aqui no hace falta porque la fila es el numero de particulas, 16.
 
-Hillis-Steele hace log2(TPB) pasadas y cada una toca todos los hilos, o sea
-O(n log n) sumas frente a las O(n) de un scan de Blelloch. Para 16-32 elementos
-el trabajo de mas no se nota y el codigo es la mitad de largo.
+El algoritmo es Hillis-Steele: log2(TPB) pasadas y cada una toca todos los
+hilos, o sea O(n log n) sumas frente a las O(n) de un scan de Blelloch. Para
+16-32 elementos el trabajo de mas no se nota y el codigo es la mitad de largo.
 """
 
 from std.builtin.debug_assert import debug_assert
@@ -31,7 +31,7 @@ def block_scan_inclusive[TPB: Int](shared: SharedF32, tid: Int):
     """
     offset = 1
     while offset < TPB:
-        # Aqui SI hacen falta dos barriers por ronda, al contrario que en la
+        # Aqui si hacen falta dos barriers por ronda, al contrario que en la
         # reduccion en arbol. Motivo: el hilo tid escribe shared[tid] mientras
         # el hilo tid+offset quiere leer ese MISMO shared[tid]. Los rangos de
         # lectura y escritura se solapan, asi que hay que separar en el tiempo

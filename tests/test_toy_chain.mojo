@@ -140,13 +140,13 @@ def test_terminal_vs_truncation(ctx: DeviceContext) raises:
 
     r = run_step(ctx, positions, actions, cfg, 1.0)
 
-    # --- terminal ---
+    # El caso terminal.
     assert_close(r.reward[0], 0.0, TOL, "terminal: recompensa")
     assert_close(r.discount[0], 0.0, TOL, "terminal: rec_discount tiene que ser 0")
     assert_close(r.bootstrap[0], 0.0, TOL,
                  "terminal: el bootstrap tiene que ser 0, no hay futuro")
 
-    # --- truncacion ---
+    # Y el de truncacion, que es donde esta la diferencia.
     assert_close(r.next_pos[1], 4.0, TOL, "truncacion: posicion final")
     assert_close(r.reward[1], 1.0, TOL, "truncacion: el paso si dio recompensa")
     assert_close(r.discount[1], 0.0, TOL,

@@ -1,4 +1,4 @@
-"""Softmax estable y logsumexp por filas (Puzzle 18).
+"""Softmax estable y logsumexp por filas.
 
 El truco es restar el maximo de la fila antes de exponenciar. exp(1000) es inf
 y inf/inf es nan, pero exp(1000 - 1000) = 1. Matematicamente da igual, porque

@@ -1,21 +1,19 @@
 """Reducciones por fila: sum, max y argmax.
 
-Layout: un bloque por fila, un hilo por elemento (el patron "axis sum" del
-Puzzle 15). Es el layout que va a usar SPO: bloque = env, hilo = particula.
+Un bloque se encarga de una fila y cada hilo de un elemento. Ese reparto es el
+que acaba usando SPO, donde la fila es un entorno y cada hilo una particula.
 
-Este modulo tiene dos niveles:
-
-  1. Los *primitivos de bloque* (`block_reduce_sum`, `block_reduce_max`), que
-     reducen un array que ya esta en shared memory. Los reutilizan softmax.mojo
-     y rng.mojo, que necesitan reducir a mitad de camino de otra cosa.
-  2. Los *kernels* (`sum_rows`, `max_rows`, `argmax_rows`), que cargan la fila
-     desde memoria global y llaman al primitivo.
+Hay dos niveles aqui. Por un lado los primitivos (`block_reduce_sum`,
+`block_reduce_max`), que reducen un array que ya esta en shared memory; los
+reutilizan softmax.mojo y rng.mojo, que necesitan reducir a mitad de camino de
+otra cosa. Por otro los kernels (`sum_rows`, `max_rows`, `argmax_rows`), que
+cargan la fila desde memoria global y llaman al primitivo.
 
 Si la fila es mas larga que el bloque, cada hilo acumula a saltos de TPB antes
-de reducir (Puzzle 12), asi que row_size puede ser cualquiera.
+de reducir, asi que row_size puede ser cualquiera.
 
 TPB tiene que ser potencia de dos: el arbol va partiendo el rango a la mitad y
-si TPB no es potencia de dos se queda un trozo sin combinar.
+si no lo es se queda un trozo sin combinar.
 """
 
 from std.builtin.debug_assert import debug_assert
@@ -26,23 +24,18 @@ from std.memory import stack_allocation, AddressSpace
 from ops.common import dtype, idx_dtype, NEG_INF, SharedF32, GlobalF32, GlobalI32
 
 
-# ---------------------------------------------------------------------------
-# Primitivos de bloque: reducen shared[0..TPB) y devuelven el resultado a TODOS
-# los hilos (no solo al 0), que es lo que hace falta cuando el valor reducido se
-# usa despues, como el maximo en el softmax.
-#
-# Contrato de los dos:
-#   Antes  : shared[0..TPB) relleno y con un barrier() hecho.
-#   Despues: shared queda machacado y se puede volver a rellenar; salen con un
-#            barrier() para que nadie lo pise mientras otro aun lo lee.
-# ---------------------------------------------------------------------------
+# Los dos primitivos de abajo devuelven el resultado a todos los hilos y no solo
+# al 0, porque el softmax necesita que todos conozcan el maximo de la fila.
+# Esperan que shared ya venga relleno y con su barrier hecho, y lo dejan
+# machacado pero reutilizable: salen con otro barrier para que nadie lo pise
+# mientras un vecino todavia lo esta leyendo.
 
 def block_reduce_sum[TPB: Int](shared: SharedF32, tid: Int) -> Scalar[dtype]:
     stride = TPB // 2
     while stride > 0:
         # El que escribe (tid < stride) nunca es el que otro esta leyendo
-        # (tid + stride >= stride), asi que un solo barrier por ronda basta.
-        # Ojo: esto NO vale para el scan, donde si se solapan (ver scan.mojo).
+        # (tid + stride >= stride), asi que basta un barrier por ronda. En el
+        # scan no se puede hacer esto porque ahi los rangos si se solapan.
         if tid < stride:
             shared[tid] += shared[tid + stride]
         barrier()
@@ -67,10 +60,6 @@ def block_reduce_max[TPB: Int](shared: SharedF32, tid: Int) -> Scalar[dtype]:
     barrier()
     return biggest
 
-
-# ---------------------------------------------------------------------------
-# Kernels
-# ---------------------------------------------------------------------------
 
 def sum_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     """out[fila] = suma de la fila. Lanzar con grid_dim=num_filas, block_dim=TPB."""
@@ -181,13 +170,13 @@ def argmax_rows[TPB: Int](out_ptr: GlobalI32, a_ptr: GlobalF32, row_size: Int):
 
 
 def warp_sum_rows(out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
-    """Suma por fila con butterfly de warp (Puzzle 26): ni shared memory ni barrier.
+    """Suma por fila usando shuffles de warp, sin shared memory ni barriers.
 
     Dentro de un warp los 32 lanes van en lockstep y el valor viaja por
-    registros, asi que sobra la sincronizacion. Sale bastante mas corto que la
-    version en arbol, a cambio de exigir row_size <= WARP_SIZE.
+    registros, asi que sobra sincronizar. Sale bastante mas corto que la version
+    en arbol, a cambio de exigir row_size <= WARP_SIZE. Para SPO esa restriccion
+    no molesta, porque son 16 particulas, medio warp.
 
-    Para SPO esa restriccion no molesta: son 16 particulas, medio warp.
     Lanzar con block_dim=WARP_SIZE.
     """
     debug_assert(row_size <= Int(WARP_SIZE),
@@ -203,8 +192,8 @@ def warp_sum_rows(out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     v = a_ptr[base + tid] if tid < row_size else Scalar[dtype](0)
 
     # shuffle_xor(v, offset) trae el valor del lane tid^offset. Tras
-    # log2(WARP_SIZE) rondas TODOS los lanes tienen la suma total (por eso se
-    # llama butterfly y no reduccion: no colapsa hacia el lane 0).
+    # log2(WARP_SIZE) rondas todos los lanes tienen la suma total, no solo el
+    # lane 0: el intercambio es simetrico y no colapsa hacia ningun sitio.
     offset = Int(WARP_SIZE) // 2
     while offset > 0:
         v += shuffle_xor(v, UInt32(offset))

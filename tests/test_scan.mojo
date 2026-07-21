@@ -46,11 +46,11 @@ def check_scans(ctx: DeviceContext, rows: Int, row_size: Int) raises:
         running = Scalar[dtype](0)
         for c in range(row_size):
             i = r * row_size + c
-            # exclusivo = lo acumulado ANTES de este elemento
+            # el exclusivo es lo acumulado antes de este elemento
             assert_close(got_exc[i], running, TOL,
                          String("exclusive fila=", r, " col=", c))
             running += data[i]
-            # inclusivo = lo acumulado DESPUES
+            # y el inclusivo lo acumulado despues
             assert_close(got_inc[i], running, TOL,
                          String("inclusive fila=", r, " col=", c))
         assert_close(got_inc[r * row_size + row_size - 1], running, TOL,
