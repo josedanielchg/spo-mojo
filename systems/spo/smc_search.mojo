@@ -1,13 +1,14 @@
 """El nucleo de la busqueda SMC. Espeja la clase SPO de stoix/systems/spo/ff_spo.py.
 
 Todo lo de aqui es independiente del modelo: no sabe si detras hay un MDP de
-juguete, CartPole o una red neuronal. Lo unico especifico del modelo son los tres
-kernels que describe spo_types.mojo, y los llama quien orquesta, no este fichero.
+juguete, CartPole o una red neuronal. Lo unico que pide es un `SearchModel` (dos
+metodos, ver spo_types.mojo), y `search[M]()` de abajo es la UNICA copia del
+algoritmo: no hay una version por entorno.
 
 Orden de la busqueda, igual que en Stoix:
 
     root_fn        siembra N particulas por env desde el prior
-    recurrent_fn   avanza las P particulas un paso  (por profundidad)
+    model.step     avanza las P particulas un paso  (por profundidad)
     weight update  acumula el error TD en el log-peso
     resample       cada `resample_period` pasos
     readout        muestrea la accion final de softmax(w/eta)
@@ -25,11 +26,12 @@ from std.memory import stack_allocation, AddressSpace
 
 from ops.common import dtype, idx_dtype, NEG_INF, GlobalF32, GlobalI32
 from ops.reductions import block_reduce_max, block_reduce_sum
-from ops.rng import categorical_from_logits
+from ops.rng import categorical_from_logits, fill_uniform
 from ops.scan import block_scan_inclusive
 from ops.softmax import softmax_rows
 from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
-                                   SearchScratch, SPOOutput)
+                                   SearchScratch, SPOOutput, SearchWorkspace,
+                                   SearchModel)
 
 comptime TPB = 32
 """Bloque de los kernels que son un map plano: un hilo por particula."""
@@ -686,3 +688,66 @@ def smc_depth_close(ctx: DeviceContext, particles: Particles,
     # Modo 'period' de Stoix: resamplea cuando (depth+1) es multiplo del periodo.
     if (depth + 1) % cfg.resample_period == 0:
         resample(ctx, particles, scratch, cfg, resample_uniforms)
+
+
+# Streams del RNG. Cada uso tiene el suyo para que no compartan secuencia: si el
+# sorteo de acciones y el del resampling salieran del mismo stream, las decisiones
+# quedarian correlacionadas. Viven aqui y no en el modelo porque la convencion es
+# una propiedad de la BUSQUEDA: asi el juguete y CartPole son comparables con la
+# misma semilla.
+comptime RNG_ROOT = UInt32(0)
+comptime RNG_ACTION = UInt32(100)
+comptime RNG_RESAMPLE = UInt32(900)
+comptime RNG_READOUT = UInt32(7777)
+
+
+def search[M: SearchModel](ctx: DeviceContext, ws: SearchWorkspace,
+                           cfg: SPOConfig, model: M,
+                           root_state: DeviceBuffer[dtype],
+                           seed: UInt32) raises:
+    """Una busqueda SMC completa: de los estados raiz a la accion a ejecutar.
+
+    Equivale a `SPO.search` + `SPO.rollout` de Stoix juntas, y es la unica copia
+    del algoritmo. Lo especifico del modelo son las dos llamadas a `model`.
+
+    El resultado queda en `ws.output`: la accion por entorno, la politica mejorada
+    q (soporte + pesos), las ventajas para el loss de la temperatura y las
+    metricas por profundidad.
+    """
+    p_total = cfg.num_search_particles()
+    blocks_p = (p_total + TPB - 1) // TPB
+
+    # El modelo evaluado en la raiz, un estado por entorno.
+    model.eval_root(ctx, cfg, root_state, ws.root_logits, ws.root_value)
+
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        ws.u_action.unsafe_ptr(), seed, RNG_ROOT, p_total,
+        grid_dim=blocks_p, block_dim=TPB)
+
+    root_fn(ctx, ws.particles, ws.outputs, cfg, root_state, ws.root_logits,
+            ws.root_value, ws.u_action)
+    snapshot_root_values(ctx, ws.particles, ws.output, cfg)
+
+    # El bucle de profundidad vive en el host pero solo encola kernels: no hay ni
+    # un synchronize dentro, porque el host no necesita leer nada hasta el final y
+    # el stream ya los ejecuta en orden.
+    for d in range(cfg.search_depth):
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            ws.u_action.unsafe_ptr(), seed, RNG_ACTION + UInt32(d), p_total,
+            grid_dim=blocks_p, block_dim=TPB)
+
+        # Las dos unicas lineas que dependen del modelo de toda la busqueda.
+        model.step(ctx, cfg, ws.particles, ws.outputs)
+        sample_next_actions(ctx, ws.outputs, cfg, ws.u_action)
+
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            ws.u_resample.unsafe_ptr(), seed, RNG_RESAMPLE + UInt32(d), p_total,
+            grid_dim=blocks_p, block_dim=TPB)
+        smc_depth_close(ctx, ws.particles, ws.outputs, ws.scratch, ws.output,
+                        cfg, d, ws.u_resample)
+
+    # Y por ultimo la accion que se ejecuta de verdad.
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        ws.u_action.unsafe_ptr(), seed, RNG_READOUT, p_total,
+        grid_dim=blocks_p, block_dim=TPB)
+    readout_weighted(ctx, ws.particles, ws.scratch, ws.output, cfg, ws.u_action)

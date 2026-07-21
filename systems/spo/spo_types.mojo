@@ -3,12 +3,14 @@
 Mantenemos los nombres de Stoix (`Particles`, `resample_td_weights`, `root_actions`...)
 para poder poner los dos ficheros uno al lado del otro y comparar.
 
-Sobre por que la interfaz del modelo no es un trait: en Stoix la clase SPO recibe
-un `recurrent_fn` abstracto y no sabe si detras hay una red neuronal, un entorno o
-un MDP de juguete. Pero en Mojo 1.0.0b1 no se puede. 
+Aqui vive tambien `SearchModel`, el contrato que la busqueda le pide a un modelo.
+En Stoix la clase SPO recibe un `recurrent_fn` abstracto y no sabe si detras hay
+una red neuronal, un entorno o un MDP de juguete; esto es lo mismo en Mojo.
 
-Asi que un modelo son tres kernels con firma fija, y el resto del nucleo SMC
-(pesos, GAE, resampling, ESS, readout) es codigo compartido que no se duplica.
+Que el contrato viva en este fichero y no en smc_search.mojo es a proposito: asi
+un entorno implementa `SearchModel` importando solo los tipos de datos, sin
+depender del algoritmo de busqueda. La flecha va entorno -> tipos <- busqueda, y
+`envs/cartpole.mojo` podra usarse como entorno real sin arrastrar el E-step.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -268,3 +270,105 @@ struct SPOOutput(Movable):
         self.ess.enqueue_fill(0)
         self.entropy = ctx.enqueue_create_buffer[dtype](metrics)
         self.entropy.enqueue_fill(0)
+
+
+struct SearchWorkspace(Movable):
+    """Toda la memoria que una busqueda necesita, reservada UNA vez.
+
+    Antes cada busqueda se reservaba sus propios buffers de uniformes y de raiz al
+    entrar y los soltaba al salir. En el juguete daba igual, pero en la fase 8 la
+    busqueda corre en cada paso de entorno, y reservar memoria de device miles de
+    veces es trabajo puro por nada. Aqui se construye el workspace una vez y se
+    reutiliza en todas las llamadas a `search`.
+    """
+
+    var particles: Particles
+    var outputs: StepOutputs
+    var scratch: SearchScratch
+    var output: SPOOutput
+
+    var root_logits: DeviceBuffer[dtype]
+    """[num_envs, num_actions] el prior evaluado en los estados raiz."""
+
+    var root_value: DeviceBuffer[dtype]
+    """[num_envs] V(s_raiz)."""
+
+    var u_action: DeviceBuffer[dtype]
+    """[P] uniformes para sortear acciones. Se rellena de nuevo en cada
+    profundidad; se puede reutilizar sin miedo porque el stream es unico y ejecuta
+    en orden: el relleno siguiente no puede adelantar al kernel que leyo el anterior."""
+
+    var u_resample: DeviceBuffer[dtype]
+    """[P] uniformes del resampling, en un buffer aparte para que el muestreo de
+    acciones y el de resampling no compartan secuencia."""
+
+    def __init__(out self, ctx: DeviceContext, cfg: SPOConfig) raises:
+        p = cfg.num_search_particles()
+        self.particles = Particles(ctx, cfg)
+        self.outputs = StepOutputs(ctx, cfg)
+        self.scratch = SearchScratch(ctx, cfg)
+        self.output = SPOOutput(ctx, cfg)
+
+        self.root_logits = ctx.enqueue_create_buffer[dtype](
+            cfg.num_envs * cfg.num_actions)
+        self.root_logits.enqueue_fill(0)
+        self.root_value = ctx.enqueue_create_buffer[dtype](cfg.num_envs)
+        self.root_value.enqueue_fill(0)
+        self.u_action = ctx.enqueue_create_buffer[dtype](p)
+        self.u_action.enqueue_fill(0)
+        self.u_resample = ctx.enqueue_create_buffer[dtype](p)
+        self.u_resample.enqueue_fill(0)
+
+
+trait SearchModel:
+    """Lo que la busqueda necesita saber hacer a un modelo. Son dos cosas.
+
+    Es el equivalente del `recurrent_fn` abstracto que recibe la clase SPO de
+    Stoix: el nucleo SMC (pesos, GAE, resampling, ESS, readout) no sabe si detras
+    hay un MDP de juguete, CartPole o un MLP.
+
+    Como funciona esto en Mojo 1.0.0b1, que es lo que costo encontrar: el modelo es
+    una INSTANCIA que se queda siempre en el host, y sus `enqueue_function` viven
+    DENTRO de sus propios metodos, donde el simbolo del kernel es concreto. El
+    kernel nunca cruza la frontera generica; solo la cruza el tipo. Intentar lo
+    contrario (pasar el kernel como parametro comptime, o como funcion de device)
+    no compila -- ver docs/api_notes.md.
+
+    Que el modelo sea una instancia y no un tipo suelto tambien importa: asi puede
+    llevar estado propio. El juguete lleva tres numeros; el MLP de la fase 5
+    llevara los DeviceBuffer de los pesos del actor y del critico.
+    """
+
+    def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
+                  root_state: DeviceBuffer[dtype],
+                  logits_out: DeviceBuffer[dtype],
+                  value_out: DeviceBuffer[dtype]) raises:
+        """El prior y el valor en los estados RAIZ, uno por entorno.
+
+            root_state  [num_envs, state_dim]   entrada
+            logits_out  [num_envs, num_actions] salida: los logits del prior
+            value_out   [num_envs]              salida: V(s_raiz)
+        """
+        ...
+
+    def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
+             outputs: StepOutputs) raises:
+        """Avanza las P particulas una profundidad. Es el `recurrent_fn` del modelo.
+
+        Lee  `particles.state` y `outputs.next_action` (la accion que toca ejecutar)
+        y escribe:
+            particles.state         el estado nuevo, in-place
+            outputs.reward          [P] recompensa del paso
+            outputs.discount        [P] rec_discount: discount * (1 - truncated)
+            outputs.next_value      [P] bootstrap: discount_real * search_gamma * V(s')
+            outputs.action_logits   [P, num_actions] el prior en el estado NUEVO
+
+        El plegado de gamma y de la truncacion es responsabilidad del modelo, igual
+        que en el `recurrent_fn` de Stoix, para que el nucleo SMC no tenga que saber
+        nada del entorno.
+
+        Lo que NO hace: tocar `particles.value` (el error TD necesita el V viejo) ni
+        sortear la accion siguiente -- de eso se encarga `sample_next_actions`, que
+        es generico y lo llama la busqueda.
+        """
+        ...

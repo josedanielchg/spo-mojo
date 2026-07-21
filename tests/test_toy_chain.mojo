@@ -17,7 +17,7 @@ from std.gpu.host import DeviceContext
 from ops.common import dtype, idx_dtype
 from envs.toy_chain import (toy_recurrent_kernel, toy_value_kernel,
                             toy_policy_logits_kernel, toy_value,
-                            default_toy_config, ToyChainConfig,
+                            default_toy_chain, ToyChain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
 from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
                                    default_config)
@@ -38,7 +38,7 @@ struct StepResult(Movable):
 
 
 def run_step(ctx: DeviceContext, positions: List[Scalar[dtype]],
-             actions: List[Scalar[idx_dtype]], cfg: ToyChainConfig,
+             actions: List[Scalar[idx_dtype]], cfg: ToyChain,
              search_gamma: Scalar[dtype]) raises -> StepResult:
     """Un paso del modelo sobre las posiciones dadas."""
     n = len(positions)
@@ -62,7 +62,7 @@ def run_step(ctx: DeviceContext, positions: List[Scalar[dtype]],
 
 def test_value_function(ctx: DeviceContext) raises:
     """V(pos) = 8 - pos, y nunca negativo pasada la ultima casilla."""
-    cfg = default_toy_config()
+    cfg = default_toy_chain()
     positions = List[Scalar[dtype]]()
     for p in range(10):
         positions.append(Scalar[dtype](p))
@@ -107,7 +107,7 @@ def test_uniform_prior(ctx: DeviceContext) raises:
 
 def test_normal_step(ctx: DeviceContext) raises:
     """GOOD desde 0, 1 y 2: avanza, da 1 de recompensa y sigue viva."""
-    cfg = default_toy_config()
+    cfg = default_toy_chain()
     positions = List[Scalar[dtype]]()
     actions = List[Scalar[idx_dtype]]()
     for p in range(3):          # 0, 1, 2 -> llegan a 1, 2, 3 < horizonte 4
@@ -129,7 +129,7 @@ def test_normal_step(ctx: DeviceContext) raises:
 
 def test_terminal_vs_truncation(ctx: DeviceContext) raises:
     """El test que justifica todo el fichero: los dos finales no son iguales."""
-    cfg = default_toy_config()
+    cfg = default_toy_chain()
 
     positions = List[Scalar[dtype]]()
     actions = List[Scalar[idx_dtype]]()
@@ -164,7 +164,7 @@ def test_zero_value_variant(ctx: DeviceContext) raises:
     Es el modo que usara la demo de CartPole en la fase 4, donde los pesos SMC
     degeneran al retorno acumulado.
     """
-    cfg = ToyChainConfig(chain_length=8, horizon=4, value_scale=0.0)
+    cfg = ToyChain(chain_length=8, horizon=4, value_scale=0.0)
 
     positions = List[Scalar[dtype]]()
     actions = List[Scalar[idx_dtype]]()
@@ -181,7 +181,7 @@ def test_zero_value_variant(ctx: DeviceContext) raises:
 
 def test_search_gamma_applies(ctx: DeviceContext) raises:
     """El bootstrap escala con search_gamma; la recompensa del paso no."""
-    cfg = default_toy_config()
+    cfg = default_toy_chain()
     positions = List[Scalar[dtype]]()
     actions = List[Scalar[idx_dtype]]()
     positions.append(0.0); actions.append(Scalar[idx_dtype](ACTION_GOOD))

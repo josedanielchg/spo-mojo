@@ -26,18 +26,18 @@ cero, que es lo que hace que el test note la diferencia.
 Valor analitico: quedan (L - pos) casillas buenas, cada una con recompensa 1, y
 search_gamma es 1, asi que V(pos) = value_scale * (L - pos). Con value_scale = 0
 se obtiene V == 0, que es el caso "sin critico" que usara la demo de CartPole.
+
+Este fichero NO importa la busqueda: solo los tipos y el contrato `SearchModel`.
+El entorno no tiene por que saber que existe SPO, igual que en Stoix, donde
+`envs/` no conoce el algoritmo y es `ff_spo.py` quien monta la busqueda encima.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
 from std.gpu.host import DeviceContext, DeviceBuffer
 
 from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32
-from ops.rng import fill_uniform
 from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
-                                   SearchScratch, SPOOutput)
-from systems.spo.smc_search import (sample_next_actions, root_fn,
-                                    snapshot_root_values, smc_depth_close,
-                                    readout_weighted)
+                                   SearchModel)
 
 # Las dos acciones. El orden importa para los tests: BAD es la 0.
 comptime ACTION_BAD = 0
@@ -48,28 +48,6 @@ comptime NUM_ACTIONS = 2
 comptime STATE_DIM = 1
 
 comptime TPB_TOY = 32
-
-
-# Los kernels reciben los campos sueltos en vez del struct entero. Para pasar un
-# struct a un kernel hay que implementar DevicePassable, que pide un alias
-# device_type y el metodo privado _to_device_type, y no compensa esa ceremonia
-# para tres numeros. Asi que esto se queda como contabilidad del lado host.
-@fieldwise_init
-struct ToyChainConfig(Copyable, Movable):
-    var chain_length: Int
-    """Cuantas casillas buenas hay en total. Define el valor analitico."""
-
-    var horizon: Int
-    """En que casilla se trunca el episodio. Menor que chain_length para que la
-    truncacion deje valor futuro sin recoger."""
-
-    var value_scale: Scalar[dtype]
-    """1.0 = valor analitico exacto, 0.0 = V==0 (el caso sin critico)."""
-
-
-def default_toy_config() -> ToyChainConfig:
-    """L=8, truncacion en 4: al truncar quedan 4 casillas, o sea V(4) = 4 != 0."""
-    return ToyChainConfig(chain_length=8, horizon=4, value_scale=1.0)
 
 
 def toy_value(pos: Scalar[dtype], chain_length: Int,
@@ -84,7 +62,7 @@ def toy_value(pos: Scalar[dtype], chain_length: Int,
 
 def toy_value_kernel(value_out: GlobalF32, state: GlobalF32, n_particles: Int,
                      chain_length: Int, value_scale: Scalar[dtype]):
-    """value_kernel de la interfaz: V(s) de cada particula. Un hilo por particula."""
+    """V(s) de cada particula. Un hilo por particula."""
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n_particles:
         value_out[i] = toy_value(state[i * STATE_DIM], chain_length, value_scale)
@@ -92,7 +70,7 @@ def toy_value_kernel(value_out: GlobalF32, state: GlobalF32, n_particles: Int,
 
 def toy_policy_logits_kernel(logits_out: GlobalF32, state: GlobalF32,
                              n_particles: Int):
-    """policy_logits_kernel de la interfaz: el prior en el estado de cada particula.
+    """El prior en el estado de cada particula.
 
     El prior del juguete es UNIFORME, y eso es deliberado: si la busqueda mejora
     una politica que no sabe nada, la mejora viene de la busqueda y de nada mas.
@@ -110,10 +88,10 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
                          next_value_out: GlobalF32,
                          n_particles: Int, chain_length: Int, horizon: Int,
                          value_scale: Scalar[dtype], search_gamma: Scalar[dtype]):
-    """recurrent_kernel de la interfaz: avanza una casilla y pliega gamma.
+    """Avanza una casilla y pliega gamma. La dinamica del modelo.
 
-    Es el equivalente del `recurrent_fn` de Stoix (ff_spo.py:288) para este
-    modelo, incluyendo las dos lineas que mas cuesta acertar:
+    Es el equivalente del `recurrent_fn` de Stoix para este modelo, incluyendo las
+    dos lineas que mas cuesta acertar:
 
         rec_discount    = discount * (1 - truncated)
         bootstrap_value = discount * search_gamma * V(s')
@@ -169,111 +147,69 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
     next_value_out[i] = bootstrap_value
 
 
-def toy_recurrent_fn(ctx: DeviceContext, particles: Particles,
-                     outputs: StepOutputs, cfg: SPOConfig,
-                     toy_cfg: ToyChainConfig,
-                     uniforms: DeviceBuffer[dtype]) raises:
-    """El recurrent_fn del juguete: avanza las P particulas una profundidad.
+@fieldwise_init
+struct ToyChain(SearchModel, Copyable, Movable):
+    """El pasillo como modelo de busqueda.
 
-    Es el equivalente de `make_recurrent_fn(environment_step, ...)` de Stoix
-    (ff_spo.py:234), que tambien se construye por modelo porque cierra sobre el
-    `environment_step` concreto. Las tres llamadas son:
-
-        1. dinamica + plegado de gamma/truncacion   (kernel de ESTE modelo)
-        2. logits del prior en el estado NUEVO      (kernel de ESTE modelo)
-        3. muestrear la accion siguiente            (generico, compartido)
-
-    La accion que se ejecuta es `outputs.next_action` de la profundidad anterior;
-    en la profundidad 0 la pone root_fn en `particles.root_actions`, asi que el
-    llamador decide cual pasar en `action_in`.
-
-    No toca `particles.value`, y eso importa: el error TD de la actualizacion de
-    pesos necesita el V(s) viejo, y el nuevo se queda en `outputs.next_value`
-    hasta que update_particles lo mueva.
+    El struct se queda SIEMPRE en el host: lo que baja a la GPU son sus tres
+    numeros sueltos, dentro de los `enqueue_function` de sus propios metodos. Por
+    eso la busqueda puede ser generica sobre el modelo sin que ningun kernel
+    cruce la frontera (ver el contrato en spo_types.mojo).
     """
-    p_total = cfg.num_search_particles()
-    blocks = (p_total + TPB_TOY - 1) // TPB_TOY
 
-    ctx.enqueue_function[toy_recurrent_kernel, toy_recurrent_kernel](
-        particles.state.unsafe_ptr(), outputs.next_action.unsafe_ptr(),
-        outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
-        outputs.next_value.unsafe_ptr(), p_total,
-        toy_cfg.chain_length, toy_cfg.horizon, toy_cfg.value_scale,
-        cfg.search_gamma,
-        grid_dim=blocks, block_dim=TPB_TOY)
+    var chain_length: Int
+    """Cuantas casillas buenas hay en total. Define el valor analitico."""
 
-    ctx.enqueue_function[toy_policy_logits_kernel, toy_policy_logits_kernel](
-        outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),
-        p_total, grid_dim=blocks, block_dim=TPB_TOY)
+    var horizon: Int
+    """En que casilla se trunca el episodio. Menor que chain_length para que la
+    truncacion deje valor futuro sin recoger."""
 
-    sample_next_actions(ctx, outputs, cfg, uniforms)
+    var value_scale: Scalar[dtype]
+    """1.0 = valor analitico exacto, 0.0 = V==0 (el caso sin critico)."""
+
+    def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
+                  root_state: DeviceBuffer[dtype],
+                  logits_out: DeviceBuffer[dtype],
+                  value_out: DeviceBuffer[dtype]) raises:
+        """El prior y V(s) sobre los estados raiz, uno por entorno."""
+        blocks = (cfg.num_envs + TPB_TOY - 1) // TPB_TOY
+
+        ctx.enqueue_function[toy_policy_logits_kernel, toy_policy_logits_kernel](
+            logits_out.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
+            grid_dim=blocks, block_dim=TPB_TOY)
+
+        ctx.enqueue_function[toy_value_kernel, toy_value_kernel](
+            value_out.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
+            self.chain_length, self.value_scale,
+            grid_dim=blocks, block_dim=TPB_TOY)
+
+    def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
+             outputs: StepOutputs) raises:
+        """Avanza las P particulas una profundidad.
+
+        Dos kernels: la dinamica (que ya pliega gamma y la truncacion) y el prior
+        evaluado en el estado NUEVO. Sortear la accion siguiente no es cosa del
+        modelo: de eso se encarga `sample_next_actions`, que es generico.
+
+        No toca `particles.value`, y eso importa: el error TD de la actualizacion
+        de pesos necesita el V(s) viejo, y el nuevo se queda en
+        `outputs.next_value` hasta que update_particles lo mueva.
+        """
+        p_total = cfg.num_search_particles()
+        blocks = (p_total + TPB_TOY - 1) // TPB_TOY
+
+        ctx.enqueue_function[toy_recurrent_kernel, toy_recurrent_kernel](
+            particles.state.unsafe_ptr(), outputs.next_action.unsafe_ptr(),
+            outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
+            outputs.next_value.unsafe_ptr(), p_total,
+            self.chain_length, self.horizon, self.value_scale, cfg.search_gamma,
+            grid_dim=blocks, block_dim=TPB_TOY)
+
+        ctx.enqueue_function[toy_policy_logits_kernel, toy_policy_logits_kernel](
+            outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),
+            p_total, grid_dim=blocks, block_dim=TPB_TOY)
 
 
-def toy_search(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
-               scratch: SearchScratch, output: SPOOutput, cfg: SPOConfig,
-               toy_cfg: ToyChainConfig, root_state: DeviceBuffer[dtype],
-               seed: UInt32) raises:
-    """Una busqueda SMC completa sobre el juguete: de la raiz a la accion.
-
-    Es el unico sitio con codigo especifico del modelo en toda la busqueda, y son
-    dos lineas dentro del bucle: `toy_recurrent_fn` (el modelo) y
-    `smc_depth_close` (generico). Cambiar a CartPole sera cambiar la primera.
-
-    Equivale a `SPO.search` + `SPO.rollout` de Stoix juntas.
-    """
-    p_total = cfg.num_search_particles()
-    blocks_env = (cfg.num_envs + TPB_TOY - 1) // TPB_TOY
-    blocks_p = (p_total + TPB_TOY - 1) // TPB_TOY
-
-    # El modelo evaluado en la raiz, un estado por entorno.
-    root_logits = ctx.enqueue_create_buffer[dtype](cfg.num_envs * NUM_ACTIONS)
-    root_logits.enqueue_fill(0)
-    root_value = ctx.enqueue_create_buffer[dtype](cfg.num_envs)
-    root_value.enqueue_fill(0)
-
-    ctx.enqueue_function[toy_policy_logits_kernel, toy_policy_logits_kernel](
-        root_logits.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
-        grid_dim=blocks_env, block_dim=TPB_TOY)
-    ctx.enqueue_function[toy_value_kernel, toy_value_kernel](
-        root_value.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
-        toy_cfg.chain_length, toy_cfg.value_scale,
-        grid_dim=blocks_env, block_dim=TPB_TOY)
-
-    # Dos buffers de uniformes que se rellenan de nuevo en cada profundidad. Se
-    # pueden reutilizar sin miedo porque el stream es unico y ejecuta en orden:
-    # el segundo relleno no puede adelantar al kernel que leyo el primero.
-    u_action = ctx.enqueue_create_buffer[dtype](p_total)
-    u_action.enqueue_fill(0)
-    u_resample = ctx.enqueue_create_buffer[dtype](p_total)
-    u_resample.enqueue_fill(0)
-
-    # Streams separados por uso, para que el muestreo de acciones y el del
-    # resampling no compartan secuencia.
-    ctx.enqueue_function[fill_uniform, fill_uniform](
-        u_action.unsafe_ptr(), seed, UInt32(0), p_total,
-        grid_dim=blocks_p, block_dim=TPB_TOY)
-
-    root_fn(ctx, particles, outputs, cfg, root_state, root_logits, root_value,
-            u_action)
-    snapshot_root_values(ctx, particles, output, cfg)
-
-    # El bucle de profundidad vive en el host pero solo encola kernels: no hay
-    # ni un synchronize dentro, porque el host no necesita leer nada hasta el
-    # final y el stream ya los ejecuta en orden.
-    for d in range(cfg.search_depth):
-        ctx.enqueue_function[fill_uniform, fill_uniform](
-            u_action.unsafe_ptr(), seed, UInt32(100 + d), p_total,
-            grid_dim=blocks_p, block_dim=TPB_TOY)
-        toy_recurrent_fn(ctx, particles, outputs, cfg, toy_cfg, u_action)
-
-        ctx.enqueue_function[fill_uniform, fill_uniform](
-            u_resample.unsafe_ptr(), seed, UInt32(900 + d), p_total,
-            grid_dim=blocks_p, block_dim=TPB_TOY)
-        smc_depth_close(ctx, particles, outputs, scratch, output, cfg, d,
-                        u_resample)
-
-    # Y por ultimo la accion que se ejecuta de verdad.
-    ctx.enqueue_function[fill_uniform, fill_uniform](
-        u_action.unsafe_ptr(), seed, UInt32(7777), p_total,
-        grid_dim=blocks_p, block_dim=TPB_TOY)
-    readout_weighted(ctx, particles, scratch, output, cfg, u_action)
+def default_toy_chain() -> ToyChain:
+    """L=8, truncacion en 4: al truncar quedan 4 casillas, o sea V(4) = 4 != 0."""
+    return ToyChain(chain_length=8, horizon=4, value_scale=1.0)

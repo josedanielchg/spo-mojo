@@ -20,10 +20,10 @@ from std.gpu.host import DeviceContext
 from std.math import log
 
 from ops.common import dtype, idx_dtype
-from envs.toy_chain import (toy_search, default_toy_config, ToyChainConfig,
+from envs.toy_chain import (default_toy_chain, ToyChain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
-from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
-                                   SearchScratch, SPOOutput)
+from systems.spo.spo_types import SPOConfig, SearchWorkspace
+from systems.spo.smc_search import search
 from tests.helpers import upload, download
 
 comptime SEED = UInt32(20260719)
@@ -45,29 +45,25 @@ struct SearchStats(Movable):
 
 def run_search(ctx: DeviceContext, num_particles: Int,
                temperature: Scalar[dtype], depth: Int, period: Int,
-               toy_cfg: ToyChainConfig) raises -> SearchStats:
+               toy: ToyChain) raises -> SearchStats:
     """Corre una busqueda completa y resume el resultado."""
     cfg = SPOConfig(
         num_envs=NUM_ENVS, num_particles=num_particles, num_actions=NUM_ACTIONS,
         state_dim=STATE_DIM, search_depth=depth, resample_period=period,
         temperature=temperature, search_gamma=1.0, search_gae_lambda=1.0)
 
-    particles = Particles(ctx, cfg)
-    outputs = StepOutputs(ctx, cfg)
-    scratch = SearchScratch(ctx, cfg)
-    output = SPOOutput(ctx, cfg)
+    ws = SearchWorkspace(ctx, cfg)
 
     root_state = List[Scalar[dtype]]()
     for _ in range(NUM_ENVS):
         root_state.append(0.0)      # todos en la casilla de salida
 
-    toy_search(ctx, particles, outputs, scratch, output, cfg, toy_cfg,
-               upload[dtype](ctx, root_state), SEED)
+    search[ToyChain](ctx, ws, cfg, toy, upload[dtype](ctx, root_state), SEED)
     ctx.synchronize()
 
     p_total = cfg.num_search_particles()
-    actions = download[idx_dtype](output.sampled_actions, p_total)
-    weights = download[dtype](output.sampled_action_weights, p_total)
+    actions = download[idx_dtype](ws.output.sampled_actions, p_total)
+    weights = download[dtype](ws.output.sampled_action_weights, p_total)
 
     # q(GOOD) = histograma de las acciones raiz ponderado por sus pesos.
     q_total = Scalar[dtype](0)
@@ -78,8 +74,8 @@ def run_search(ctx: DeviceContext, num_particles: Int,
                 q_total += weights[p]
     q_good = q_total / Scalar[dtype](NUM_ENVS)
 
-    ess_raw = download[dtype](output.ess, depth * NUM_ENVS)
-    ent_raw = download[dtype](output.entropy, depth * NUM_ENVS)
+    ess_raw = download[dtype](ws.output.ess, depth * NUM_ENVS)
+    ent_raw = download[dtype](ws.output.entropy, depth * NUM_ENVS)
     ess = List[Scalar[dtype]]()
     entropy = List[Scalar[dtype]]()
     for d in range(depth):
@@ -113,11 +109,11 @@ def main() raises:
         print()
 
         # La configuracion del paper: prior contra politica mejorada.
-        short = default_toy_config()
+        short = default_toy_chain()
         # Para el panel del ESS hace falta un pasillo largo: con el corto todas
         # las particulas se truncan en la profundidad 4 y a partir de ahi sus
         # pesos quedan congelados, o sea ESS = N artificialmente.
-        long_chain = ToyChainConfig(chain_length=30, horizon=30, value_scale=1.0)
+        long_chain = ToyChain(chain_length=30, horizon=30, value_scale=1.0)
 
         base = run_search(ctx, 16, 0.5, 4, 4, short)
         prior_good = Scalar[dtype](1.0) / Scalar[dtype](NUM_ACTIONS)

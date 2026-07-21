@@ -11,9 +11,10 @@ from std.gpu.host import DeviceContext
 from std.math import abs, log
 
 from ops.common import dtype, idx_dtype
-from envs.toy_chain import (toy_recurrent_fn, toy_value, default_toy_config,
+from envs.toy_chain import (toy_value, default_toy_chain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
 from systems.spo.spo_types import SPOConfig, Particles, StepOutputs
+from systems.spo.smc_search import sample_next_actions
 from tests.helpers import upload, download, write_into, assert_close, assert_eq_int
 
 comptime TOL = Scalar[dtype](1e-6)
@@ -29,7 +30,7 @@ def make_config(num_particles: Int) -> SPOConfig:
 
 def test_one_depth_all_three_endings(ctx: DeviceContext) raises:
     """Las tres particulas cubren los tres caminos posibles de un paso."""
-    toy_cfg = default_toy_config()
+    toy = default_toy_chain()
     cfg = make_config(3)
     p_total = cfg.num_search_particles()
 
@@ -60,7 +61,8 @@ def test_one_depth_all_three_endings(ctx: DeviceContext) raises:
         us.append(0.1)
     uniforms = upload[dtype](ctx, us)
 
-    toy_recurrent_fn(ctx, particles, outputs, cfg, toy_cfg, uniforms)
+    toy.step(ctx, cfg, particles, outputs)
+    sample_next_actions(ctx, outputs, cfg, uniforms)
     ctx.synchronize()
 
     state = download[dtype](particles.state, p_total)
@@ -107,7 +109,7 @@ def test_next_action_is_sampled_and_scored(ctx: DeviceContext) raises:
     El prior del juguete es uniforme sobre 2 acciones, asi que la log-prob tiene
     que ser log(0.5) sea cual sea la accion que salga.
     """
-    toy_cfg = default_toy_config()
+    toy = default_toy_chain()
     cfg = make_config(8)
     p_total = cfg.num_search_particles()
 
@@ -128,7 +130,8 @@ def test_next_action_is_sampled_and_scored(ctx: DeviceContext) raises:
         us.append(Scalar[dtype](p) / Scalar[dtype](p_total))
     uniforms = upload[dtype](ctx, us)
 
-    toy_recurrent_fn(ctx, particles, outputs, cfg, toy_cfg, uniforms)
+    toy.step(ctx, cfg, particles, outputs)
+    sample_next_actions(ctx, outputs, cfg, uniforms)
     ctx.synchronize()
 
     next_actions = download[idx_dtype](outputs.next_action, p_total)
@@ -165,7 +168,7 @@ def test_dead_particle_keeps_walking_is_not_a_problem(ctx: DeviceContext) raises
     despues de morir no entra en la busqueda. Aqui solo compruebo que el paso no
     explota ni produce valores raros.
     """
-    toy_cfg = default_toy_config()
+    toy = default_toy_chain()
     cfg = make_config(2)
     p_total = cfg.num_search_particles()
 
@@ -185,13 +188,14 @@ def test_dead_particle_keeps_walking_is_not_a_problem(ctx: DeviceContext) raises
     us.append(0.1); us.append(0.9)
     uniforms = upload[dtype](ctx, us)
 
-    toy_recurrent_fn(ctx, particles, outputs, cfg, toy_cfg, uniforms)
+    toy.step(ctx, cfg, particles, outputs)
+    sample_next_actions(ctx, outputs, cfg, uniforms)
     ctx.synchronize()
 
     next_value = download[dtype](outputs.next_value, p_total)
     # V esta recortado a 0, asi que pasarse del final no da valores negativos.
-    assert_close(next_value[0], toy_value(7.0, toy_cfg.chain_length,
-                                          toy_cfg.value_scale), TOL,
+    assert_close(next_value[0], toy_value(7.0, toy.chain_length,
+                                          toy.value_scale), TOL,
                  "V(7) tras pasar el horizonte")
     assert_close(next_value[1], 0.0, TOL, "V no puede ser negativo pasado el final")
     print("PASS pasarse del final no produce valores negativos")

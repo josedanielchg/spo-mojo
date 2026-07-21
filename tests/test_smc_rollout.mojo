@@ -9,11 +9,11 @@ from std.gpu.host import DeviceContext
 from std.math import abs, log
 
 from ops.common import dtype, idx_dtype
-from envs.toy_chain import (toy_search, default_toy_config, ToyChainConfig,
+from envs.toy_chain import (default_toy_chain, ToyChain,
                             ACTION_BAD, ACTION_GOOD, NUM_ACTIONS, STATE_DIM)
 from systems.spo.spo_types import (SPOConfig, Particles, StepOutputs,
-                                   SearchScratch, SPOOutput)
-from systems.spo.smc_search import resample, compute_ess_entropy
+                                   SearchScratch, SPOOutput, SearchWorkspace)
+from systems.spo.smc_search import resample, compute_ess_entropy, search
 from tests.helpers import (upload, zeros, download, write_into, assert_close,
                            assert_eq_int)
 
@@ -165,22 +165,19 @@ def test_ess_drops_and_recovers_after_resampling(ctx: DeviceContext) raises:
     despues del reset) tiene que verse mas sana que la 3.
     """
     cfg = make_config(num_envs=4, num_particles=16, depth=8, period=4)
-    toy_cfg = ToyChainConfig(chain_length=20, horizon=20, value_scale=1.0)
+    toy = ToyChain(chain_length=20, horizon=20, value_scale=1.0)
 
-    particles = Particles(ctx, cfg)
-    outputs = StepOutputs(ctx, cfg)
-    scratch = SearchScratch(ctx, cfg)
-    output = SPOOutput(ctx, cfg)
+    ws = SearchWorkspace(ctx, cfg)
 
     root_state = List[Scalar[dtype]]()
     for _ in range(cfg.num_envs):
         root_state.append(0.0)
 
-    toy_search(ctx, particles, outputs, scratch, output, cfg, toy_cfg,
-               upload[dtype](ctx, root_state), UInt32(2024))
+    search[ToyChain](ctx, ws, cfg, toy, upload[dtype](ctx, root_state),
+                     UInt32(2024))
     ctx.synchronize()
 
-    ess = download[dtype](output.ess, cfg.search_depth * cfg.num_envs)
+    ess = download[dtype](ws.output.ess, cfg.search_depth * cfg.num_envs)
 
     # Media por profundidad sobre los envs
     means = List[Scalar[dtype]]()
@@ -216,25 +213,22 @@ def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
     `sampled_actions` ponderado por `sampled_action_weights`.
     """
     cfg = make_config(num_envs=8, num_particles=16, depth=4, period=4)
-    toy_cfg = default_toy_config()
+    toy = default_toy_chain()
 
-    particles = Particles(ctx, cfg)
-    outputs = StepOutputs(ctx, cfg)
-    scratch = SearchScratch(ctx, cfg)
-    output = SPOOutput(ctx, cfg)
+    ws = SearchWorkspace(ctx, cfg)
 
     root_state = List[Scalar[dtype]]()
     for _ in range(cfg.num_envs):
         root_state.append(0.0)      # todos en la casilla de salida
 
-    toy_search(ctx, particles, outputs, scratch, output, cfg, toy_cfg,
-               upload[dtype](ctx, root_state), UInt32(1234))
+    search[ToyChain](ctx, ws, cfg, toy, upload[dtype](ctx, root_state),
+                     UInt32(1234))
     ctx.synchronize()
 
     p_total = cfg.num_search_particles()
-    actions = download[idx_dtype](output.sampled_actions, p_total)
-    weights = download[dtype](output.sampled_action_weights, p_total)
-    final_action = download[idx_dtype](output.action, cfg.num_envs)
+    actions = download[idx_dtype](ws.output.sampled_actions, p_total)
+    weights = download[dtype](ws.output.sampled_action_weights, p_total)
+    final_action = download[idx_dtype](ws.output.action, cfg.num_envs)
 
     worst = Scalar[dtype](1.0)
     for e in range(cfg.num_envs):
@@ -267,7 +261,7 @@ def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
 def test_search_is_reproducible(ctx: DeviceContext) raises:
     """Misma semilla, misma busqueda. Sin esto no hay test que valga."""
     cfg = make_config(num_envs=4, num_particles=16, depth=4, period=4)
-    toy_cfg = default_toy_config()
+    toy = default_toy_chain()
     p_total = cfg.num_search_particles()
 
     root_state = List[Scalar[dtype]]()
@@ -276,14 +270,11 @@ def test_search_is_reproducible(ctx: DeviceContext) raises:
 
     first = List[Scalar[dtype]]()
     for run in range(2):
-        particles = Particles(ctx, cfg)
-        outputs = StepOutputs(ctx, cfg)
-        scratch = SearchScratch(ctx, cfg)
-        output = SPOOutput(ctx, cfg)
-        toy_search(ctx, particles, outputs, scratch, output, cfg, toy_cfg,
-                   upload[dtype](ctx, root_state), UInt32(555))
+        ws = SearchWorkspace(ctx, cfg)
+        search[ToyChain](ctx, ws, cfg, toy, upload[dtype](ctx, root_state),
+                         UInt32(555))
         ctx.synchronize()
-        w = download[dtype](output.sampled_action_weights, p_total)
+        w = download[dtype](ws.output.sampled_action_weights, p_total)
         if run == 0:
             first = w^
         else:
@@ -304,7 +295,7 @@ def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
     Lo caza el debug_assert del kernel, pero solo con -D ASSERT=all; por eso
     ademas hay una comprobacion en host (check_search_config) y este test.
     """
-    toy_cfg = default_toy_config()
+    toy = default_toy_chain()
     q = List[Scalar[dtype]]()
 
     counts = List[Int]()
@@ -313,22 +304,19 @@ def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
     for i in range(len(counts)):
         n = counts[i]
         cfg = make_config(num_envs=16, num_particles=n, depth=4, period=4)
-        particles = Particles(ctx, cfg)
-        outputs = StepOutputs(ctx, cfg)
-        scratch = SearchScratch(ctx, cfg)
-        output = SPOOutput(ctx, cfg)
+        ws = SearchWorkspace(ctx, cfg)
 
         root_state = List[Scalar[dtype]]()
         for _ in range(cfg.num_envs):
             root_state.append(0.0)
 
-        toy_search(ctx, particles, outputs, scratch, output, cfg, toy_cfg,
-                   upload[dtype](ctx, root_state), UInt32(4321))
+        search[ToyChain](ctx, ws, cfg, toy, upload[dtype](ctx, root_state),
+                         UInt32(4321))
         ctx.synchronize()
 
         p_total = cfg.num_search_particles()
-        actions = download[idx_dtype](output.sampled_actions, p_total)
-        weights = download[dtype](output.sampled_action_weights, p_total)
+        actions = download[idx_dtype](ws.output.sampled_actions, p_total)
+        weights = download[dtype](ws.output.sampled_action_weights, p_total)
         total = Scalar[dtype](0)
         for p in range(p_total):
             if Int(actions[p]) == ACTION_GOOD:
