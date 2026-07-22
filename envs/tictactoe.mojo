@@ -22,7 +22,7 @@ adelante) el contrato SearchModel. El E-step no sabe que hay TTT detras.
 
 from std.gpu import block_dim, block_idx, thread_idx
 
-from ops.common import dtype, GlobalF32
+from ops.common import dtype, GlobalF32, GlobalI32
 
 # El tablero son 9 casillas: 9 floats de estado, 9 acciones (una por casilla).
 comptime NUM_CELLS = 9
@@ -92,6 +92,47 @@ def ttt_has_won_kernel(won_out: GlobalF32, state: GlobalF32, n_particles: Int,
     if p < n_particles:
         won_out[p] = Scalar[dtype](1) if ttt_has_won(state, p, player) \
                      else Scalar[dtype](0)
+
+
+def ttt_is_legal(state: GlobalF32, p: Int, c: Int) -> Bool:
+    """True si la casilla c de la particula p esta vacia (jugada legal)."""
+    if ttt_cell(state, p, c) == CELL_EMPTY:
+        return True
+    return False
+
+
+def ttt_legal_mask_kernel(mask_out: GlobalF32, state: GlobalF32,
+                          n_particles: Int):
+    """Mascara de acciones legales [n_particles, NUM_ACTIONS]: 1.0 si la casilla
+    esta libre, 0.0 si esta ocupada. Un hilo por particula.
+
+    La usara la busqueda para tapar las acciones ilegales del prior (metiendo
+    -inf en las ocupadas) y el rival aleatorio para sortear solo entre libres.
+    """
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p < n_particles:
+        for c in range(NUM_ACTIONS):
+            mask_out[p * NUM_ACTIONS + c] = Scalar[dtype](1) \
+                if ttt_is_legal(state, p, c) else Scalar[dtype](0)
+
+
+def ttt_apply(state: GlobalF32, p: Int, cell: Int, player: Scalar[dtype]):
+    """Pone la ficha de `player` en la casilla `cell` de la particula p, in-place.
+
+    No comprueba legalidad: da por hecho que quien llama ya eligio una casilla
+    libre (via la mascara legal). Es la primitiva que usara el step de la fase A3
+    para la jugada del agente y la del rival.
+    """
+    state[p * STATE_DIM + cell] = player
+
+
+def ttt_apply_kernel(state: GlobalF32, action: GlobalI32, n_particles: Int,
+                     player: Scalar[dtype]):
+    """Cada particula pone una ficha de `player` en la casilla que dice su accion.
+    Un hilo por particula, modifica el estado in-place."""
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p < n_particles:
+        ttt_apply(state, p, Int(action[p]), player)
 
 
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,

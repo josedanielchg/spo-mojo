@@ -8,8 +8,10 @@ casillas de su vecina (el mismo tipo de comprobacion que el broadcast de root_fn
 
 from std.gpu.host import DeviceContext
 
-from ops.common import dtype
-from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel, NUM_CELLS,
+from ops.common import dtype, idx_dtype
+from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
+                            ttt_legal_mask_kernel, ttt_apply_kernel,
+                            NUM_CELLS, NUM_ACTIONS,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
 from tests.helpers import upload, zeros, download, assert_close
 
@@ -160,6 +162,91 @@ def test_players_dont_cross(ctx: DeviceContext) raises:
     print("PASS las fichas de X y O no se mezclan en el chequeo")
 
 
+def run_legal_mask(ctx: DeviceContext, boards: List[Scalar[dtype]],
+                   n: Int) raises -> List[Scalar[dtype]]:
+    """Corre ttt_legal_mask_kernel sobre n tableros y baja la mascara [n, 9]."""
+    state = upload[dtype](ctx, boards)
+    mask = zeros[dtype](ctx, n * NUM_ACTIONS)
+    ctx.enqueue_function[ttt_legal_mask_kernel, ttt_legal_mask_kernel](
+        mask.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    return download[dtype](mask, n * NUM_ACTIONS)
+
+
+def test_legal_mask(ctx: DeviceContext) raises:
+    """La mascara marca 1 en las casillas libres y 0 en las ocupadas."""
+    boards_l = List[List[Scalar[dtype]]]()
+    exp_l = List[List[Scalar[dtype]]]()
+    # Con huecos: ocupadas 0,2,4,6 -> libres 1,3,5,7,8.
+    boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))
+    exp_l.append(   board9(0,1, 0, 1,0,1,  0,1,1))
+    # Vacio: todo legal.
+    boards_l.append(board9(0,0,0, 0,0,0, 0,0,0))
+    exp_l.append(   board9(1,1,1, 1,1,1, 1,1,1))
+    # Lleno: nada legal.
+    boards_l.append(board9(1,-1,1, -1,1,-1, 1,-1,1))
+    exp_l.append(   board9(0, 0,0,  0,0, 0, 0, 0,0))
+
+    n = len(boards_l)
+    batch = List[Scalar[dtype]]()
+    for i in range(n):
+        for c in range(NUM_CELLS): batch.append(boards_l[i][c])
+
+    got = run_legal_mask(ctx, batch, n)
+    for i in range(n):
+        for c in range(NUM_ACTIONS):
+            assert_close(got[i * NUM_ACTIONS + c], exp_l[i][c], TOL,
+                         String("mascara legal tablero ", i, " casilla ", c))
+    print("PASS mascara legal (huecos, vacio, lleno)")
+
+
+def test_apply_changes_one_cell(ctx: DeviceContext) raises:
+    """Aplicar una jugada cambia solo esa casilla; el resto queda igual."""
+    # Dos particulas, misma ficha (X), casillas distintas: cada una cambia la suya.
+    startA = board9(1,0,-1, 0,1,0, -1,0,0)   # libre en 1,3,5,7,8
+    startB = board9(0,0,-1, 0,1,0, 0,0,0)    # libre en 0,1,3,5,6,7,8
+    batch = List[Scalar[dtype]]()
+    for c in range(NUM_CELLS): batch.append(startA[c])
+    for c in range(NUM_CELLS): batch.append(startB[c])
+
+    actions = List[Scalar[idx_dtype]]()
+    actions.append(Scalar[idx_dtype](3))   # particula 0 -> casilla 3
+    actions.append(Scalar[idx_dtype](8))   # particula 1 -> casilla 8
+
+    state = upload[dtype](ctx, batch)
+    action = upload[idx_dtype](ctx, actions)
+    ctx.enqueue_function[ttt_apply_kernel, ttt_apply_kernel](
+        state.unsafe_ptr(), action.unsafe_ptr(), 2, CELL_AGENT,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    got = download[dtype](state, 2 * NUM_CELLS)
+
+    expA = board9(1,0,-1, 1,1,0, -1,0,0)   # casilla 3 -> X
+    expB = board9(0,0,-1, 0,1,0, 0,0,1)    # casilla 8 -> X
+    for c in range(NUM_CELLS):
+        assert_close(got[c], expA[c], TOL, String("apply X tablero 0 casilla ", c))
+        assert_close(got[NUM_CELLS + c], expB[c], TOL,
+                     String("apply X tablero 1 casilla ", c))
+
+    # Una jugada de O para comprobar el argumento player.
+    startC = board9(0,0,0, 0,0,0, 0,0,0)
+    stateC = upload[dtype](ctx, startC)
+    actionC = List[Scalar[idx_dtype]]()
+    actionC.append(Scalar[idx_dtype](4))
+    actC = upload[idx_dtype](ctx, actionC)
+    ctx.enqueue_function[ttt_apply_kernel, ttt_apply_kernel](
+        stateC.unsafe_ptr(), actC.unsafe_ptr(), 1, CELL_RIVAL,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    gotC = download[dtype](stateC, NUM_CELLS)
+    expC = board9(0,0,0, 0,-1,0, 0,0,0)    # casilla 4 -> O
+    for c in range(NUM_CELLS):
+        assert_close(gotC[c], expC[c], TOL, String("apply O casilla ", c))
+
+    print("PASS aplicar jugada cambia solo esa casilla (X y O)")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -167,3 +254,5 @@ def main() raises:
         test_wins_on_every_line(ctx)
         test_no_false_win(ctx)
         test_players_dont_cross(ctx)
+        test_legal_mask(ctx)
+        test_apply_changes_one_cell(ctx)
