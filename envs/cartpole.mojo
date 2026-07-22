@@ -5,9 +5,10 @@ gymnax/environments/classic_control/cartpole.py. El estado son 5 numeros:
 (x, x_dot, theta, theta_dot, time). El `time` va como float pero es exacto
 (los enteros hasta 2^24 lo son, y el maximo es 500).
 
-Esta etapa es SOLO la dinamica (la integracion de Euler). La terminacion, el
-discount y el reward vienen en la etapa siguiente; el struct SearchModel en la de
-despues. El fichero va creciendo por etapas.
+Por etapas:
+  1.2  la dinamica (integracion de Euler)                    -> cartpole_advance
+  2.1  terminacion + discount + reward + flag de truncacion  -> cartpole_recurrent_kernel
+  3.x  el struct SearchModel                                 (siguiente)
 
 Las constantes son los EnvParams de gymnax. Ojo con la precision: en Python son
 float64, pero JAX las mantiene en float32 al operar con el estado (float32) por
@@ -15,7 +16,7 @@ weak typing, asi que aqui van en float32 y el resultado cuadra con el golden.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
-from std.math import sin, cos
+from std.math import sin, cos, abs
 
 from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32
 
@@ -36,47 +37,148 @@ comptime FORCE_MAG = Scalar[dtype](10.0)
 comptime TAU = Scalar[dtype](0.02)                # paso de integracion (segundos)
 comptime FOUR_THIRDS = Scalar[dtype](4.0 / 3.0)
 
+# --- condiciones de fin de episodio ---
+comptime X_THRESHOLD = Scalar[dtype](2.4)                  # el carro se sale de la pista
+comptime THETA_THRESHOLD = Scalar[dtype](0.2094395102393195)  # 12 * 2*pi/360, el palo cae
+comptime MAX_STEPS = 500                                   # limite de pasos (truncacion)
 
-def cartpole_physics_kernel(state_out: GlobalF32, state_in: GlobalF32,
-                            action: GlobalI32, n_particles: Int):
-    """Un paso de la dinamica de CartPole. Un hilo por particula.
 
-    Espeja `step_env` de gymnax (lineas 61-90). NO comprueba terminacion: gymnax
-    integra la fisica pase lo que pase -- una particula ya caida sigue
-    evolucionando-- y la terminacion solo afecta al reward y al done, que se
-    calculan aparte (etapa siguiente).
+@fieldwise_init
+struct CartState(Copyable, Movable):
+    """El estado del carro, para poder devolverlo de una funcion de device.
+    Es lo que permite compartir la fisica entre el kernel de fisica y el
+    recurrente sin duplicar las formulas."""
+    var x: Scalar[dtype]
+    var x_dot: Scalar[dtype]
+    var theta: Scalar[dtype]
+    var theta_dot: Scalar[dtype]
+    var time: Scalar[dtype]
 
-    In-place seguro: cada hilo lee sus 5 componentes en registros ANTES de
-    escribir ninguna, asi que state_out puede ser el mismo buffer que state_in.
-    """
-    i = Int(block_dim.x * block_idx.x + thread_idx.x)
-    if i >= n_particles:
-        return
 
-    base = i * STATE_DIM
-    x = state_in[base + 0]
-    x_dot = state_in[base + 1]
-    theta = state_in[base + 2]
-    theta_dot = state_in[base + 3]
-    time = state_in[base + 4]
-
-    # force = +FORCE_MAG si la accion es 1, -FORCE_MAG si es 0. Se calcula con la
-    # misma expresion que gymnax (no con un if) para que el float32 salga identico.
-    a = Scalar[dtype](Int(action[i]))
+def cartpole_advance(x: Scalar[dtype], x_dot: Scalar[dtype], theta: Scalar[dtype],
+                     theta_dot: Scalar[dtype], time: Scalar[dtype],
+                     action: Int) -> CartState:
+    """Un paso de la dinamica, sin tocar terminacion. Espeja `step_env` de gymnax
+    (lineas 61-90). Funcion de device: la llaman los dos kernels de abajo."""
+    # force = +FORCE_MAG si la accion es 1, -FORCE_MAG si es 0. Con la misma
+    # expresion que gymnax (no con un if) para que el float32 salga identico.
+    a = Scalar[dtype](action)
     force = FORCE_MAG * a - FORCE_MAG * (Scalar[dtype](1) - a)
 
     costheta = cos(theta)
     sintheta = sin(theta)
 
-    # La dinamica del pendulo invertido sobre el carro, tal cual gymnax.
     temp = (force + POLEMASS_LENGTH * (theta_dot * theta_dot) * sintheta) / TOTAL_MASS
     thetaacc = (GRAVITY * sintheta - costheta * temp) / (
         LENGTH * (FOUR_THIRDS - MASSPOLE * (costheta * costheta) / TOTAL_MASS))
     xacc = temp - POLEMASS_LENGTH * thetaacc * costheta / TOTAL_MASS
 
     # Integracion de Euler (la unica que ofrece gymnax).
-    state_out[base + 0] = x + TAU * x_dot
-    state_out[base + 1] = x_dot + TAU * xacc
-    state_out[base + 2] = theta + TAU * theta_dot
-    state_out[base + 3] = theta_dot + TAU * thetaacc
-    state_out[base + 4] = time + Scalar[dtype](1)
+    return CartState(
+        x + TAU * x_dot,
+        x_dot + TAU * xacc,
+        theta + TAU * theta_dot,
+        theta_dot + TAU * thetaacc,
+        time + Scalar[dtype](1),
+    )
+
+
+def cartpole_out_of_bounds(x: Scalar[dtype], theta: Scalar[dtype]) -> Bool:
+    """Muerte REAL: el carro se salio o el palo cayo. Sin futuro que valorar.
+    Es la parte de `is_terminal` de gymnax que NO es el limite de pasos."""
+    return abs(x) > X_THRESHOLD or abs(theta) > THETA_THRESHOLD
+
+
+def cartpole_is_terminal(x: Scalar[dtype], theta: Scalar[dtype],
+                         time: Scalar[dtype]) -> Bool:
+    """El `is_terminal` completo de gymnax: fuera de pista, palo caido, o limite
+    de pasos. Los tres cuentan como 'done'."""
+    return cartpole_out_of_bounds(x, theta) or Int(time) >= MAX_STEPS
+
+
+def cartpole_physics_kernel(state_out: GlobalF32, state_in: GlobalF32,
+                            action: GlobalI32, n_particles: Int):
+    """Solo la dinamica, a un buffer de salida. Es lo que prueba el golden A.
+
+    In-place seguro: lee los 5 componentes antes de escribir ninguno, asi que
+    state_out puede ser el mismo buffer que state_in.
+    """
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i >= n_particles:
+        return
+
+    base = i * STATE_DIM
+    ns = cartpole_advance(state_in[base + 0], state_in[base + 1],
+                          state_in[base + 2], state_in[base + 3],
+                          state_in[base + 4], Int(action[i]))
+    state_out[base + 0] = ns.x
+    state_out[base + 1] = ns.x_dot
+    state_out[base + 2] = ns.theta
+    state_out[base + 3] = ns.theta_dot
+    state_out[base + 4] = ns.time
+
+
+def cartpole_recurrent_kernel(
+        state: GlobalF32, action: GlobalI32,
+        reward_out: GlobalF32, discount_out: GlobalF32, next_value_out: GlobalF32,
+        n_particles: Int, value_scale: Scalar[dtype], search_gamma: Scalar[dtype],
+        truncate_on_limit: Int):
+    """El paso completo del modelo: fisica + terminacion + plegado de gamma.
+
+    Mismo patron que `toy_recurrent_kernel`: actualiza `state` in-place y escribe
+    reward / rec_discount / bootstrap. La unica diferencia especifica de CartPole
+    es que el limite de 500 pasos puede tratarse como muerte (flag A) o como
+    truncacion con futuro (flag B).
+
+      reward         = 1 - prev_terminal   (gymnax: si entras ya muerto, 0)
+      rec_discount   = discount_real * (1 - truncated)   (0 en cuanto para la particula)
+      bootstrap      = discount_real * search_gamma * V(s')
+
+    Sobre V: el modelo de la demo no tiene critico, asi que V es una CONSTANTE
+    (value_scale), 0 en la demo. value_scale > 0 solo existe para los tests, para
+    que el bootstrap no sea trivialmente 0 y se pueda ver el efecto del flag.
+    """
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i >= n_particles:
+        return
+
+    base = i * STATE_DIM
+    x = state[base + 0]
+    x_dot = state[base + 1]
+    theta = state[base + 2]
+    theta_dot = state[base + 3]
+    time = state[base + 4]
+
+    # 1. El reward mira el estado de ENTRADA (1 - prev_terminal de gymnax).
+    prev_terminal = cartpole_is_terminal(x, theta, time)
+    reward = Scalar[dtype](0) if prev_terminal else Scalar[dtype](1)
+
+    # 2. La dinamica. gymnax integra pase lo que pase, aunque ya estuviera muerta.
+    ns = cartpole_advance(x, x_dot, theta, theta_dot, time, Int(action[i]))
+
+    # 3. Clasificar el fin del episodio en el estado NUEVO.
+    dead = cartpole_out_of_bounds(ns.x, ns.theta)   # muerte real, sin futuro
+    hit_limit = Int(ns.time) >= MAX_STEPS           # limite de pasos
+    last = dead or hit_limit                        # = done de gymnax
+
+    # 4. discount_real: 0 si murio de verdad; en el limite depende del flag.
+    #    La muerte real manda sobre el limite (si el palo cayo, da igual el reloj).
+    discount_real = Scalar[dtype](1)
+    if dead:
+        discount_real = Scalar[dtype](0)
+    elif hit_limit:
+        discount_real = Scalar[dtype](1) if truncate_on_limit != 0 else Scalar[dtype](0)
+
+    # 5. El plegado, igual que en el juguete y en Stoix.
+    truncated = last and discount_real != 0.0
+    rec_discount = discount_real * (Scalar[dtype](0) if truncated else Scalar[dtype](1))
+    bootstrap = discount_real * search_gamma * value_scale   # V = value_scale (constante)
+
+    state[base + 0] = ns.x
+    state[base + 1] = ns.x_dot
+    state[base + 2] = ns.theta
+    state[base + 3] = ns.theta_dot
+    state[base + 4] = ns.time
+    reward_out[i] = reward
+    discount_out[i] = rec_discount
+    next_value_out[i] = bootstrap
