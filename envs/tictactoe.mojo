@@ -135,6 +135,57 @@ def ttt_apply_kernel(state: GlobalF32, action: GlobalI32, n_particles: Int,
         ttt_apply(state, p, Int(action[p]), player)
 
 
+def ttt_is_full(state: GlobalF32, p: Int) -> Bool:
+    """True si no queda ninguna casilla vacia (no hay jugadas legales)."""
+    for c in range(NUM_CELLS):
+        if ttt_cell(state, p, c) == CELL_EMPTY:
+            return False
+    return True
+
+
+def ttt_is_terminal(state: GlobalF32, p: Int) -> Bool:
+    """True si la partida acabo: gano alguien o el tablero esta lleno (empate)."""
+    if ttt_has_won(state, p, CELL_AGENT):
+        return True
+    if ttt_has_won(state, p, CELL_RIVAL):
+        return True
+    if ttt_is_full(state, p):
+        return True
+    return False
+
+
+def ttt_reward(state: GlobalF32, p: Int) -> Scalar[dtype]:
+    """Recompensa del tablero desde la vista del AGENTE (X):
+
+        gana X       -> +1.0
+        empate       -> +0.5   (tablero lleno sin linea)
+        gana O       ->  0.0   (derrota)
+        no terminal  ->  0.0   (recompensa de paso: el juego sigue)
+
+    Gana-X se comprueba antes que lleno: una jugada ganadora que ademas llena el
+    tablero es victoria, no empate. `terminal` y `reward` son salidas separadas:
+    una derrota y un paso intermedio dan 0 los dos, y se distinguen por terminal.
+    """
+    if ttt_has_won(state, p, CELL_AGENT):
+        return Scalar[dtype](1)
+    if ttt_has_won(state, p, CELL_RIVAL):
+        return Scalar[dtype](0)
+    if ttt_is_full(state, p):
+        return Scalar[dtype](0.5)
+    return Scalar[dtype](0)
+
+
+def ttt_outcome_kernel(terminal_out: GlobalF32, reward_out: GlobalF32,
+                       state: GlobalF32, n_particles: Int):
+    """Por particula: terminal (1.0/0.0) y recompensa del agente. Un hilo por
+    particula."""
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p < n_particles:
+        terminal_out[p] = Scalar[dtype](1) if ttt_is_terminal(state, p) \
+                          else Scalar[dtype](0)
+        reward_out[p] = ttt_reward(state, p)
+
+
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
                           n_particles: Int):
     """Copia las 9 casillas de cada particula a la salida usando ttt_cell.

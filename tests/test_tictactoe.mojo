@@ -11,6 +11,7 @@ from std.gpu.host import DeviceContext
 from ops.common import dtype, idx_dtype
 from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
                             ttt_legal_mask_kernel, ttt_apply_kernel,
+                            ttt_outcome_kernel,
                             NUM_CELLS, NUM_ACTIONS,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
 from tests.helpers import upload, zeros, download, assert_close
@@ -247,6 +248,69 @@ def test_apply_changes_one_cell(ctx: DeviceContext) raises:
     print("PASS aplicar jugada cambia solo esa casilla (X y O)")
 
 
+@fieldwise_init
+struct Outcome(Movable):
+    """Terminal y reward de cada tablero, ya en el host. Struct y no tupla porque
+    en 1.0.0b1 una tupla de List no se deja construir."""
+    var terminal: List[Scalar[dtype]]
+    var reward: List[Scalar[dtype]]
+
+
+def run_outcome(ctx: DeviceContext, boards: List[Scalar[dtype]],
+                n: Int) raises -> Outcome:
+    """Corre ttt_outcome_kernel sobre n tableros y baja terminal + reward."""
+    state = upload[dtype](ctx, boards)
+    term = zeros[dtype](ctx, n)
+    rew = zeros[dtype](ctx, n)
+    ctx.enqueue_function[ttt_outcome_kernel, ttt_outcome_kernel](
+        term.unsafe_ptr(), rew.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    return Outcome(download[dtype](term, n), download[dtype](rew, n))
+
+
+def test_terminal_and_reward(ctx: DeviceContext) raises:
+    """Los cuatro finales + un no-terminal, con su recompensa de agente."""
+    boards_l = List[List[Scalar[dtype]]]()
+    term_exp = List[Scalar[dtype]]()
+    rew_exp = List[Scalar[dtype]]()
+    names = List[String]()
+
+    # Gana X (fila 0).
+    boards_l.append(board9(1,1,1, -1,-1,0, 0,0,0))
+    term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](1))
+    names.append("gana X")
+    # Gana O (fila 0) -> derrota del agente.
+    boards_l.append(board9(-1,-1,-1, 1,1,0, 0,0,1))
+    term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](0))
+    names.append("gana O (derrota)")
+    # Empate: tablero lleno sin ninguna linea.
+    boards_l.append(board9(1,-1,1, 1,-1,-1, -1,1,1))
+    term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](0.5))
+    names.append("empate")
+    # No terminal: quedan huecos y nadie gano.
+    boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))
+    term_exp.append(Scalar[dtype](0)); rew_exp.append(Scalar[dtype](0))
+    names.append("no terminal")
+    # Gana X y ademas llena el tablero: es victoria, no empate.
+    boards_l.append(board9(1,1,1, -1,-1,1, -1,1,-1))
+    term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](1))
+    names.append("gana X en tablero lleno")
+
+    n = len(boards_l)
+    batch = List[Scalar[dtype]]()
+    for i in range(n):
+        for c in range(NUM_CELLS): batch.append(boards_l[i][c])
+
+    out = run_outcome(ctx, batch, n)
+    for i in range(n):
+        assert_close(out.terminal[i], term_exp[i], TOL,
+                     String("terminal incorrecto: ", names[i]))
+        assert_close(out.reward[i], rew_exp[i], TOL,
+                     String("reward incorrecto: ", names[i]))
+    print("PASS terminal y recompensa (gana X / gana O / empate / no terminal / X en lleno)")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -256,3 +320,4 @@ def main() raises:
         test_players_dont_cross(ctx)
         test_legal_mask(ctx)
         test_apply_changes_one_cell(ctx)
+        test_terminal_and_reward(ctx)
