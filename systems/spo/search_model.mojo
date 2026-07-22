@@ -49,7 +49,7 @@ trait SearchModel:
         ...
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
-             outputs: StepOutputs) raises:
+             outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
         """Avanza las P particulas una profundidad. Es el `recurrent_fn` del modelo.
 
         Lee  `particles.state` y `outputs.next_action` (la accion que toca ejecutar)
@@ -63,6 +63,11 @@ trait SearchModel:
         El plegado de gamma y de la truncacion es responsabilidad del modelo, igual
         que en el `recurrent_fn` de Stoix, para que el nucleo SMC no tenga que saber
         nada del entorno.
+
+        `step_uniforms` [P] son uniformes en [0,1), uno por particula, para los
+        modelos con transicion ESTOCASTICA (p. ej. TTT contra un rival aleatorio:
+        con ellos se elige la casilla del rival). Un modelo determinista los ignora;
+        vienen de un stream RNG propio de la busqueda, distinto por profundidad.
 
         Lo que NO hace: tocar `particles.value` (el error TD necesita el V viejo) ni
         sortear la accion siguiente -- de eso se encarga `sample_next_actions`, que

@@ -51,6 +51,7 @@ from systems.spo.weighting import update_particles
 # misma semilla.
 comptime RNG_ROOT = UInt32(0)
 comptime RNG_ACTION = UInt32(100)
+comptime RNG_STEP = UInt32(500)
 comptime RNG_RESAMPLE = UInt32(900)
 comptime RNG_READOUT = UInt32(7777)
 
@@ -105,11 +106,14 @@ def search[M: SearchModel](ctx: DeviceContext, ws: SearchWorkspace,
     # el stream ya los ejecuta en orden.
     for d in range(cfg.search_depth):
         ctx.enqueue_function[fill_uniform, fill_uniform](
+            ws.u_step.unsafe_ptr(), seed, RNG_STEP + UInt32(d), p_total,
+            grid_dim=blocks_p, block_dim=TPB)
+        ctx.enqueue_function[fill_uniform, fill_uniform](
             ws.u_action.unsafe_ptr(), seed, RNG_ACTION + UInt32(d), p_total,
             grid_dim=blocks_p, block_dim=TPB)
 
         # Las dos unicas lineas que dependen del modelo de toda la busqueda.
-        model.step(ctx, cfg, ws.particles, ws.outputs)
+        model.step(ctx, cfg, ws.particles, ws.outputs, ws.u_step)
         sample_next_actions(ctx, ws.outputs, cfg, ws.u_action)
 
         ctx.enqueue_function[fill_uniform, fill_uniform](

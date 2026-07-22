@@ -211,6 +211,11 @@ struct SearchWorkspace(Movable):
     profundidad; se puede reutilizar sin miedo porque el stream es unico y ejecuta
     en orden: el relleno siguiente no puede adelantar al kernel que leyo el anterior."""
 
+    var u_step: DeviceBuffer[dtype]
+    """[P] uniformes para la transicion estocastica del modelo (p. ej. la jugada
+    del rival aleatorio en TTT). Uno por particula, se rellena de nuevo en cada
+    profundidad desde su propio stream. Un modelo determinista los ignora."""
+
     var u_resample: DeviceBuffer[dtype]
     """[P] uniformes del resampling, en un buffer aparte para que el muestreo de
     acciones y el de resampling no compartan secuencia."""
@@ -224,4 +229,5 @@ struct SearchWorkspace(Movable):
         self.root_logits = zero_buffer[dtype](ctx, cfg.num_envs * cfg.num_actions)
         self.root_value = zero_buffer[dtype](ctx, cfg.num_envs)
         self.u_action = zero_buffer[dtype](ctx, p)
+        self.u_step = zero_buffer[dtype](ctx, p)
         self.u_resample = zero_buffer[dtype](ctx, p)

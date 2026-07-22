@@ -16,7 +16,8 @@ from envs.toy_chain import (toy_value, default_toy_chain,
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.spo_types import SPOConfig
 from systems.spo.root import sample_next_actions
-from tests.helpers import upload, download, write_into, assert_close, assert_eq_int
+from tests.helpers import (upload, download, write_into, zeros, assert_close,
+                           assert_eq_int)
 
 comptime TOL = Scalar[dtype](1e-6)
 
@@ -62,7 +63,8 @@ def test_one_depth_all_three_endings(ctx: DeviceContext) raises:
         us.append(0.1)
     uniforms = upload[dtype](ctx, us)
 
-    toy.step(ctx, cfg, particles, outputs)
+    step_us = zeros[dtype](ctx, p_total)
+    toy.step(ctx, cfg, particles, outputs, step_us)
     sample_next_actions(ctx, outputs, cfg, uniforms)
     ctx.synchronize()
 
@@ -131,7 +133,8 @@ def test_next_action_is_sampled_and_scored(ctx: DeviceContext) raises:
         us.append(Scalar[dtype](p) / Scalar[dtype](p_total))
     uniforms = upload[dtype](ctx, us)
 
-    toy.step(ctx, cfg, particles, outputs)
+    step_us = zeros[dtype](ctx, p_total)
+    toy.step(ctx, cfg, particles, outputs, step_us)
     sample_next_actions(ctx, outputs, cfg, uniforms)
     ctx.synchronize()
 
@@ -189,7 +192,8 @@ def test_dead_particle_keeps_walking_is_not_a_problem(ctx: DeviceContext) raises
     us.append(0.1); us.append(0.9)
     uniforms = upload[dtype](ctx, us)
 
-    toy.step(ctx, cfg, particles, outputs)
+    step_us = zeros[dtype](ctx, p_total)
+    toy.step(ctx, cfg, particles, outputs, step_us)
     sample_next_actions(ctx, outputs, cfg, uniforms)
     ctx.synchronize()
 

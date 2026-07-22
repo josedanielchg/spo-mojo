@@ -185,7 +185,7 @@ struct ToyChain(SearchModel, Copyable, Movable):
             grid_dim=blocks, block_dim=TPB_TOY)
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
-             outputs: StepOutputs) raises:
+             outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
         """Avanza las P particulas una profundidad.
 
         Dos kernels: la dinamica (que ya pliega gamma y la truncacion) y el prior
@@ -195,6 +195,9 @@ struct ToyChain(SearchModel, Copyable, Movable):
         No toca `particles.value`, y eso importa: el error TD de la actualizacion
         de pesos necesita el V(s) viejo, y el nuevo se queda en
         `outputs.next_value` hasta que update_particles lo mueva.
+
+        El juguete es determinista: recibe `step_uniforms` por el contrato pero los
+        ignora (solo los usan los modelos con transicion estocastica).
         """
         p_total = cfg.num_search_particles()
         blocks = (p_total + TPB_TOY - 1) // TPB_TOY
