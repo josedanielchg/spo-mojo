@@ -49,6 +49,51 @@ def ttt_cell(state: GlobalF32, p: Int, c: Int) -> Scalar[dtype]:
     return state[p * STATE_DIM + c]
 
 
+def ttt_three(state: GlobalF32, p: Int, a: Int, b: Int, c: Int,
+              player: Scalar[dtype]) -> Bool:
+    """True si `player` ocupa las tres casillas a, b, c de la particula p.
+
+    Comparo casilla != player y salgo en cuanto falla, en vez de encadenar tres
+    `and` sobre comparaciones de SIMD-bool, que es lo que se traga sin dudas el
+    compilador de kernels."""
+    if ttt_cell(state, p, a) != player:
+        return False
+    if ttt_cell(state, p, b) != player:
+        return False
+    if ttt_cell(state, p, c) != player:
+        return False
+    return True
+
+
+def ttt_has_won(state: GlobalF32, p: Int, player: Scalar[dtype]) -> Bool:
+    """True si `player` (CELL_AGENT o CELL_RIVAL) completa alguna de las 8 lineas.
+
+    Son las mismas 8 lineas que WIN_MASKS en el MCTS (3 filas, 3 columnas, 2
+    diagonales), aqui como ternas de indices porque el tablero son 9 floats y no
+    un bitboard. El paralelismo esta en los hilos (una particula por hilo), asi
+    que dentro del hilo un simple OR de las 8 lineas es lo natural -- no hace
+    falta el truco SIMD-sobre-lineas que usa el MCTS en CPU.
+    """
+    return (ttt_three(state, p, 0, 1, 2, player)      # filas
+            or ttt_three(state, p, 3, 4, 5, player)
+            or ttt_three(state, p, 6, 7, 8, player)
+            or ttt_three(state, p, 0, 3, 6, player)    # columnas
+            or ttt_three(state, p, 1, 4, 7, player)
+            or ttt_three(state, p, 2, 5, 8, player)
+            or ttt_three(state, p, 0, 4, 8, player)    # diagonales
+            or ttt_three(state, p, 2, 4, 6, player))
+
+
+def ttt_has_won_kernel(won_out: GlobalF32, state: GlobalF32, n_particles: Int,
+                       player: Scalar[dtype]):
+    """1.0 si `player` gano en el tablero de su particula, 0.0 si no. Un hilo por
+    particula."""
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p < n_particles:
+        won_out[p] = Scalar[dtype](1) if ttt_has_won(state, p, player) \
+                     else Scalar[dtype](0)
+
+
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
                           n_particles: Int):
     """Copia las 9 casillas de cada particula a la salida usando ttt_cell.
