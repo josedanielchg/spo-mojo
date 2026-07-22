@@ -16,10 +16,13 @@ from std.gpu.host import DeviceContext
 from std.math import abs
 
 from ops.common import dtype, idx_dtype
+from ops.rng import fill_uniform
 from envs.cartpole import (cartpole_physics_kernel, cartpole_recurrent_kernel,
+                          cartpole_reset_kernel, cartpole_auto_reset_kernel,
                           STATE_DIM)
 from tests.golden_io import read_f32
-from tests.helpers import upload, zeros, download, assert_close, assert_eq_int
+from tests.helpers import (upload, zeros, download, write_into, assert_close,
+                          assert_eq_int)
 
 comptime TPB = 32
 
@@ -245,9 +248,111 @@ def test_truncation_flag(ctx: DeviceContext) raises:
     print("PASS flag de truncacion: paso 500 = muerte (A) vs truncacion (B)")
 
 
+def test_reset_range_and_determinism(ctx: DeviceContext) raises:
+    """10k resets: todos en [-0.05, 0.05), time=0, media ~0, y deterministas."""
+    n = 10000
+    u = zeros[dtype](ctx, n * 4)      # 4 uniformes por env
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        u.unsafe_ptr(), UInt32(123), UInt32(0), n * 4,
+        grid_dim=(n * 4 + TPB - 1) // TPB, block_dim=TPB)
+
+    state = zeros[dtype](ctx, n * STATE_DIM)
+    ctx.enqueue_function[cartpole_reset_kernel, cartpole_reset_kernel](
+        state.unsafe_ptr(), u.unsafe_ptr(), n,
+        grid_dim=(n + TPB - 1) // TPB, block_dim=TPB)
+    ctx.synchronize()
+
+    got = download[dtype](state, n * STATE_DIM)
+
+    # Rango: las 4 dinamicas en [-0.05, 0.05), time exactamente 0.
+    # Media en float64: sumar 40k floats en float32 arrastra error.
+    sums = List[Float64]()
+    for _ in range(4):
+        sums.append(Float64(0))
+    for e in range(n):
+        base = e * STATE_DIM
+        for d in range(4):
+            v = got[base + d]
+            if v < -0.05 or v > 0.05:
+                raise Error("componente ", d, " del env ", e, " fuera de rango: ", v)
+            sums[d] += Float64(v)
+        if got[base + 4] != 0.0:
+            raise Error("time del env ", e, " no es 0: ", got[base + 4])
+
+    # U(-0.05, 0.05) tiene media 0. Con 10k muestras el error tipico es ~3e-4, asi
+    # que |media| > 0.002 delataria un sesgo (p. ej. mapear a U(0, 0.1) por error).
+    for d in range(4):
+        mean = sums[d] / Float64(n)
+        if abs(mean) > 0.002:
+            raise Error("la media de la componente ", d, " esta sesgada: ", mean)
+
+    # Determinismo: misma seed -> mismos estados, bit a bit.
+    u2 = zeros[dtype](ctx, n * 4)
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        u2.unsafe_ptr(), UInt32(123), UInt32(0), n * 4,
+        grid_dim=(n * 4 + TPB - 1) // TPB, block_dim=TPB)
+    state2 = zeros[dtype](ctx, n * STATE_DIM)
+    ctx.enqueue_function[cartpole_reset_kernel, cartpole_reset_kernel](
+        state2.unsafe_ptr(), u2.unsafe_ptr(), n,
+        grid_dim=(n + TPB - 1) // TPB, block_dim=TPB)
+    ctx.synchronize()
+    got2 = download[dtype](state2, n * STATE_DIM)
+    for i in range(n * STATE_DIM):
+        if got[i] != got2[i]:
+            raise Error("reset no determinista en ", i, ": ", got[i], " vs ", got2[i])
+
+    print("PASS reset:", n, "estados en rango, time=0, media ~0, deterministas")
+
+
+def test_auto_reset_conditional(ctx: DeviceContext) raises:
+    """El auto-reset toca SOLO los envs con done=1; los vivos quedan intactos."""
+    n = 4
+    # Todos empiezan en un estado claramente NO reseteado, para notar quien cambia.
+    marked = List[Scalar[dtype]]()
+    for _ in range(n):
+        marked.append(1.0); marked.append(1.0); marked.append(1.0)
+        marked.append(1.0); marked.append(50.0)     # time=50, imposible tras reset
+    state = upload[dtype](ctx, marked)
+
+    # done = [1, 0, 1, 0] -> resetean el 0 y el 2, siguen el 1 y el 3.
+    done_list = List[Scalar[idx_dtype]]()
+    done_list.append(1); done_list.append(0); done_list.append(1); done_list.append(0)
+    done = upload[idx_dtype](ctx, done_list)
+
+    u = zeros[dtype](ctx, n * 4)
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        u.unsafe_ptr(), UInt32(7), UInt32(0), n * 4,
+        grid_dim=(n * 4 + TPB - 1) // TPB, block_dim=TPB)
+
+    ctx.enqueue_function[cartpole_auto_reset_kernel, cartpole_auto_reset_kernel](
+        state.unsafe_ptr(), done.unsafe_ptr(), u.unsafe_ptr(), n,
+        grid_dim=(n + TPB - 1) // TPB, block_dim=TPB)
+    ctx.synchronize()
+
+    got = download[dtype](state, n * STATE_DIM)
+    for e in range(n):
+        base = e * STATE_DIM
+        if Int(done_list[e]) != 0:
+            # reseteado: en rango y time=0
+            for d in range(4):
+                v = got[base + d]
+                if v < -0.05 or v > 0.05:
+                    raise Error("env reseteado ", e, " componente ", d, " fuera de rango: ", v)
+            assert_close(got[base + 4], 0.0, 1e-6, String("env reseteado ", e, " time"))
+        else:
+            # intacto: sigue con las marcas (1,1,1,1,50)
+            for d in range(4):
+                assert_close(got[base + d], 1.0, 1e-6,
+                             String("env vivo ", e, " no deberia cambiar, componente ", d))
+            assert_close(got[base + 4], 50.0, 1e-6, String("env vivo ", e, " time"))
+    print("PASS auto-reset: solo resetea los envs terminados")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_single_step_vs_golden(ctx)
         test_trajectory_vs_golden(ctx)
         test_termination_vs_golden(ctx)
         test_truncation_flag(ctx)
+        test_reset_range_and_determinism(ctx)
+        test_auto_reset_conditional(ctx)

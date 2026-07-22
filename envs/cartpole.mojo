@@ -42,6 +42,10 @@ comptime X_THRESHOLD = Scalar[dtype](2.4)                  # el carro se sale de
 comptime THETA_THRESHOLD = Scalar[dtype](0.2094395102393195)  # 12 * 2*pi/360, el palo cae
 comptime MAX_STEPS = 500                                   # limite de pasos (truncacion)
 
+# --- reset: estado inicial U(-0.05, 0.05) en las 4 componentes dinamicas ---
+comptime RESET_MINVAL = Scalar[dtype](-0.05)
+comptime RESET_RANGE = Scalar[dtype](0.1)                  # maxval - minval
+
 
 @fieldwise_init
 struct CartState(Copyable, Movable):
@@ -182,3 +186,42 @@ def cartpole_recurrent_kernel(
     reward_out[i] = reward
     discount_out[i] = rec_discount
     next_value_out[i] = bootstrap
+
+
+def write_reset_state(state: GlobalF32, base: Int, uniforms: GlobalF32, ubase: Int):
+    """Escribe un estado inicial: U(-0.05, 0.05) en las 4 componentes dinamicas
+    y time = 0. Espeja `reset_env` de gymnax. Funcion de device: la comparten el
+    reset incondicional y el auto-reset. `uniforms` trae 4 valores en [0,1)."""
+    state[base + 0] = RESET_MINVAL + uniforms[ubase + 0] * RESET_RANGE
+    state[base + 1] = RESET_MINVAL + uniforms[ubase + 1] * RESET_RANGE
+    state[base + 2] = RESET_MINVAL + uniforms[ubase + 2] * RESET_RANGE
+    state[base + 3] = RESET_MINVAL + uniforms[ubase + 3] * RESET_RANGE
+    state[base + 4] = Scalar[dtype](0)
+
+
+def cartpole_reset_kernel(state_out: GlobalF32, uniforms: GlobalF32, n_envs: Int):
+    """Resetea TODOS los envs. Para sembrar el estado inicial del bucle.
+
+    `uniforms` es [n_envs, 4] en [0,1), generados aparte con fill_uniform (misma
+    convencion que el resto: el kernel recibe los uniformes, no llama al RNG)."""
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e >= n_envs:
+        return
+    write_reset_state(state_out, e * STATE_DIM, uniforms, e * 4)
+
+
+def cartpole_auto_reset_kernel(state: GlobalF32, done: GlobalI32,
+                               uniforms: GlobalF32, n_envs: Int):
+    """Resetea SOLO los envs cuyo episodio termino (done != 0), dejando los demas
+    intactos. Es lo que usa el bucle de entorno real tras cada paso: una partida
+    que acaba empieza otra desde un estado nuevo, y las que siguen vivas continuan.
+
+    Ojo: esto es el auto-reset del ENTORNO REAL, no de la busqueda. Dentro de la
+    busqueda las particulas muertas se quedan quietas (la mascara terminal congela
+    su peso), igual que en el juguete."""
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e >= n_envs:
+        return
+    if Int(done[e]) == 0:
+        return
+    write_reset_state(state, e * STATE_DIM, uniforms, e * 4)
