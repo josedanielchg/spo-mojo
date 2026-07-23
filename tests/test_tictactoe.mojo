@@ -12,6 +12,7 @@ from ops.common import dtype, idx_dtype, NEG_INF
 from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
                             ttt_legal_mask_kernel, ttt_apply_kernel,
                             ttt_outcome_kernel, ttt_prior_logits_kernel,
+                            ttt_dynamics_kernel,
                             NUM_CELLS, NUM_ACTIONS,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
 from tests.helpers import upload, zeros, download, assert_close
@@ -350,6 +351,83 @@ def test_prior_masks_illegal(ctx: DeviceContext) raises:
     print("PASS prior raiz enmascarado (0 en legales, NEG_INF en ocupadas)")
 
 
+@fieldwise_init
+struct DynResult(Movable):
+    """Salidas del step, ya en el host (struct porque en 1.0.0b1 una tupla de
+    List no se deja construir)."""
+    var state: List[Scalar[dtype]]
+    var reward: List[Scalar[dtype]]
+    var discount: List[Scalar[dtype]]
+    var next_value: List[Scalar[dtype]]
+
+
+def run_dynamics(ctx: DeviceContext, boards: List[Scalar[dtype]],
+                 actions: List[Scalar[idx_dtype]], uniforms: List[Scalar[dtype]],
+                 n: Int) raises -> DynResult:
+    """Corre ttt_dynamics_kernel: aplica la jugada del agente + la del rival."""
+    state = upload[dtype](ctx, boards)
+    action = upload[idx_dtype](ctx, actions)
+    us = upload[dtype](ctx, uniforms)
+    reward = zeros[dtype](ctx, n)
+    discount = zeros[dtype](ctx, n)
+    next_value = zeros[dtype](ctx, n)
+    ctx.enqueue_function[ttt_dynamics_kernel, ttt_dynamics_kernel](
+        state.unsafe_ptr(), action.unsafe_ptr(), us.unsafe_ptr(),
+        reward.unsafe_ptr(), discount.unsafe_ptr(), next_value.unsafe_ptr(), n,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    return DynResult(download[dtype](state, n * NUM_CELLS),
+                     download[dtype](reward, n), download[dtype](discount, n),
+                     download[dtype](next_value, n))
+
+
+def test_step_all_paths(ctx: DeviceContext) raises:
+    """Los caminos del step, con tableros/acciones/uniformes puestos a mano.
+
+    El rival es aleatorio, asi que para los casos deterministas monto tableros
+    donde O solo tiene una casilla legal; y para el caso 'sigue' pongo dos huecos
+    y elijo el uniforme para saber cual le toca.
+    """
+    boards = List[List[Scalar[dtype]]]()
+    acts = List[Scalar[idx_dtype]]()
+    us = List[Scalar[dtype]]()
+    exp_board = List[List[Scalar[dtype]]]()
+    exp_reward = List[Scalar[dtype]]()
+    exp_discount = List[Scalar[dtype]]()
+    names = List[String]()
+
+    # gana el agente: completa la fila 0.
+    boards.append(board9(1,1,0, -1,-1,0, 0,0,0)); acts.append(Scalar[idx_dtype](2)); us.append(Scalar[dtype](0.5))
+    exp_board.append(board9(1,1,1, -1,-1,0, 0,0,0)); exp_reward.append(Scalar[dtype](1)); exp_discount.append(Scalar[dtype](0)); names.append("gana agente")
+    # empate: la jugada del agente llena el tablero sin linea.
+    boards.append(board9(1,-1,1, 1,-1,-1, -1,1,0)); acts.append(Scalar[idx_dtype](8)); us.append(Scalar[dtype](0.5))
+    exp_board.append(board9(1,-1,1, 1,-1,-1, -1,1,1)); exp_reward.append(Scalar[dtype](0.5)); exp_discount.append(Scalar[dtype](0)); names.append("empate al llenar")
+    # gana el rival: tras la jugada del agente, O solo tiene la casilla 6 y con ella hace columna 0.
+    boards.append(board9(-1,1,0, -1,1,-1, 0,-1,1)); acts.append(Scalar[idx_dtype](2)); us.append(Scalar[dtype](0.5))
+    exp_board.append(board9(-1,1,1, -1,1,-1, -1,-1,1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](0)); names.append("gana rival")
+    # sigue: u=0.1 -> el rival toma la 1a casilla vacia (la 7).
+    boards.append(board9(1,-1,1, -1,1,0, -1,0,0)); acts.append(Scalar[idx_dtype](5)); us.append(Scalar[dtype](0.1))
+    exp_board.append(board9(1,-1,1, -1,1,1, -1,-1,0)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("sigue u=0.1 -> O en 7")
+    # sigue: u=0.9 -> el rival toma la 2a casilla vacia (la 8).
+    boards.append(board9(1,-1,1, -1,1,0, -1,0,0)); acts.append(Scalar[idx_dtype](5)); us.append(Scalar[dtype](0.9))
+    exp_board.append(board9(1,-1,1, -1,1,1, -1,0,-1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("sigue u=0.9 -> O en 8")
+
+    n = len(boards)
+    flat = List[Scalar[dtype]]()
+    for i in range(n):
+        for c in range(NUM_CELLS): flat.append(boards[i][c])
+
+    out = run_dynamics(ctx, flat, acts, us, n)
+    for p in range(n):
+        for c in range(NUM_CELLS):
+            assert_close(out.state[p * NUM_CELLS + c], exp_board[p][c], TOL,
+                         String("tablero '", names[p], "' casilla ", c))
+        assert_close(out.reward[p], exp_reward[p], TOL, String("reward '", names[p], "'"))
+        assert_close(out.discount[p], exp_discount[p], TOL, String("discount '", names[p], "'"))
+        assert_close(out.next_value[p], Scalar[dtype](0), TOL, String("next_value '", names[p], "'"))
+    print("PASS step: gana agente / empate / gana rival / sigue (rival al azar 7 u 8)")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -361,3 +439,4 @@ def main() raises:
         test_apply_changes_one_cell(ctx)
         test_terminal_and_reward(ctx)
         test_prior_masks_illegal(ctx)
+        test_step_all_paths(ctx)

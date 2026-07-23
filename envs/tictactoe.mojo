@@ -207,6 +207,85 @@ def ttt_prior_logits_kernel(logits_out: GlobalF32, state: GlobalF32,
                 if ttt_is_legal(state, e, c) else NEG_INF
 
 
+def ttt_random_legal_cell(state: GlobalF32, p: Int, u: Scalar[dtype]) -> Int:
+    """La casilla vacia numero floor(u*m) (m = nº de vacias), contando desde 0.
+
+    Uniforme sobre las casillas libres, sin listas: cuenta cuantas hay y devuelve
+    la k-esima. Es el analogo del random_set_bit del MCTS, aqui sobre floats. u en
+    [0,1). Devuelve -1 si no hay ninguna, cosa que no ocurre en el step (solo se
+    llama cuando el tablero no esta lleno).
+    """
+    m = 0
+    for c in range(NUM_CELLS):
+        if ttt_is_legal(state, p, c):
+            m += 1
+    if m == 0:
+        return -1
+    k = Int(u * Scalar[dtype](m))
+    if k >= m:            # guarda por si u redondeara justo a m
+        k = m - 1
+    j = 0
+    for c in range(NUM_CELLS):
+        if ttt_is_legal(state, p, c):
+            if j == k:
+                return c
+            j += 1
+    return -1             # inalcanzable con m > 0
+
+
+def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
+                        step_uniforms: GlobalF32, reward_out: GlobalF32,
+                        discount_out: GlobalF32, next_value_out: GlobalF32,
+                        n_particles: Int):
+    """El step estocastico de TTT: jugada del agente + jugada del rival al azar.
+
+    Por particula:
+      1. El agente (X) juega su accion.
+      2. Si X gana o el tablero se llena -> terminal (el rival no juega).
+      3. Si no, el rival (O) juega una casilla legal al azar (con step_uniforms).
+      4. Si O gana o se llena -> terminal.
+    Salidas: reward (vista del agente), discount (0 si terminal, 1 si sigue) y
+    next_value (0: no hay critico todavia, V=0). Calcula cada has_won/is_full una
+    sola vez, en el orden del juego.
+
+    Como el juguete, NO comprueba si la particula ya estaba muerta: una particula
+    terminal se vuelve a pisar y da igual, porque su peso ya lo congelo el nucleo
+    SMC. Es memory-safe porque la accion viene acotada a [0,9) y el rival solo
+    juega cuando el tablero NO esta lleno, asi que random_legal_cell siempre
+    encuentra hueco y nunca devuelve -1. Un hilo por particula.
+    """
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p >= n_particles:
+        return
+
+    # 1. El agente (X) juega su accion.
+    ttt_apply(state, p, Int(action[p]), CELL_AGENT)
+
+    reward = Scalar[dtype](0)
+    terminal = False
+    if ttt_has_won(state, p, CELL_AGENT):
+        reward = Scalar[dtype](1)          # gana el agente
+        terminal = True
+    elif ttt_is_full(state, p):
+        reward = Scalar[dtype](0.5)        # empate en la jugada del agente
+        terminal = True
+    else:
+        # 3. El rival (O) juega una casilla legal al azar.
+        cell = ttt_random_legal_cell(state, p, step_uniforms[p])
+        ttt_apply(state, p, cell, CELL_RIVAL)
+        if ttt_has_won(state, p, CELL_RIVAL):
+            reward = Scalar[dtype](0)      # gana el rival (derrota)
+            terminal = True
+        elif ttt_is_full(state, p):
+            reward = Scalar[dtype](0.5)    # empate en la jugada del rival
+            terminal = True
+        # si no, sigue viva: reward 0, terminal False (los valores por defecto)
+
+    reward_out[p] = reward
+    discount_out[p] = Scalar[dtype](0) if terminal else Scalar[dtype](1)
+    next_value_out[p] = Scalar[dtype](0)
+
+
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
                           n_particles: Int):
     """Copia las 9 casillas de cada particula a la salida usando ttt_cell.
