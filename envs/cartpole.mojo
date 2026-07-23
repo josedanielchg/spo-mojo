@@ -8,7 +8,12 @@ gymnax/environments/classic_control/cartpole.py. El estado son 5 numeros:
 Por etapas:
   1.2  la dinamica (integracion de Euler)                    -> cartpole_advance
   2.1  terminacion + discount + reward + flag de truncacion  -> cartpole_recurrent_kernel
-  3.x  el struct SearchModel                                 (siguiente)
+  2.2  reset + auto-reset                                     -> cartpole_reset_kernel
+  3.1  el struct SearchModel (enchufa CartPole a la busqueda) -> struct CartPole
+
+Como el juguete, este fichero implementa el contrato `SearchModel` importando solo
+los tipos de datos y el contrato, NO el algoritmo de busqueda. El entorno no sabe
+que existe SPO; es la busqueda quien lo usa.
 
 Las constantes son los EnvParams de gymnax. Ojo con la precision: en Python son
 float64, pero JAX las mantiene en float32 al operar con el estado (float32) por
@@ -16,9 +21,15 @@ weak typing, asi que aqui van en float32 y el resultado cuadra con el golden.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
+from std.gpu.host import DeviceContext, DeviceBuffer
 from std.math import sin, cos, abs
 
 from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.search_model import SearchModel
+from systems.spo.spo_types import SPOConfig
+
+comptime TPB_CART = 32
 
 comptime STATE_DIM = 5
 comptime NUM_ACTIONS = 2
@@ -225,3 +236,93 @@ def cartpole_auto_reset_kernel(state: GlobalF32, done: GlobalI32,
     if Int(done[e]) == 0:
         return
     write_reset_state(state, e * STATE_DIM, uniforms, e * 4)
+
+
+def cartpole_policy_logits_kernel(logits_out: GlobalF32, n_rows: Int):
+    """El prior de la demo: UNIFORME (todos los logits a 0).
+
+    Es deliberado, igual que en el juguete: si la busqueda mejora una politica
+    que no sabe nada, la mejora viene de la busqueda y de nada mas. Cuando en la
+    fase 5 exista el actor, este kernel se cambia por el forward de la red."""
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i < n_rows:
+        for a in range(NUM_ACTIONS):
+            logits_out[i * NUM_ACTIONS + a] = Scalar[dtype](0)
+
+
+def cartpole_value_kernel(value_out: GlobalF32, n_rows: Int,
+                          value_scale: Scalar[dtype]):
+    """V(s) = value_scale, constante. 0 en la demo (sin critico): ahi los pesos
+    SMC degeneran al retorno acumulado y la busqueda planifica sin ninguna red.
+    value_scale > 0 solo lo usan los tests."""
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i < n_rows:
+        value_out[i] = value_scale
+
+
+@fieldwise_init
+struct CartPole(SearchModel, Copyable, Movable):
+    """CartPole como modelo de busqueda: el `SearchModel` de la demo 2.
+
+    Enchufa a la busqueda que ya existe sin tocar ni una linea del nucleo SMC:
+    solo hay que saber evaluar la raiz y dar un paso. El struct se queda en el
+    host; sus dos campos bajan como argumentos de los kernels.
+
+    En la demo va con value_scale = 0 (V ≡ 0, sin red) y el flag por defecto (A).
+    """
+
+    var value_scale: Scalar[dtype]
+    """El valor constante del modelo. 0 en la demo; > 0 solo para tests."""
+
+    var truncate_on_step_limit: Bool
+    """El paso 500 como truncacion con futuro (True, opcion B) o como muerte
+    (False, opcion A = fiel a gymnax). Ver cartpole_recurrent_kernel."""
+
+    def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
+                  root_state: DeviceBuffer[dtype],
+                  logits_out: DeviceBuffer[dtype],
+                  value_out: DeviceBuffer[dtype]) raises:
+        """El prior y V(s) sobre los estados raiz, uno por entorno.
+
+        El prior es uniforme y V es constante, asi que ninguno de los dos mira
+        `root_state` -- pero la firma lo recibe porque el contrato es generico y
+        el actor/critico de la fase 5 si lo necesitaran."""
+        blocks = (cfg.num_envs + TPB_CART - 1) // TPB_CART
+
+        ctx.enqueue_function[cartpole_policy_logits_kernel, cartpole_policy_logits_kernel](
+            logits_out.unsafe_ptr(), cfg.num_envs,
+            grid_dim=blocks, block_dim=TPB_CART)
+
+        ctx.enqueue_function[cartpole_value_kernel, cartpole_value_kernel](
+            value_out.unsafe_ptr(), cfg.num_envs, self.value_scale,
+            grid_dim=blocks, block_dim=TPB_CART)
+
+    def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
+             outputs: StepOutputs) raises:
+        """Avanza las P particulas una profundidad: fisica + terminacion + plegado.
+
+        Dos kernels: el recurrente (que ya hace todo el trabajo de las etapas 1-2)
+        y el prior en el estado NUEVO. Sortear la accion siguiente no es cosa del
+        modelo: de eso se encarga `sample_next_actions`, que es generico.
+
+        No toca `particles.value`: el error TD necesita el V viejo, y el nuevo se
+        queda en `outputs.next_value` hasta que update_particles lo mueva."""
+        p_total = cfg.num_search_particles()
+        blocks = (p_total + TPB_CART - 1) // TPB_CART
+        flag = 1 if self.truncate_on_step_limit else 0
+
+        ctx.enqueue_function[cartpole_recurrent_kernel, cartpole_recurrent_kernel](
+            particles.state.unsafe_ptr(), outputs.next_action.unsafe_ptr(),
+            outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
+            outputs.next_value.unsafe_ptr(), p_total,
+            self.value_scale, cfg.search_gamma, flag,
+            grid_dim=blocks, block_dim=TPB_CART)
+
+        ctx.enqueue_function[cartpole_policy_logits_kernel, cartpole_policy_logits_kernel](
+            outputs.action_logits.unsafe_ptr(), p_total,
+            grid_dim=blocks, block_dim=TPB_CART)
+
+
+def default_cartpole() -> CartPole:
+    """La config de la demo: V ≡ 0 (sin red) y el paso 500 como muerte (opcion A)."""
+    return CartPole(value_scale=0.0, truncate_on_step_limit=False)
