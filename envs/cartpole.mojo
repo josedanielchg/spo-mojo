@@ -25,6 +25,7 @@ from std.gpu.host import DeviceContext, DeviceBuffer
 from std.math import sin, cos, abs
 
 from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32
+from ops.rng import fill_uniform
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.search_model import SearchModel
 from systems.spo.spo_types import SPOConfig
@@ -326,3 +327,74 @@ struct CartPole(SearchModel, Copyable, Movable):
 def default_cartpole() -> CartPole:
     """La config de la demo: V ≡ 0 (sin red) y el paso 500 como muerte (opcion A)."""
     return CartPole(value_scale=0.0, truncate_on_step_limit=False)
+
+
+# --- El entorno REAL: donde las acciones se ejecutan de verdad -------------
+#
+# Hasta aqui todo era imaginacion dentro de la busqueda. Estos dos ultimos
+# kernels son el entorno de verdad: la accion elegida se ejecuta, se acumula el
+# retorno y el episodio se reinicia al terminar. Es lo que usa la demo (y en la
+# fase 8, el bucle de actuacion del learner).
+#
+# Diferencia con cartpole_recurrent_kernel: aquel pliega gamma y el bootstrap
+# para la BUSQUEDA; este solo da reward y done, que es lo que necesita jugar de
+# verdad. Comparten la fisica (cartpole_advance) y la terminacion.
+
+def cartpole_env_step_kernel(state: GlobalF32, action: GlobalI32,
+                             reward_out: GlobalF32, done_out: GlobalI32,
+                             n_envs: Int):
+    """Un paso del entorno REAL. Un hilo por env.
+
+    reward = 1 - prev_terminal (gymnax): el paso que termina el episodio TAMBIEN
+    da 1, porque prev_terminal mira el estado de entrada, no el de salida. Por eso
+    el retorno de un episodio es el numero de pasos que aguanto."""
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e >= n_envs:
+        return
+
+    base = e * STATE_DIM
+    x = state[base + 0]
+    x_dot = state[base + 1]
+    theta = state[base + 2]
+    theta_dot = state[base + 3]
+    time = state[base + 4]
+
+    prev_terminal = cartpole_is_terminal(x, theta, time)
+    reward = Scalar[dtype](0) if prev_terminal else Scalar[dtype](1)
+
+    ns = cartpole_advance(x, x_dot, theta, theta_dot, time, Int(action[e]))
+    done = cartpole_is_terminal(ns.x, ns.theta, ns.time)
+
+    state[base + 0] = ns.x
+    state[base + 1] = ns.x_dot
+    state[base + 2] = ns.theta
+    state[base + 3] = ns.theta_dot
+    state[base + 4] = ns.time
+    reward_out[e] = reward
+    done_out[e] = Scalar[idx_dtype](1) if done else Scalar[idx_dtype](0)
+
+
+def cartpole_step_envs(ctx: DeviceContext, state: DeviceBuffer[dtype],
+                       actions: DeviceBuffer[idx_dtype],
+                       reward: DeviceBuffer[dtype], done: DeviceBuffer[idx_dtype],
+                       reset_u: DeviceBuffer[dtype], n_envs: Int,
+                       seed: UInt32, reset_stream: UInt32) raises:
+    """Un paso del entorno real para los n_envs, con auto-reset de los terminados.
+
+    Deja `reward` y `done` listos para que el host acumule el retorno. El
+    auto-reset va DESPUES del paso: los envs que acaban de terminar empiezan otro
+    episodio desde un estado nuevo; los vivos siguen. `reset_stream` tiene que
+    variar por paso para que los reinicios no repitan el mismo estado inicial."""
+    blocks = (n_envs + TPB_CART - 1) // TPB_CART
+
+    ctx.enqueue_function[cartpole_env_step_kernel, cartpole_env_step_kernel](
+        state.unsafe_ptr(), actions.unsafe_ptr(), reward.unsafe_ptr(),
+        done.unsafe_ptr(), n_envs, grid_dim=blocks, block_dim=TPB_CART)
+
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        reset_u.unsafe_ptr(), seed, reset_stream, n_envs * 4,
+        grid_dim=(n_envs * 4 + TPB_CART - 1) // TPB_CART, block_dim=TPB_CART)
+
+    ctx.enqueue_function[cartpole_auto_reset_kernel, cartpole_auto_reset_kernel](
+        state.unsafe_ptr(), done.unsafe_ptr(), reset_u.unsafe_ptr(), n_envs,
+        grid_dim=blocks, block_dim=TPB_CART)
