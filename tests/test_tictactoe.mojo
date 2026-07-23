@@ -8,10 +8,10 @@ casillas de su vecina (el mismo tipo de comprobacion que el broadcast de root_fn
 
 from std.gpu.host import DeviceContext
 
-from ops.common import dtype, idx_dtype
+from ops.common import dtype, idx_dtype, NEG_INF
 from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
                             ttt_legal_mask_kernel, ttt_apply_kernel,
-                            ttt_outcome_kernel,
+                            ttt_outcome_kernel, ttt_prior_logits_kernel,
                             NUM_CELLS, NUM_ACTIONS,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
 from tests.helpers import upload, zeros, download, assert_close
@@ -311,6 +311,45 @@ def test_terminal_and_reward(ctx: DeviceContext) raises:
     print("PASS terminal y recompensa (gana X / gana O / empate / no terminal / X en lleno)")
 
 
+def run_prior(ctx: DeviceContext, boards: List[Scalar[dtype]],
+              n: Int) raises -> List[Scalar[dtype]]:
+    """Corre ttt_prior_logits_kernel sobre n estados raiz y baja los logits [n, 9]."""
+    state = upload[dtype](ctx, boards)
+    logits = zeros[dtype](ctx, n * NUM_ACTIONS)
+    ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
+        logits.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    return download[dtype](logits, n * NUM_ACTIONS)
+
+
+def test_prior_masks_illegal(ctx: DeviceContext) raises:
+    """El prior raiz: logit 0 en las casillas legales, NEG_INF en las ocupadas.
+
+    Tras el softmax eso es una distribucion uniforme sobre las casillas libres y
+    probabilidad 0 de jugar sobre una ficha ya puesta.
+    """
+    boards_l = List[List[Scalar[dtype]]]()
+    boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))    # ocupadas 0,2,4,6
+    boards_l.append(board9(0,0,0, 0,0,0, 0,0,0))       # vacio: todo legal
+    boards_l.append(board9(1,-1,1, -1,1,-1, 1,-1,1))   # lleno: todo ilegal (degenerado)
+
+    n = len(boards_l)
+    batch = List[Scalar[dtype]]()
+    for i in range(n):
+        for c in range(NUM_CELLS): batch.append(boards_l[i][c])
+
+    got = run_prior(ctx, batch, n)
+    for e in range(n):
+        for c in range(NUM_ACTIONS):
+            want = Scalar[dtype](0)
+            if boards_l[e][c] != CELL_EMPTY:
+                want = NEG_INF
+            assert_close(got[e * NUM_ACTIONS + c], want, TOL,
+                         String("prior raiz env ", e, " casilla ", c))
+    print("PASS prior raiz enmascarado (0 en legales, NEG_INF en ocupadas)")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -321,3 +360,4 @@ def main() raises:
         test_legal_mask(ctx)
         test_apply_changes_one_cell(ctx)
         test_terminal_and_reward(ctx)
+        test_prior_masks_illegal(ctx)

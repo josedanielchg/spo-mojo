@@ -22,7 +22,7 @@ adelante) el contrato SearchModel. El E-step no sabe que hay TTT detras.
 
 from std.gpu import block_dim, block_idx, thread_idx
 
-from ops.common import dtype, GlobalF32, GlobalI32
+from ops.common import dtype, GlobalF32, GlobalI32, NEG_INF
 
 # El tablero son 9 casillas: 9 floats de estado, 9 acciones (una por casilla).
 comptime NUM_CELLS = 9
@@ -184,6 +184,27 @@ def ttt_outcome_kernel(terminal_out: GlobalF32, reward_out: GlobalF32,
         terminal_out[p] = Scalar[dtype](1) if ttt_is_terminal(state, p) \
                           else Scalar[dtype](0)
         reward_out[p] = ttt_reward(state, p)
+
+
+def ttt_prior_logits_kernel(logits_out: GlobalF32, state: GlobalF32,
+                            n_envs: Int):
+    """Prior de la busqueda en los estados raiz: [n_envs, NUM_ACTIONS].
+
+    Uniforme sobre las casillas LEGALES (logit 0) y tapado en las ocupadas
+    (NEG_INF), de modo que el softmax da probabilidad 0 a jugar sobre una ficha ya
+    puesta. Es el analogo del prior uniforme del juguete, pero enmascarado porque
+    en TTT no todas las acciones son legales.
+
+    Uso NEG_INF (MIN_FINITE) y no -inf de verdad: si un tablero no tuviera ninguna
+    casilla legal (no deberia pasar en una raiz, pero por si acaso), una fila
+    entera de -inf daria nan en el softmax; con MIN_FINITE degenera a uniforme,
+    que es inofensivo. Un hilo por env.
+    """
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e < n_envs:
+        for c in range(NUM_ACTIONS):
+            logits_out[e * NUM_ACTIONS + c] = Scalar[dtype](0) \
+                if ttt_is_legal(state, e, c) else NEG_INF
 
 
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
