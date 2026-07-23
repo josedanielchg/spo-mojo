@@ -12,10 +12,13 @@ from ops.common import dtype, idx_dtype, NEG_INF
 from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
                             ttt_legal_mask_kernel, ttt_apply_kernel,
                             ttt_outcome_kernel, ttt_prior_logits_kernel,
-                            ttt_dynamics_kernel,
-                            NUM_CELLS, NUM_ACTIONS,
+                            ttt_dynamics_kernel, TicTacToe, default_tictactoe,
+                            NUM_CELLS, NUM_ACTIONS, STATE_DIM,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
-from tests.helpers import upload, zeros, download, assert_close
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.spo_types import SPOConfig
+from tests.helpers import (upload, zeros, download, filled, write_into,
+                           assert_close)
 
 comptime TOL = Scalar[dtype](1e-6)
 
@@ -428,6 +431,87 @@ def test_step_all_paths(ctx: DeviceContext) raises:
     print("PASS step: gana agente / empate / gana rival / sigue (rival al azar 7 u 8)")
 
 
+def ttt_config(num_envs: Int, num_particles: Int) -> SPOConfig:
+    """Config pequena para probar el modelo TTT en aislamiento."""
+    return SPOConfig(num_envs=num_envs, num_particles=num_particles,
+                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
+                     search_depth=4, resample_period=4, temperature=0.5,
+                     search_gamma=1.0, search_gae_lambda=1.0)
+
+
+def test_model_eval_root(ctx: DeviceContext) raises:
+    """El eval_root del modelo: prior enmascarado en la raiz + V puesto a 0."""
+    model = default_tictactoe()
+    num_envs = 2
+    cfg = ttt_config(num_envs, 4)
+
+    boards_list = List[List[Scalar[dtype]]]()
+    boards_list.append(board9(1,0,-1, 0,1,0, -1,0,0))   # ocupadas 0,2,4,6
+    boards_list.append(board9(0,0,0, 0,0,0, 0,0,0))      # vacio
+
+    roots = List[Scalar[dtype]]()
+    for e in range(num_envs):
+        for c in range(NUM_CELLS): roots.append(boards_list[e][c])
+
+    root_state = upload[dtype](ctx, roots)
+    logits = zeros[dtype](ctx, num_envs * NUM_ACTIONS)
+    # Relleno el valor a 99 para comprobar que eval_root lo PISA a 0 (no que ya
+    # estuviera a 0 por casualidad).
+    value = filled[dtype](ctx, num_envs, Scalar[dtype](99))
+    model.eval_root(ctx, cfg, root_state, logits, value)
+    ctx.synchronize()
+
+    got_logits = download[dtype](logits, num_envs * NUM_ACTIONS)
+    got_value = download[dtype](value, num_envs)
+    for e in range(num_envs):
+        for c in range(NUM_ACTIONS):
+            want = Scalar[dtype](0)
+            if boards_list[e][c] != CELL_EMPTY:
+                want = NEG_INF
+            assert_close(got_logits[e * NUM_ACTIONS + c], want, TOL,
+                         String("eval_root logit env ", e, " casilla ", c))
+        assert_close(got_value[e], Scalar[dtype](0), TOL,
+                     String("eval_root V env ", e, " deberia ser 0"))
+    print("PASS eval_root del modelo: prior enmascarado + V=0")
+
+
+def test_model_step(ctx: DeviceContext) raises:
+    """Step del modelo: avanza el estado y rellena action_logits con el prior nuevo."""
+    model = default_tictactoe()
+    cfg = ttt_config(1, 1)
+    p_total = cfg.num_search_particles()   # 1
+
+    particles = Particles(ctx, cfg)
+    outputs = StepOutputs(ctx, cfg)
+
+    # El caso 'sigue' de A3b: el agente juega la 5, el rival (u=0.1) toma la 7.
+    write_into[dtype](particles.state, board9(1,-1,1, -1,1,0, -1,0,0))
+    acts = List[Scalar[idx_dtype]](); acts.append(Scalar[idx_dtype](5))
+    write_into[idx_dtype](outputs.next_action, acts)
+    us = List[Scalar[dtype]](); us.append(Scalar[dtype](0.1))
+    step_us = upload[dtype](ctx, us)
+
+    model.step(ctx, cfg, particles, outputs, step_us)
+    ctx.synchronize()
+
+    got_state = download[dtype](particles.state, p_total * NUM_CELLS)
+    got_logits = download[dtype](outputs.action_logits, p_total * NUM_ACTIONS)
+
+    # Tablero nuevo: X en 5, O en 7 -> solo queda libre la casilla 8.
+    new_board = board9(1,-1,1, -1,1,1, -1,-1,0)
+    for c in range(NUM_CELLS):
+        assert_close(got_state[c], new_board[c], TOL,
+                     String("step estado casilla ", c))
+    # action_logits = prior enmascarado del tablero nuevo: 0 solo en la casilla 8.
+    for c in range(NUM_ACTIONS):
+        want = Scalar[dtype](0)
+        if new_board[c] != CELL_EMPTY:
+            want = NEG_INF
+        assert_close(got_logits[c], want, TOL,
+                     String("step action_logits casilla ", c))
+    print("PASS step del modelo: avanza el estado y da el prior del estado nuevo")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -440,3 +524,5 @@ def main() raises:
         test_terminal_and_reward(ctx)
         test_prior_masks_illegal(ctx)
         test_step_all_paths(ctx)
+        test_model_eval_root(ctx)
+        test_model_step(ctx)

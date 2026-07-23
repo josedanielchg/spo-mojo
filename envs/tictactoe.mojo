@@ -21,8 +21,12 @@ adelante) el contrato SearchModel. El E-step no sabe que hay TTT detras.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
+from std.gpu.host import DeviceContext, DeviceBuffer
 
 from ops.common import dtype, GlobalF32, GlobalI32, NEG_INF
+from systems.spo.particles import Particles, StepOutputs
+from systems.spo.search_model import SearchModel
+from systems.spo.spo_types import SPOConfig
 
 # El tablero son 9 casillas: 9 floats de estado, 9 acciones (una por casilla).
 comptime NUM_CELLS = 9
@@ -298,3 +302,52 @@ def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
     if p < n_particles:
         for c in range(NUM_CELLS):
             cells_out[p * NUM_CELLS + c] = ttt_cell(state, p, c)
+
+
+@fieldwise_init
+struct TicTacToe(SearchModel, Copyable, Movable):
+    """Tic-Tac-Toe como modelo de busqueda: el agente (X) contra un rival aleatorio.
+
+    Sin campos: no hay nada configurable. La regla es fija, el agente siempre es X
+    y no hay critico todavia (V=0), asi que la busqueda mejora un prior uniforme
+    enmascarado partiendo de valor cero -- el modo "planificador" del Milestone 1.
+
+    Como toy_chain, no importa la busqueda: solo el contrato SearchModel y los
+    tipos. Los kernels que usa (prior de A3a, dinamica de A3b) estan probados por
+    separado; aqui solo se cablean en los dos metodos del contrato.
+    """
+
+    def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
+                  root_state: DeviceBuffer[dtype],
+                  logits_out: DeviceBuffer[dtype],
+                  value_out: DeviceBuffer[dtype]) raises:
+        """El prior enmascarado sobre los estados raiz, y V=0 (sin critico)."""
+        blocks = (cfg.num_envs + TPB_TTT - 1) // TPB_TTT
+        ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
+            logits_out.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
+            grid_dim=blocks, block_dim=TPB_TTT)
+        # V = 0: modo planificador. Se pisa explicitamente porque el workspace se
+        # reutiliza entre busquedas y podria traer valores viejos.
+        value_out.enqueue_fill(0)
+
+    def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
+             outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
+        """Avanza las P particulas (agente + rival al azar) y evalua el prior en el
+        estado NUEVO, que es de donde se muestreara la accion siguiente."""
+        p_total = cfg.num_search_particles()
+        blocks = (p_total + TPB_TTT - 1) // TPB_TTT
+
+        ctx.enqueue_function[ttt_dynamics_kernel, ttt_dynamics_kernel](
+            particles.state.unsafe_ptr(), outputs.next_action.unsafe_ptr(),
+            step_uniforms.unsafe_ptr(), outputs.reward.unsafe_ptr(),
+            outputs.discount.unsafe_ptr(), outputs.next_value.unsafe_ptr(),
+            p_total, grid_dim=blocks, block_dim=TPB_TTT)
+
+        ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
+            outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),
+            p_total, grid_dim=blocks, block_dim=TPB_TTT)
+
+
+def default_tictactoe() -> TicTacToe:
+    """El modelo de TTT. Sin parametros: la regla es fija."""
+    return TicTacToe()
