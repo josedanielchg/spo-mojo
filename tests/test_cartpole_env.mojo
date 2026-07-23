@@ -11,6 +11,7 @@ from std.math import abs
 
 from ops.common import dtype, idx_dtype
 from envs.cartpole import cartpole_step_envs, STATE_DIM
+from envs.cartpole_runner import random_policy_return
 from tests.helpers import upload, zeros, download, assert_close, assert_eq_int
 
 comptime SEED = UInt32(555)
@@ -98,9 +99,26 @@ def test_alive_env_keeps_going(ctx: DeviceContext) raises:
     print("PASS un env vivo sigue acumulando sin resetearse")
 
 
+def test_random_baseline(ctx: DeviceContext) raises:
+    """La politica aleatoria da el retorno conocido de CartPole (~20-25).
+
+    Es la referencia de la demo: la busqueda tiene que jugar mucho mejor que
+    tirar una moneda. 16 envs x 200 pasos da de sobra los >=32 episodios."""
+    stats = random_policy_return(ctx, 16, 200, UInt32(42))
+    print("      aleatoria: retorno medio", stats.mean_return, "sobre",
+          stats.num_episodes, "episodios")
+    if stats.num_episodes < 32:
+        raise Error("hacen falta >=32 episodios, salieron ", stats.num_episodes)
+    if stats.mean_return < 15.0 or stats.mean_return > 40.0:
+        raise Error("el retorno aleatorio deberia rondar 20-25, salio ",
+                    stats.mean_return)
+    print("PASS baseline aleatoria: retorno medio ~20-25")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_return_is_step_count(ctx)
         test_pole_fall_ends_episode(ctx)
         test_auto_reset_after_episode(ctx)
         test_alive_env_keeps_going(ctx)
+        test_random_baseline(ctx)

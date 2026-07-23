@@ -374,6 +374,15 @@ def cartpole_env_step_kernel(state: GlobalF32, action: GlobalI32,
     done_out[e] = Scalar[idx_dtype](1) if done else Scalar[idx_dtype](0)
 
 
+def random_actions_kernel(actions_out: GlobalI32, uniforms: GlobalF32, n: Int):
+    """Politica aleatoria uniforme: accion 1 si u >= 0.5, si no 0. Es la linea
+    base contra la que se mide la busqueda en la demo (la busqueda tiene que
+    jugar mucho mejor que tirar una moneda cada paso)."""
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i < n:
+        actions_out[i] = Scalar[idx_dtype](1) if uniforms[i] >= 0.5 else Scalar[idx_dtype](0)
+
+
 def cartpole_step_envs(ctx: DeviceContext, state: DeviceBuffer[dtype],
                        actions: DeviceBuffer[idx_dtype],
                        reward: DeviceBuffer[dtype], done: DeviceBuffer[idx_dtype],
