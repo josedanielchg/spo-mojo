@@ -124,11 +124,25 @@ def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
         uniforms    [P]                      numeros aleatorios para sortear acciones
 
     Salida: `particles` queda listo para la profundidad 0. Los campos que se
-    acumulan (peso, gae, terminal, depth) arrancan a cero, como en
+    acumulan (peso, gae, terminal, depth) se ponen a cero AQUI, como en
     `init_particles` de Stoix.
+
+    Ponerlos a cero explicitamente no es adorno: el `SearchWorkspace` se reserva
+    una vez y se reutiliza en cada busqueda, asi que sin este reset la segunda
+    busqueda heredaria el estado de la primera. Y el campo que mas duele es
+    `terminal`: si llega con 1, la mascara de `update_particles` congela el peso
+    desde la profundidad 0 y NINGUNA particula acumula nada. Los pesos se quedan
+    todos a cero, el softmax del readout sale uniforme y la busqueda degenera en
+    elegir al azar entre las acciones raiz -- silenciosamente, sin fallar.
     """
     check_search_config(cfg)
     p_total = cfg.num_search_particles()
+
+    # 0. Los acumuladores a cero. Ver el porque en el docstring.
+    particles.resample_td_weights.enqueue_fill(0)
+    particles.gae.enqueue_fill(0)
+    particles.terminal.enqueue_fill(0)
+    particles.depth.enqueue_fill(0)
 
     # 1. Copiamos el estado raiz de cada entorno a todas sus particulas.
     # Cada particula necesita su propia copia para poder simular un futuro distinto.

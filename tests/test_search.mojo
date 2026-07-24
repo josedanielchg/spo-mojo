@@ -202,9 +202,80 @@ def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
     print("PASS mas particulas no empeora la busqueda")
 
 
+def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
+    """Regresion: reutilizar el workspace tiene que dar el MISMO resultado.
+
+    Este test existe por un bug de verdad, y de los caros: `root_fn` sembraba las
+    particulas pero no ponia a cero los acumuladores (peso, gae, terminal, depth).
+    Con un workspace recien creado no se notaba, porque nacen a cero; pero el
+    SearchWorkspace existe justamente para reservarse UNA vez y reutilizarse en
+    cada paso de entorno, y ahi la segunda busqueda heredaba `terminal = 1` de la
+    primera. La mascara de update_particles congelaba entonces el peso de TODAS
+    las particulas desde la profundidad 0, los pesos se quedaban a cero, el
+    softmax del readout salia uniforme y la busqueda degeneraba en elegir al azar.
+
+    Lo peor es que no fallaba nada: la busqueda seguia devolviendo acciones
+    validas, solo que malas. Se detecto porque un planificador sobre tres en raya
+    no ganaba mas partidas que jugar al azar.
+
+    La comprobacion es directa: dos busquedas identicas, una con workspace nuevo y
+    otra reutilizando uno que ya corrio, tienen que dar exactamente lo mismo.
+    """
+    # Sin resampling (periodo > profundidad) y con pasillo largo, a proposito: asi
+    # los pesos llegan al readout con valores distintos entre si y se puede exigir
+    # que NO sean uniformes. Con resampling los pesos se resetean a cero por
+    # diseno (la informacion pasa a la multiplicidad), y esa comprobacion no
+    # distinguiria el bug.
+    cfg = make_config(num_envs=4, num_particles=16, depth=6, period=99)
+    toy = ToyChain(chain_length=20, horizon=20, value_scale=1.0)
+    p_total = cfg.num_search_particles()
+
+    root_state = List[Scalar[dtype]]()
+    for _ in range(cfg.num_envs):
+        root_state.append(0.0)
+
+    # Referencia: workspace nuevo, la busqueda que nos interesa.
+    fresh = SearchWorkspace(ctx, cfg)
+    search[ToyChain](ctx, fresh, cfg, toy, upload[dtype](ctx, root_state),
+                     UInt32(8080))
+    ctx.synchronize()
+    want_w = download[dtype](fresh.output.sampled_action_weights, p_total)
+    want_a = download[idx_dtype](fresh.output.action, cfg.num_envs)
+
+    # Y ahora el mismo workspace despues de haber corrido otra busqueda distinta.
+    reused = SearchWorkspace(ctx, cfg)
+    search[ToyChain](ctx, reused, cfg, toy, upload[dtype](ctx, root_state),
+                     UInt32(1111))          # una busqueda cualquiera, para ensuciarlo
+    ctx.synchronize()
+    search[ToyChain](ctx, reused, cfg, toy, upload[dtype](ctx, root_state),
+                     UInt32(8080))          # y ahora la que tiene que coincidir
+    ctx.synchronize()
+    got_w = download[dtype](reused.output.sampled_action_weights, p_total)
+    got_a = download[idx_dtype](reused.output.action, cfg.num_envs)
+
+    for p in range(p_total):
+        assert_close(got_w[p], want_w[p], TOL,
+                     String("el workspace reutilizado difiere en la particula ", p))
+    for e in range(cfg.num_envs):
+        if Int(got_a[e]) != Int(want_a[e]):
+            raise Error("el workspace reutilizado eligio otra accion en el env ", e)
+
+    # Y que los pesos no sean todos iguales: si el bug estuviera, saldrian todos a
+    # cero y la comprobacion de arriba pasaria igualmente por ser identicos.
+    spread = False
+    for p in range(1, p_total):
+        if got_w[p] != got_w[0]:
+            spread = True
+    if not spread:
+        raise Error("todos los pesos salieron identicos: el readout es uniforme, ",
+                    "que es justo el sintoma del bug de los acumuladores")
+    print("PASS reutilizar el workspace da el mismo resultado que uno nuevo")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_ess_drops_and_recovers_after_resampling(ctx)
         test_search_improves_a_uniform_prior(ctx)
         test_more_particles_is_not_worse(ctx)
         test_search_is_reproducible(ctx)
+        test_reusing_the_workspace_gives_the_same_result(ctx)
