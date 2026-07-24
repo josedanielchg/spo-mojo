@@ -282,9 +282,10 @@ def ttt_advance(state: GlobalF32, p: Int, action: Int,
 
 
 def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
-                        step_uniforms: GlobalF32, reward_out: GlobalF32,
-                        discount_out: GlobalF32, next_value_out: GlobalF32,
-                        n_particles: Int):
+                        step_uniforms: GlobalF32, depth: GlobalI32,
+                        reward_out: GlobalF32, discount_out: GlobalF32,
+                        next_value_out: GlobalF32, n_particles: Int,
+                        reward_gamma: Scalar[dtype]):
     """El step estocastico de TTT para la BUSQUEDA: un turno + gamma plegada.
 
     Avanza con `ttt_advance` y traduce el resultado al contrato del nucleo SMC:
@@ -299,7 +300,14 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
         return
 
     out = ttt_advance(state, p, Int(action[p]), step_uniforms[p])
-    reward_out[p] = out.reward
+    # Descuento por profundidad: ganar YA vale mas que ganar despues. Sin esto, y
+    # con V=0, el peso SMC es la suma de recompensas sin descontar, asi que una
+    # particula que gana en el paso 0 empata con otra que gana en el paso 3 -- y el
+    # softmax no puede distinguir "gane seguro" de "gane con suerte".
+    g = Scalar[dtype](1)
+    for _ in range(Int(depth[p])):
+        g *= reward_gamma
+    reward_out[p] = out.reward * g
     discount_out[p] = Scalar[dtype](1) - out.terminal
     next_value_out[p] = Scalar[dtype](0)
 
@@ -376,14 +384,19 @@ def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
 struct TicTacToe(SearchModel, Copyable, Movable):
     """Tic-Tac-Toe como modelo de busqueda: el agente (X) contra un rival aleatorio.
 
-    Sin campos: no hay nada configurable. La regla es fija, el agente siempre es X
-    y no hay critico todavia (V=0), asi que la busqueda mejora un prior uniforme
-    enmascarado partiendo de valor cero -- el modo "planificador" del Milestone 1.
+    La regla es fija y el agente siempre es X; no hay critico todavia (V=0), asi que
+    la busqueda mejora un prior uniforme enmascarado partiendo de valor cero -- el
+    modo "planificador" del Milestone 1.
 
     Como toy_chain, no importa la busqueda: solo el contrato SearchModel y los
     tipos. Los kernels que usa (prior de A3a, dinamica de A3b) estan probados por
     separado; aqui solo se cablean en los dos metodos del contrato.
     """
+
+    var reward_gamma: Scalar[dtype]
+    """Descuento de la recompensa por profundidad. 1.0 = sin descuento (ganar ya
+    vale igual que ganar despues, que en un juego con premio terminal deja el peso
+    SMC casi ciego); <1 premia ganar rapido."""
 
     def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
                   root_state: DeviceBuffer[dtype],
@@ -407,9 +420,10 @@ struct TicTacToe(SearchModel, Copyable, Movable):
 
         ctx.enqueue_function[ttt_dynamics_kernel, ttt_dynamics_kernel](
             particles.state.unsafe_ptr(), outputs.next_action.unsafe_ptr(),
-            step_uniforms.unsafe_ptr(), outputs.reward.unsafe_ptr(),
-            outputs.discount.unsafe_ptr(), outputs.next_value.unsafe_ptr(),
-            p_total, grid_dim=blocks, block_dim=TPB_TTT)
+            step_uniforms.unsafe_ptr(), particles.depth.unsafe_ptr(),
+            outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
+            outputs.next_value.unsafe_ptr(), p_total, self.reward_gamma,
+            grid_dim=blocks, block_dim=TPB_TTT)
 
         ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
             outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),
@@ -417,5 +431,5 @@ struct TicTacToe(SearchModel, Copyable, Movable):
 
 
 def default_tictactoe() -> TicTacToe:
-    """El modelo de TTT. Sin parametros: la regla es fija."""
-    return TicTacToe()
+    """El modelo de TTT con el descuento por defecto."""
+    return TicTacToe(reward_gamma=0.7)

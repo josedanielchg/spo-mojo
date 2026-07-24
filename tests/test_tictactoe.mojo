@@ -364,24 +364,39 @@ struct DynResult(Movable):
     var next_value: List[Scalar[dtype]]
 
 
-def run_dynamics(ctx: DeviceContext, boards: List[Scalar[dtype]],
-                 actions: List[Scalar[idx_dtype]], uniforms: List[Scalar[dtype]],
-                 n: Int) raises -> DynResult:
-    """Corre ttt_dynamics_kernel: aplica la jugada del agente + la del rival."""
+def run_dynamics_at(ctx: DeviceContext, boards: List[Scalar[dtype]],
+                    actions: List[Scalar[idx_dtype]],
+                    uniforms: List[Scalar[dtype]],
+                    depths: List[Scalar[idx_dtype]], n: Int,
+                    reward_gamma: Scalar[dtype]) raises -> DynResult:
+    """Corre ttt_dynamics_kernel con la profundidad y el descuento dados."""
     state = upload[dtype](ctx, boards)
     action = upload[idx_dtype](ctx, actions)
     us = upload[dtype](ctx, uniforms)
+    depth = upload[idx_dtype](ctx, depths)
     reward = zeros[dtype](ctx, n)
     discount = zeros[dtype](ctx, n)
     next_value = zeros[dtype](ctx, n)
     ctx.enqueue_function[ttt_dynamics_kernel, ttt_dynamics_kernel](
         state.unsafe_ptr(), action.unsafe_ptr(), us.unsafe_ptr(),
-        reward.unsafe_ptr(), discount.unsafe_ptr(), next_value.unsafe_ptr(), n,
+        depth.unsafe_ptr(), reward.unsafe_ptr(), discount.unsafe_ptr(),
+        next_value.unsafe_ptr(), n, reward_gamma,
         grid_dim=1, block_dim=TPB_TTT)
     ctx.synchronize()
     return DynResult(download[dtype](state, n * NUM_CELLS),
                      download[dtype](reward, n), download[dtype](discount, n),
                      download[dtype](next_value, n))
+
+
+def run_dynamics(ctx: DeviceContext, boards: List[Scalar[dtype]],
+                 actions: List[Scalar[idx_dtype]], uniforms: List[Scalar[dtype]],
+                 n: Int) raises -> DynResult:
+    """El caso base: profundidad 0 y sin descuento, o sea la recompensa cruda."""
+    depths = List[Scalar[idx_dtype]]()
+    for _ in range(n):
+        depths.append(Scalar[idx_dtype](0))
+    return run_dynamics_at(ctx, boards, actions, uniforms, depths, n,
+                           Scalar[dtype](1))
 
 
 def test_step_all_paths(ctx: DeviceContext) raises:
@@ -429,6 +444,53 @@ def test_step_all_paths(ctx: DeviceContext) raises:
         assert_close(out.discount[p], exp_discount[p], TOL, String("discount '", names[p], "'"))
         assert_close(out.next_value[p], Scalar[dtype](0), TOL, String("next_value '", names[p], "'"))
     print("PASS step: gana agente / empate / gana rival / sigue (rival al azar 7 u 8)")
+
+
+def test_step_discounts_reward_by_depth(ctx: DeviceContext) raises:
+    """La recompensa se descuenta por profundidad: ganar YA vale mas que ganar tarde.
+
+    Existe por un diagnostico concreto de la demo: sin descuento (gamma=1) el peso
+    SMC es la suma de recompensas sin descontar, asi que una particula que gana en
+    el paso 0 EMPATA con otra que gana en el paso 3, y el softmax del readout no
+    puede distinguir "gane seguro" de "gane con suerte". Con gamma<1 el empate se
+    rompe: se midio que q(jugada ganadora) sube de 0.24 a 0.9999 en una posicion
+    con victoria inmediata.
+
+    Mismo tablero ganador evaluado a cuatro profundidades: la recompensa tiene que
+    salir gamma^profundidad.
+    """
+    n = 4
+    gamma = Scalar[dtype](0.5)
+    boards = List[Scalar[dtype]]()
+    acts = List[Scalar[idx_dtype]]()
+    us = List[Scalar[dtype]]()
+    depths = List[Scalar[idx_dtype]]()
+    for d in range(n):
+        # X X . / -1 -1 . / . . .  -> la accion 2 completa la fila 0 y gana.
+        b = board9(1,1,0, -1,-1,0, 0,0,0)
+        for c in range(NUM_CELLS):
+            boards.append(b[c])
+        acts.append(Scalar[idx_dtype](2))
+        us.append(Scalar[dtype](0.5))
+        depths.append(Scalar[idx_dtype](d))
+
+    out = run_dynamics_at(ctx, boards, acts, us, depths, n, gamma)
+
+    want = Scalar[dtype](1)
+    for d in range(n):
+        assert_close(out.reward[d], want, TOL,
+                     String("la victoria a profundidad ", d, " deberia valer gamma^", d))
+        # Terminal en todas: el descuento no cambia el discount, solo la recompensa.
+        assert_close(out.discount[d], Scalar[dtype](0), TOL,
+                     String("una victoria es terminal, profundidad ", d))
+        want *= gamma
+
+    # Y con gamma=1 las cuatro valen lo mismo: es el empate que rompe el descuento.
+    flat = run_dynamics_at(ctx, boards, acts, us, depths, n, Scalar[dtype](1))
+    for d in range(n):
+        assert_close(flat.reward[d], Scalar[dtype](1), TOL,
+                     String("sin descuento toda victoria vale 1, profundidad ", d))
+    print("PASS la recompensa se descuenta por profundidad (gamma^d)")
 
 
 def ttt_config(num_envs: Int, num_particles: Int) -> SPOConfig:
@@ -524,5 +586,6 @@ def main() raises:
         test_terminal_and_reward(ctx)
         test_prior_masks_illegal(ctx)
         test_step_all_paths(ctx)
+        test_step_discounts_reward_by_depth(ctx)
         test_model_eval_root(ctx)
         test_model_step(ctx)
