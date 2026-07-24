@@ -11,11 +11,14 @@ prueba aqui es lo que solo existe en el entorno real.
 
 from std.gpu.host import DeviceContext
 
+from std.math import abs
+
 from ops.common import dtype, idx_dtype
 from envs.tictactoe import (ttt_reset_kernel, ttt_env_step_kernel,
                             ttt_auto_reset_kernel, ttt_random_policy_kernel,
                             NUM_CELLS, NUM_ACTIONS, STATE_DIM,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
+from envs.tictactoe_runner import play_random_games, MatchStats
 from tests.helpers import (upload, zeros, download, filled, assert_close,
                            assert_eq_int)
 
@@ -182,9 +185,73 @@ def test_random_policy_only_legal(ctx: DeviceContext) raises:
           "distintas )")
 
 
+def test_random_baseline_matches_exact_odds(ctx: DeviceContext) raises:
+    """LA prueba del bucle: la linea base reproduce las probabilidades EXACTAS.
+
+    Con las dos partes jugando uniformemente al azar, las probabilidades de TTT se
+    pueden calcular exactamente por recursion sobre todos los estados (no es una
+    estimacion ni un numero de la literatura):
+
+        gana X (agente)  0.5849      empate  0.1270      gana O  0.2881
+        puntuacion media del agente = 0.5849 + 0.5*0.1270 = 0.6484
+
+    Que salgan esas tres cifras valida de golpe TODO el bucle: el turno, el rival
+    aleatorio, la deteccion de final, la clasificacion del resultado y el
+    auto-reset. Un fallo en cualquiera de esas piezas movería las proporciones.
+
+    La tolerancia es de 4 puntos porcentuales: con ~3000 partidas el error estandar
+    ronda el 0.9%, asi que 4 puntos son mas de 4 sigma -- holgado para no fallar por
+    ruido con otra semilla, y aun asi estrecho para cazar cualquier bug de verdad.
+    """
+    stats = play_random_games(ctx, 64, 200, UInt32(12345))
+    n = stats.games()
+    if n < 2000:
+        raise Error("se esperaban miles de partidas en 200 turnos, salieron ", n)
+
+    draw_rate = Scalar[dtype](stats.draws) / Scalar[dtype](n)
+    loss_rate = Scalar[dtype](stats.losses) / Scalar[dtype](n)
+    tol = Scalar[dtype](0.04)
+
+    print("      partidas:", n, " gana X:", stats.win_rate(),
+          " empate:", draw_rate, " gana O:", loss_rate,
+          " score:", stats.score())
+
+    if abs(stats.win_rate() - Scalar[dtype](0.5849)) > tol:
+        raise Error("la tasa de victoria se aleja del valor exacto 0.5849: ",
+                    stats.win_rate())
+    if abs(draw_rate - Scalar[dtype](0.1270)) > tol:
+        raise Error("la tasa de empate se aleja del valor exacto 0.1270: ", draw_rate)
+    if abs(loss_rate - Scalar[dtype](0.2881)) > tol:
+        raise Error("la tasa de derrota se aleja del valor exacto 0.2881: ", loss_rate)
+    if abs(stats.score() - Scalar[dtype](0.6484)) > tol:
+        raise Error("la puntuacion se aleja del valor exacto 0.6484: ", stats.score())
+
+    # Y las tres categorias tienen que sumar exactamente las partidas contadas.
+    assert_eq_int(stats.wins + stats.draws + stats.losses, n,
+                  "victorias + empates + derrotas deberia ser el total")
+    print("PASS la linea base reproduce las probabilidades exactas de TTT al azar")
+
+
+def test_baseline_is_reproducible(ctx: DeviceContext) raises:
+    """Misma semilla, mismo marcador. Sin esto no se puede comparar nada."""
+    a = play_random_games(ctx, 32, 60, UInt32(777))
+    b = play_random_games(ctx, 32, 60, UInt32(777))
+    assert_eq_int(a.wins, b.wins, "las victorias deberian repetirse con la misma seed")
+    assert_eq_int(a.draws, b.draws, "los empates deberian repetirse con la misma seed")
+    assert_eq_int(a.losses, b.losses, "las derrotas deberian repetirse con la misma seed")
+
+    # Y con otra semilla el marcador tiene que cambiar (si no, la seed no se usa).
+    c = play_random_games(ctx, 32, 60, UInt32(4242))
+    if c.wins == a.wins and c.draws == a.draws and c.losses == a.losses:
+        raise Error("dos semillas distintas dieron el mismo marcador exacto")
+    print("PASS la linea base es reproducible y depende de la semilla")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_reset_clears_the_board(ctx)
         test_env_step_reports_done(ctx)
         test_auto_reset_only_finished_games(ctx)
         test_random_policy_only_legal(ctx)
+        test_random_baseline_matches_exact_odds(ctx)
+        test_baseline_is_reproducible(ctx)
