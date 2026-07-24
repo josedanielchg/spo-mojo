@@ -23,7 +23,7 @@ adelante) el contrato SearchModel. El E-step no sabe que hay TTT detras.
 from std.gpu import block_dim, block_idx, thread_idx
 from std.gpu.host import DeviceContext, DeviceBuffer
 
-from ops.common import dtype, GlobalF32, GlobalI32, NEG_INF
+from ops.common import dtype, idx_dtype, GlobalF32, GlobalI32, NEG_INF
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.search_model import SearchModel
 from systems.spo.spo_types import SPOConfig
@@ -237,57 +237,125 @@ def ttt_random_legal_cell(state: GlobalF32, p: Int, u: Scalar[dtype]) -> Int:
     return -1             # inalcanzable con m > 0
 
 
+@fieldwise_init
+struct TTTOutcome(Copyable, Movable):
+    """Lo que sale de avanzar un tablero un turno completo. Struct de escalares,
+    que una funcion de device si puede devolver (ver docs/api_notes.md)."""
+    var reward: Scalar[dtype]
+    """Vista del AGENTE: 1 gana, 0.5 empate, 0 pierde o sigue."""
+    var terminal: Scalar[dtype]
+    """1.0 si la partida acabo, 0.0 si sigue."""
+
+
+def ttt_advance(state: GlobalF32, p: Int, action: Int,
+                u: Scalar[dtype]) -> TTTOutcome:
+    """Un turno completo: juega el agente (X) y responde el rival al azar.
+
+    Modifica el tablero de p in-place y devuelve recompensa y terminal:
+      1. El agente juega `action`.
+      2. Si X gana o el tablero se llena -> terminal (el rival no llega a jugar).
+      3. Si no, el rival (O) juega una casilla legal al azar, elegida con `u`.
+      4. Si O gana o se llena -> terminal.
+    Cada has_won/is_full se calcula UNA vez, en el orden del juego.
+
+    Es la dinamica compartida entre la busqueda (ttt_dynamics_kernel) y el entorno
+    real (ttt_env_step_kernel), igual que cartpole_advance compartia la fisica: asi
+    las reglas viven en un solo sitio y no pueden desincronizarse.
+
+    Memory-safe por construccion: `action` viene acotada a [0,9) y el rival solo
+    juega cuando el tablero NO esta lleno, asi que random_legal_cell siempre
+    encuentra hueco y nunca devuelve -1.
+    """
+    ttt_apply(state, p, action, CELL_AGENT)
+    if ttt_has_won(state, p, CELL_AGENT):
+        return TTTOutcome(Scalar[dtype](1), Scalar[dtype](1))     # gana el agente
+    if ttt_is_full(state, p):
+        return TTTOutcome(Scalar[dtype](0.5), Scalar[dtype](1))   # empate
+
+    cell = ttt_random_legal_cell(state, p, u)
+    ttt_apply(state, p, cell, CELL_RIVAL)
+    if ttt_has_won(state, p, CELL_RIVAL):
+        return TTTOutcome(Scalar[dtype](0), Scalar[dtype](1))     # derrota
+    if ttt_is_full(state, p):
+        return TTTOutcome(Scalar[dtype](0.5), Scalar[dtype](1))   # empate
+    return TTTOutcome(Scalar[dtype](0), Scalar[dtype](0))         # sigue
+
+
 def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
                         step_uniforms: GlobalF32, reward_out: GlobalF32,
                         discount_out: GlobalF32, next_value_out: GlobalF32,
                         n_particles: Int):
-    """El step estocastico de TTT: jugada del agente + jugada del rival al azar.
+    """El step estocastico de TTT para la BUSQUEDA: un turno + gamma plegada.
 
-    Por particula:
-      1. El agente (X) juega su accion.
-      2. Si X gana o el tablero se llena -> terminal (el rival no juega).
-      3. Si no, el rival (O) juega una casilla legal al azar (con step_uniforms).
-      4. Si O gana o se llena -> terminal.
-    Salidas: reward (vista del agente), discount (0 si terminal, 1 si sigue) y
-    next_value (0: no hay critico todavia, V=0). Calcula cada has_won/is_full una
-    sola vez, en el orden del juego.
+    Avanza con `ttt_advance` y traduce el resultado al contrato del nucleo SMC:
+    discount (0 si terminal, 1 si sigue) y next_value (0: sin critico todavia).
 
     Como el juguete, NO comprueba si la particula ya estaba muerta: una particula
     terminal se vuelve a pisar y da igual, porque su peso ya lo congelo el nucleo
-    SMC. Es memory-safe porque la accion viene acotada a [0,9) y el rival solo
-    juega cuando el tablero NO esta lleno, asi que random_legal_cell siempre
-    encuentra hueco y nunca devuelve -1. Un hilo por particula.
+    SMC. Un hilo por particula.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n_particles:
         return
 
-    # 1. El agente (X) juega su accion.
-    ttt_apply(state, p, Int(action[p]), CELL_AGENT)
-
-    reward = Scalar[dtype](0)
-    terminal = False
-    if ttt_has_won(state, p, CELL_AGENT):
-        reward = Scalar[dtype](1)          # gana el agente
-        terminal = True
-    elif ttt_is_full(state, p):
-        reward = Scalar[dtype](0.5)        # empate en la jugada del agente
-        terminal = True
-    else:
-        # 3. El rival (O) juega una casilla legal al azar.
-        cell = ttt_random_legal_cell(state, p, step_uniforms[p])
-        ttt_apply(state, p, cell, CELL_RIVAL)
-        if ttt_has_won(state, p, CELL_RIVAL):
-            reward = Scalar[dtype](0)      # gana el rival (derrota)
-            terminal = True
-        elif ttt_is_full(state, p):
-            reward = Scalar[dtype](0.5)    # empate en la jugada del rival
-            terminal = True
-        # si no, sigue viva: reward 0, terminal False (los valores por defecto)
-
-    reward_out[p] = reward
-    discount_out[p] = Scalar[dtype](0) if terminal else Scalar[dtype](1)
+    out = ttt_advance(state, p, Int(action[p]), step_uniforms[p])
+    reward_out[p] = out.reward
+    discount_out[p] = Scalar[dtype](1) - out.terminal
     next_value_out[p] = Scalar[dtype](0)
+
+
+def ttt_reset_kernel(state: GlobalF32, n_envs: Int):
+    """Empieza partida nueva: tablero vacio. El agente (X) siempre mueve primero,
+    asi que no hay nada mas que inicializar. Un hilo por env."""
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e < n_envs:
+        for c in range(NUM_CELLS):
+            state[e * STATE_DIM + c] = CELL_EMPTY
+
+
+def ttt_env_step_kernel(state: GlobalF32, action: GlobalI32,
+                        u_rival: GlobalF32, reward_out: GlobalF32,
+                        done_out: GlobalI32, n_envs: Int):
+    """Un turno en el entorno REAL: como el de la busqueda pero sin gamma.
+
+    Comparte `ttt_advance` con el kernel de la busqueda, asi que las reglas son
+    literalmente las mismas; lo unico que cambia es la salida: aqui interesa
+    `done` (para reiniciar la partida y contar el resultado) en vez del discount
+    y el bootstrap. Un hilo por env.
+    """
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e < n_envs:
+        out = ttt_advance(state, e, Int(action[e]), u_rival[e])
+        reward_out[e] = out.reward
+        done_out[e] = Scalar[idx_dtype](1) if out.terminal != Scalar[dtype](0) \
+                      else Scalar[idx_dtype](0)
+
+
+def ttt_auto_reset_kernel(state: GlobalF32, done: GlobalI32, n_envs: Int):
+    """Los envs que acaban de terminar empiezan partida nueva; los demas siguen.
+
+    Va DESPUES de que el host haya leido reward y done: el tablero se limpia, pero
+    el resultado de la partida ya esta anotado en sus buffers. Es el auto-reset del
+    entorno REAL; dentro de la busqueda no existe (una particula terminal se queda
+    quieta y su peso lo congela la mascara terminal). Un hilo por env.
+    """
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e < n_envs and Int(done[e]) != 0:
+        for c in range(NUM_CELLS):
+            state[e * STATE_DIM + c] = CELL_EMPTY
+
+
+def ttt_random_policy_kernel(action_out: GlobalI32, state: GlobalF32,
+                             uniforms: GlobalF32, n_envs: Int):
+    """La politica ALEATORIA del agente: una casilla legal al azar por env.
+
+    Es la linea base contra la que se compara la busqueda: si planificar no gana
+    mas partidas que esto, la busqueda no esta aportando nada. Un hilo por env.
+    """
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e < n_envs:
+        action_out[e] = Scalar[idx_dtype](
+            ttt_random_legal_cell(state, e, uniforms[e]))
 
 
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
