@@ -12,8 +12,9 @@ from ops.common import dtype, idx_dtype, NEG_INF
 from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
                             ttt_legal_mask_kernel, ttt_apply_kernel,
                             ttt_outcome_kernel, ttt_prior_logits_kernel,
-                            ttt_dynamics_kernel, TicTacToe, default_tictactoe,
-                            NUM_CELLS, NUM_ACTIONS, STATE_DIM,
+                            ttt_dynamics_kernel, ttt_encode_obs_kernel,
+                            TicTacToe, default_tictactoe,
+                            NUM_CELLS, NUM_ACTIONS, STATE_DIM, OBS_DIM,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.spo_types import SPOConfig
@@ -574,6 +575,114 @@ def test_model_step(ctx: DeviceContext) raises:
     print("PASS step del modelo: avanza el estado y da el prior del estado nuevo")
 
 
+def run_encode(ctx: DeviceContext, boards: List[Scalar[dtype]],
+               n: Int) raises -> List[Scalar[dtype]]:
+    """Corre ttt_encode_obs_kernel y baja la observacion [n, OBS_DIM]."""
+    state = upload[dtype](ctx, boards)
+    obs = filled[dtype](ctx, n * OBS_DIM, Scalar[dtype](-1))   # -1 = sin escribir
+    ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
+        obs.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    return download[dtype](obs, n * OBS_DIM)
+
+
+def test_encode_obs_two_planes(ctx: DeviceContext) raises:
+    """El tablero se traduce a dos planos binarios, calculados a mano.
+
+    Es lo que comeran el critico y el actor, asi que un error aqui envenenaria
+    todo el M-step sin que nada falle: la red simplemente aprenderia mal.
+    """
+    # X . O / . X . / . . .
+    b = board9(1,0,-1, 0,1,0, 0,0,0)
+    got = run_encode(ctx, b, 1)
+
+    # plano 0 = mis fichas (casillas 0 y 4), plano 1 = las suyas (casilla 2).
+    want_mine = board9(1,0,0, 0,1,0, 0,0,0)
+    want_theirs = board9(0,0,1, 0,0,0, 0,0,0)
+    for c in range(NUM_CELLS):
+        assert_close(got[c], want_mine[c], TOL,
+                     String("plano propio, casilla ", c))
+        assert_close(got[NUM_CELLS + c], want_theirs[c], TOL,
+                     String("plano del rival, casilla ", c))
+    print("PASS la observacion son dos planos binarios (mias / suyas)")
+
+
+def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
+    """Vacio, lleno, y la invariante que los relaciona.
+
+    La invariante importa: una casilla no puede estar en los dos planos a la vez,
+    y una ocupada tiene que estar exactamente en uno. Eso caza un intercambio de
+    planos o una comparacion mal escrita.
+    """
+    boards = List[Scalar[dtype]]()
+    empty = board9(0,0,0, 0,0,0, 0,0,0)
+    full = board9(1,-1,1, -1,1,-1, 1,-1,1)
+    for c in range(NUM_CELLS): boards.append(empty[c])
+    for c in range(NUM_CELLS): boards.append(full[c])
+
+    got = run_encode(ctx, boards, 2)
+
+    # El vacio: los 18 valores a cero (nada en ningun plano).
+    for i in range(OBS_DIM):
+        assert_close(got[i], Scalar[dtype](0), TOL,
+                     String("tablero vacio, valor ", i))
+
+    # El lleno y la invariante, sobre los dos tableros.
+    for t in range(2):
+        base = t * OBS_DIM
+        for c in range(NUM_CELLS):
+            mine = got[base + c]
+            theirs = got[base + NUM_CELLS + c]
+            if mine + theirs > Scalar[dtype](1.5):
+                raise Error("la casilla ", c, " del tablero ", t,
+                            " esta en LOS DOS planos")
+            # El tablero de origen sale del array plano, sin copiar listas.
+            cell = boards[t * NUM_CELLS + c]
+            occupied = Scalar[dtype](0) if cell == CELL_EMPTY else Scalar[dtype](1)
+            assert_close(mine + theirs, occupied, TOL,
+                         String("ocupada = en exactamente un plano, tablero ", t,
+                                " casilla ", c))
+    print("PASS bordes: vacio a cero, y cada casilla ocupada en un solo plano")
+
+
+def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
+    """Varios tableros seguidos: ninguno pisa la observacion del vecino.
+
+    Mismo tipo de comprobacion que el layout de A1a, pero sobre el paso OBS_DIM
+    en vez de STATE_DIM.
+    """
+    b0 = board9(1,1,1, 0,0,0, 0,0,0)      # solo mias, la fila de arriba
+    b1 = board9(-1,-1,-1, 0,0,0, 0,0,0)   # solo suyas, la misma fila
+    b2 = board9(0,0,0, 0,0,0, 0,0,1)      # una mia, la esquina
+
+    boards = List[Scalar[dtype]]()
+    for c in range(NUM_CELLS): boards.append(b0[c])
+    for c in range(NUM_CELLS): boards.append(b1[c])
+    for c in range(NUM_CELLS): boards.append(b2[c])
+    got = run_encode(ctx, boards, 3)
+
+    # Tablero 0: tres unos en el plano propio, nada en el del rival.
+    for c in range(3):
+        assert_close(got[c], Scalar[dtype](1), TOL, String("t0 mia ", c))
+    for c in range(NUM_CELLS):
+        assert_close(got[NUM_CELLS + c], Scalar[dtype](0), TOL,
+                     String("t0 no deberia tener fichas del rival, ", c))
+    # Tablero 1: al reves, y en su propio hueco.
+    for c in range(3):
+        assert_close(got[OBS_DIM + NUM_CELLS + c], Scalar[dtype](1), TOL,
+                     String("t1 suya ", c))
+        assert_close(got[OBS_DIM + c], Scalar[dtype](0), TOL,
+                     String("t1 no deberia tener fichas mias, ", c))
+    # Tablero 2: solo la casilla 8 en el plano propio.
+    assert_close(got[2 * OBS_DIM + 8], Scalar[dtype](1), TOL, "t2 esquina mia")
+    total = Scalar[dtype](0)
+    for i in range(OBS_DIM):
+        total += got[2 * OBS_DIM + i]
+    assert_close(total, Scalar[dtype](1), TOL, "t2 deberia tener una sola ficha")
+    print("PASS tres tableros seguidos, cada observacion en su hueco")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -587,5 +696,8 @@ def main() raises:
         test_prior_masks_illegal(ctx)
         test_step_all_paths(ctx)
         test_step_discounts_reward_by_depth(ctx)
+        test_encode_obs_two_planes(ctx)
+        test_encode_obs_edge_cases(ctx)
+        test_encode_obs_no_overlap(ctx)
         test_model_eval_root(ctx)
         test_model_step(ctx)

@@ -42,6 +42,13 @@ comptime CELL_RIVAL = Scalar[dtype](-1)
 
 comptime TPB_TTT = 32
 
+# Lo que ve la RED (no la busqueda): dos planos de 9, primero las fichas propias y
+# despues las del rival. Es la codificacion que usa pgx para tres en raya
+# (`observation.shape == (3, 3, 2)`), y la usamos igual aqui para que la red de
+# Mojo y la de Stoix reciban exactamente lo mismo y la comparacion sea limpia.
+comptime NUM_PLANES = 2
+comptime OBS_DIM = NUM_PLANES * NUM_CELLS   # 18
+
 
 def ttt_cell(state: GlobalF32, p: Int, c: Int) -> Scalar[dtype]:
     """La casilla c (0..8) de la particula p.
@@ -364,6 +371,39 @@ def ttt_random_policy_kernel(action_out: GlobalI32, state: GlobalF32,
     if e < n_envs:
         action_out[e] = Scalar[idx_dtype](
             ttt_random_legal_cell(state, e, uniforms[e]))
+
+
+def ttt_encode_obs_kernel(obs_out: GlobalF32, state: GlobalF32, n: Int):
+    """Traduce el tablero al formato que come la red: [n, 9] -> [n, OBS_DIM].
+
+    De 9 casillas con codigo (+1 mia / -1 suya / 0 vacia) a dos planos binarios
+    puestos uno detras del otro:
+
+        obs[0 .. 8]   1 si la casilla es MIA,    0 si no
+        obs[9 .. 17]  1 si la casilla es SUYA,   0 si no
+
+    Una casilla vacia queda a 0 en LOS DOS planos, asi que "vacia" se codifica por
+    ausencia y no hace falta un tercer plano.
+
+    Por que dos planos y no los 9 floats tal cual: con un solo numero la red
+    tendria que deducir sola que -1, 0 y +1 son tres CATEGORIAS y no una escala
+    donde el 0 esta en medio. Y sobre todo, es la codificacion que usa pgx, que es
+    lo que vera la implementacion de Stoix: las dos redes reciben lo mismo.
+
+    Sirve igual para particulas (durante la busqueda) que para envs (en el bucle
+    real): solo cambia `n`. Un hilo por tablero.
+    """
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p >= n:
+        return
+
+    base = p * OBS_DIM
+    for c in range(NUM_CELLS):
+        v = ttt_cell(state, p, c)
+        obs_out[base + c] = Scalar[dtype](1) if v == CELL_AGENT \
+                            else Scalar[dtype](0)
+        obs_out[base + NUM_CELLS + c] = Scalar[dtype](1) if v == CELL_RIVAL \
+                                        else Scalar[dtype](0)
 
 
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
