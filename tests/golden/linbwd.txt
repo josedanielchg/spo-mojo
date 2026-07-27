@@ -1,0 +1,15 @@
+cases 4
+case0 M 3 K 4 N 8
+case1 M 20 K 18 N 64
+case2 M 64 K 64 N 64
+case3 M 1 K 1 N 1
+gradientes calculados con jax.grad (autodiff exacto)
+perdida L = sum(g * (x @ w + b)), asi que dL/dy = g
+linbwd<i>_x.bin  float32 M x K
+linbwd<i>_w.bin  float32 K x N
+linbwd<i>_b.bin  float32 N
+linbwd<i>_dy.bin float32 M x N   (el g de la perdida)
+linbwd<i>_y.bin  float32 M x N   (el forward, de paso)
+linbwd<i>_dw.bin float32 K x N
+linbwd<i>_db.bin float32 N
+linbwd<i>_dx.bin float32 M x K

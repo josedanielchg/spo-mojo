@@ -92,3 +92,98 @@ def linear_forward(ctx: DeviceContext, y: DeviceBuffer[dtype],
                          linear_forward_kernel[TILE]](
         y.unsafe_ptr(), x.unsafe_ptr(), w.unsafe_ptr(), bias.unsafe_ptr(),
         m, k, n, grid_dim=(grid_x, grid_y), block_dim=(TILE, TILE))
+
+
+# ---------------------------------------------------------------------------
+# El backward. Sin autodiff en Mojo, las tres derivadas se escriben a mano.
+#
+# Partiendo de  y = x @ W + b  y de dy = dL/dy (lo que llega de la capa de
+# arriba), la regla de la cadena da exactamente tres cosas:
+#
+#     dL/dW[k,n] = suma_m  x[m,k] * dy[m,n]        o sea  dW = x^T @ dy   [K,N]
+#     dL/db[n]   = suma_m  dy[m,n]                 la suma por columnas   [N]
+#     dL/dx[m,k] = suma_n  dy[m,n] * W[k,n]        o sea  dx = dy @ W^T   [M,K]
+#
+# Las dos traspuestas NO se materializan: se aplican en el indexado (leer
+# `x[m*k + kk]` recorriendo m es leer una columna de x, que es una fila de x^T).
+# Transponer de verdad costaria dos buffers y dos kernels mas, para nada.
+#
+# Van sin tiling a proposito: correctitud primero. Cada hilo hace un bucle sobre
+# la dimension que se reduce, que aqui es pequena (batch o num neuronas). Si algun
+# dia el perfilado dice que duele, se tilean igual que el forward.
+# ---------------------------------------------------------------------------
+
+
+def linear_grad_w_kernel(dw: GlobalF32, x: GlobalF32, dy: GlobalF32,
+                         m: Int, k: Int, n: Int):
+    """dW = x^T @ dy. Un hilo por peso (k, n); el bucle recorre el batch."""
+    kk = Int(block_dim.y * block_idx.y + thread_idx.y)
+    nn = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if kk >= k or nn >= n:
+        return
+
+    acc = Scalar[dtype](0)
+    for mm in range(m):
+        acc += x[mm * k + kk] * dy[mm * n + nn]
+    dw[kk * n + nn] = acc
+
+
+def linear_grad_b_kernel(db: GlobalF32, dy: GlobalF32, m: Int, n: Int):
+    """db = suma de dy por columnas. Un hilo por salida.
+
+    El bias entra sumado a TODAS las filas del batch, asi que su gradiente es la
+    suma de lo que llega por cada fila. Es tambien la comprobacion de que el bias
+    se sumo una sola vez en el forward: si se hubiera sumado dos veces, aqui
+    faltaria un factor 2 y las diferencias finitas lo cazarian.
+    """
+    nn = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if nn >= n:
+        return
+
+    acc = Scalar[dtype](0)
+    for mm in range(m):
+        acc += dy[mm * n + nn]
+    db[nn] = acc
+
+
+def linear_grad_x_kernel(dx: GlobalF32, dy: GlobalF32, w: GlobalF32,
+                         m: Int, k: Int, n: Int):
+    """dx = dy @ W^T. Un hilo por entrada (m, k); el bucle recorre las salidas.
+
+    Es el gradiente que se le pasa hacia atras a la capa anterior, asi que un
+    error aqui no rompe esta capa sino todas las de abajo.
+    """
+    mm = Int(block_dim.y * block_idx.y + thread_idx.y)
+    kk = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if mm >= m or kk >= k:
+        return
+
+    acc = Scalar[dtype](0)
+    for nn in range(n):
+        acc += dy[mm * n + nn] * w[kk * n + nn]
+    dx[mm * k + kk] = acc
+
+
+def linear_backward(ctx: DeviceContext, dw: DeviceBuffer[dtype],
+                    db: DeviceBuffer[dtype], dx: DeviceBuffer[dtype],
+                    x: DeviceBuffer[dtype], w: DeviceBuffer[dtype],
+                    dy: DeviceBuffer[dtype], m: Int, k: Int, n: Int) raises:
+    """Los tres gradientes de la capa a partir de dy.
+
+    `dx` puede omitirse conceptualmente en la primera capa (nadie lo usa), pero se
+    calcula igual: cuesta poco y evita tener dos caminos distintos.
+    """
+    ctx.enqueue_function[linear_grad_w_kernel, linear_grad_w_kernel](
+        dw.unsafe_ptr(), x.unsafe_ptr(), dy.unsafe_ptr(), m, k, n,
+        grid_dim=((n + TILE - 1) // TILE, (k + TILE - 1) // TILE),
+        block_dim=(TILE, TILE))
+
+    ctx.enqueue_function[linear_grad_b_kernel, linear_grad_b_kernel](
+        db.unsafe_ptr(), dy.unsafe_ptr(), m, n,
+        grid_dim=(n + TILE * TILE - 1) // (TILE * TILE),
+        block_dim=TILE * TILE)
+
+    ctx.enqueue_function[linear_grad_x_kernel, linear_grad_x_kernel](
+        dx.unsafe_ptr(), dy.unsafe_ptr(), w.unsafe_ptr(), m, k, n,
+        grid_dim=((k + TILE - 1) // TILE, (m + TILE - 1) // TILE),
+        block_dim=(TILE, TILE))
