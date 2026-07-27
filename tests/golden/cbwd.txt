@@ -1,0 +1,8 @@
+in_dim 18
+out_dim 1
+casos (hidden, batch): (32,20) (64,64)
+perdida: mean(0.5*(V-target)^2), la misma que rlax.l2_loss().mean()
+gradientes por jax.grad con precision HIGHEST
+ficheros: cbwd_h<H>_m<M>_{w1,b1,w2,b2,w3,b3,x,target,a1,a2,v,dw1,db1,dw2,db2,dw3,db3}.bin
+hidden 32 batch 20 relu_apagadas 0.419/0.537
+hidden 64 batch 64 relu_apagadas 0.509/0.523
