@@ -1,0 +1,7 @@
+n 1000
+tau 0.005
+steps 10
+generado con optax.incremental_update(online, target, tau)
+ema_target0.bin  target inicial
+ema_online.bin   online (fijo)
+ema_target<k>.bin target tras k pasos

@@ -142,6 +142,32 @@ def global_clip_scale(total_sq: Scalar[dtype],
     return max_norm / norm
 
 
+def ema_kernel(target: GlobalF32, online: GlobalF32, n: Int,
+               tau: Scalar[dtype]):
+    """target <- tau*online + (1-tau)*target, elementwise.
+
+    Es el `optax.incremental_update(online, target, tau)` de Stoix, verificado en
+    su codigo. Con tau = 0.005 el target se mueve un 0.5% por paso: casi nada.
+
+    Para que sirve: el critico aprende a predecir un objetivo que se calcula...
+    con el propio critico. Si se usara la red online para las dos cosas, el
+    objetivo se movería a la vez que la prediccion y el entrenamiento se
+    perseguiria la cola. La copia lenta da un blanco casi quieto.
+    """
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i < n:
+        target[i] = tau * online[i] + (Scalar[dtype](1) - tau) * target[i]
+
+
+def ema_update(ctx: DeviceContext, target: DeviceBuffer[dtype],
+               online: DeviceBuffer[dtype], n: Int,
+               tau: Scalar[dtype]) raises:
+    """Acerca un tensor target a su online."""
+    ctx.enqueue_function[ema_kernel, ema_kernel](
+        target.unsafe_ptr(), online.unsafe_ptr(), n, tau,
+        grid_dim=(n + TPB_OPT - 1) // TPB_OPT, block_dim=TPB_OPT)
+
+
 def adam_step(ctx: DeviceContext, param: DeviceBuffer[dtype],
               grad: DeviceBuffer[dtype], state: AdamState, n: Int,
               lr: Scalar[dtype], grad_scale: Scalar[dtype], step: Int) raises:
