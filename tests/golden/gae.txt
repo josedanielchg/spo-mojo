@@ -1,0 +1,11 @@
+gamma 0.99
+lambda 0.95
+generado con stoix.utils.multistep.batch_truncated_generalized_advantage_estimation
+discount = (1 - done) * gamma, como en ff_spo._critic_loss_fn
+gae<case>_{r,discount,v_tm1,v_t,trunc,adv,targets}.bin float32 B x T
+case0 = sin truncacion
+case1 = con truncacion
+case2 = como tres en raya (partidas de 3-5 pasos, recompensa al final)
+case0 B 4 T 16 dones 9 truncs 0
+case1 B 4 T 16 dones 5 truncs 10
+case2 B 8 T 32 dones 59 truncs 0
