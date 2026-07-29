@@ -1,0 +1,11 @@
+cases 3
+case0 M 4 K 18 N 64
+case1 M 64 K 64 N 64
+case2 M 7 K 5 N 3
+linear<i>_x.bin float32 M x K
+linear<i>_w.bin float32 K x N
+linear<i>_b.bin float32 N
+linear<i>_y.bin float32 M x N   (= x @ w + b)
+case0 = primera capa del critico (18 entradas -> 64 ocultas)
+case1 = capa oculta 64x64 con batch 64 (varios tiles)
+case2 = ragged 7x5x3 (ninguna dimension multiplo del tile)

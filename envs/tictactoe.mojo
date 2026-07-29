@@ -42,6 +42,13 @@ comptime CELL_RIVAL = Scalar[dtype](-1)
 
 comptime TPB_TTT = 32
 
+# Lo que ve la RED (no la busqueda): dos planos de 9, primero las fichas propias y
+# despues las del rival. Es la codificacion que usa pgx para tres en raya
+# (`observation.shape == (3, 3, 2)`), y la usamos igual aqui para que la red de
+# Mojo y la de Stoix reciban exactamente lo mismo y la comparacion sea limpia.
+comptime NUM_PLANES = 2
+comptime OBS_DIM = NUM_PLANES * NUM_CELLS   # 18
+
 
 def ttt_cell(state: GlobalF32, p: Int, c: Int) -> Scalar[dtype]:
     """La casilla c (0..8) de la particula p.
@@ -285,7 +292,8 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
                         step_uniforms: GlobalF32, depth: GlobalI32,
                         reward_out: GlobalF32, discount_out: GlobalF32,
                         next_value_out: GlobalF32, n_particles: Int,
-                        reward_gamma: Scalar[dtype]):
+                        reward_gamma: Scalar[dtype],
+                        loss_penalty: Scalar[dtype]):
     """El step estocastico de TTT para la BUSQUEDA: un turno + gamma plegada.
 
     Avanza con `ttt_advance` y traduce el resultado al contrato del nucleo SMC:
@@ -307,7 +315,18 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
     g = Scalar[dtype](1)
     for _ in range(Int(depth[p])):
         g *= reward_gamma
-    reward_out[p] = out.reward * g
+
+    # Castigo por derrota. Sin el, `ttt_advance` devuelve 0 tanto si la partida se
+    # PIERDE como si simplemente SIGUE, asi que el peso SMC no puede distinguir
+    # las dos cosas y la busqueda no tiene ningun motivo para bloquear una
+    # amenaza. Con loss_penalty > 0 una derrota pasa a valer -loss_penalty, que es
+    # el convenio habitual de los juegos (+1 / 0 / -1). Con 0 se recupera el
+    # comportamiento original.
+    r = out.reward
+    if loss_penalty != 0 and out.terminal != 0 and out.reward == 0:
+        r = -loss_penalty
+
+    reward_out[p] = r * g
     discount_out[p] = Scalar[dtype](1) - out.terminal
     next_value_out[p] = Scalar[dtype](0)
 
@@ -366,6 +385,39 @@ def ttt_random_policy_kernel(action_out: GlobalI32, state: GlobalF32,
             ttt_random_legal_cell(state, e, uniforms[e]))
 
 
+def ttt_encode_obs_kernel(obs_out: GlobalF32, state: GlobalF32, n: Int):
+    """Traduce el tablero al formato que come la red: [n, 9] -> [n, OBS_DIM].
+
+    De 9 casillas con codigo (+1 mia / -1 suya / 0 vacia) a dos planos binarios
+    puestos uno detras del otro:
+
+        obs[0 .. 8]   1 si la casilla es MIA,    0 si no
+        obs[9 .. 17]  1 si la casilla es SUYA,   0 si no
+
+    Una casilla vacia queda a 0 en LOS DOS planos, asi que "vacia" se codifica por
+    ausencia y no hace falta un tercer plano.
+
+    Por que dos planos y no los 9 floats tal cual: con un solo numero la red
+    tendria que deducir sola que -1, 0 y +1 son tres CATEGORIAS y no una escala
+    donde el 0 esta en medio. Y sobre todo, es la codificacion que usa pgx, que es
+    lo que vera la implementacion de Stoix: las dos redes reciben lo mismo.
+
+    Sirve igual para particulas (durante la busqueda) que para envs (en el bucle
+    real): solo cambia `n`. Un hilo por tablero.
+    """
+    p = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if p >= n:
+        return
+
+    base = p * OBS_DIM
+    for c in range(NUM_CELLS):
+        v = ttt_cell(state, p, c)
+        obs_out[base + c] = Scalar[dtype](1) if v == CELL_AGENT \
+                            else Scalar[dtype](0)
+        obs_out[base + NUM_CELLS + c] = Scalar[dtype](1) if v == CELL_RIVAL \
+                                        else Scalar[dtype](0)
+
+
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
                           n_particles: Int):
     """Copia las 9 casillas de cada particula a la salida usando ttt_cell.
@@ -380,7 +432,6 @@ def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
             cells_out[p * NUM_CELLS + c] = ttt_cell(state, p, c)
 
 
-@fieldwise_init
 struct TicTacToe(SearchModel, Copyable, Movable):
     """Tic-Tac-Toe como modelo de busqueda: el agente (X) contra un rival aleatorio.
 
@@ -397,6 +448,17 @@ struct TicTacToe(SearchModel, Copyable, Movable):
     """Descuento de la recompensa por profundidad. 1.0 = sin descuento (ganar ya
     vale igual que ganar despues, que en un juego con premio terminal deja el peso
     SMC casi ciego); <1 premia ganar rapido."""
+
+    var loss_penalty: Scalar[dtype]
+    """Lo que vale perder, en negativo. 0 = el convenio original (perder vale 0,
+    lo mismo que no haber resuelto la partida); 1 = el convenio de juegos
+    +1/0/-1. Es MODELADO de recompensa dentro de la busqueda: la recompensa del
+    entorno real, la que cuenta el marcador, no se toca."""
+
+    def __init__(out self, reward_gamma: Scalar[dtype],
+                 loss_penalty: Scalar[dtype] = 0):
+        self.reward_gamma = reward_gamma
+        self.loss_penalty = loss_penalty
 
     def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
                   root_state: DeviceBuffer[dtype],
@@ -423,7 +485,7 @@ struct TicTacToe(SearchModel, Copyable, Movable):
             step_uniforms.unsafe_ptr(), particles.depth.unsafe_ptr(),
             outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
             outputs.next_value.unsafe_ptr(), p_total, self.reward_gamma,
-            grid_dim=blocks, block_dim=TPB_TTT)
+            self.loss_penalty, grid_dim=blocks, block_dim=TPB_TTT)
 
         ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
             outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),

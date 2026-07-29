@@ -13,7 +13,7 @@ comptime TPB = 32
 Aqui la fila no significa nada; solo importa cubrir P elementos, asi que el
 tamano del bloque es libre y 32 (un warp) va bien."""
 
-comptime TPB_PARTICLES = 128
+comptime TPB_PARTICLES = 512
 """Bloque de los kernels cuya FILA es la dimension de particulas (resampling,
 ESS, softmax del readout). Ahi el bloque entero trabaja sobre las N particulas de
 un env, asi que N tiene que caber dentro.

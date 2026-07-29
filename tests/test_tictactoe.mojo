@@ -12,8 +12,9 @@ from ops.common import dtype, idx_dtype, NEG_INF
 from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
                             ttt_legal_mask_kernel, ttt_apply_kernel,
                             ttt_outcome_kernel, ttt_prior_logits_kernel,
-                            ttt_dynamics_kernel, TicTacToe, default_tictactoe,
-                            NUM_CELLS, NUM_ACTIONS, STATE_DIM,
+                            ttt_dynamics_kernel, ttt_encode_obs_kernel,
+                            TicTacToe, default_tictactoe,
+                            NUM_CELLS, NUM_ACTIONS, STATE_DIM, OBS_DIM,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.spo_types import SPOConfig
@@ -368,7 +369,8 @@ def run_dynamics_at(ctx: DeviceContext, boards: List[Scalar[dtype]],
                     actions: List[Scalar[idx_dtype]],
                     uniforms: List[Scalar[dtype]],
                     depths: List[Scalar[idx_dtype]], n: Int,
-                    reward_gamma: Scalar[dtype]) raises -> DynResult:
+                    reward_gamma: Scalar[dtype],
+                    loss_penalty: Scalar[dtype] = 0) raises -> DynResult:
     """Corre ttt_dynamics_kernel con la profundidad y el descuento dados."""
     state = upload[dtype](ctx, boards)
     action = upload[idx_dtype](ctx, actions)
@@ -380,7 +382,7 @@ def run_dynamics_at(ctx: DeviceContext, boards: List[Scalar[dtype]],
     ctx.enqueue_function[ttt_dynamics_kernel, ttt_dynamics_kernel](
         state.unsafe_ptr(), action.unsafe_ptr(), us.unsafe_ptr(),
         depth.unsafe_ptr(), reward.unsafe_ptr(), discount.unsafe_ptr(),
-        next_value.unsafe_ptr(), n, reward_gamma,
+        next_value.unsafe_ptr(), n, reward_gamma, loss_penalty,
         grid_dim=1, block_dim=TPB_TTT)
     ctx.synchronize()
     return DynResult(download[dtype](state, n * NUM_CELLS),
@@ -574,6 +576,175 @@ def test_model_step(ctx: DeviceContext) raises:
     print("PASS step del modelo: avanza el estado y da el prior del estado nuevo")
 
 
+def run_encode(ctx: DeviceContext, boards: List[Scalar[dtype]],
+               n: Int) raises -> List[Scalar[dtype]]:
+    """Corre ttt_encode_obs_kernel y baja la observacion [n, OBS_DIM]."""
+    state = upload[dtype](ctx, boards)
+    obs = filled[dtype](ctx, n * OBS_DIM, Scalar[dtype](-1))   # -1 = sin escribir
+    ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
+        obs.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+    return download[dtype](obs, n * OBS_DIM)
+
+
+def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raises:
+    """Con `loss_penalty`, perder deja de valer lo mismo que seguir jugando.
+
+    Es el problema que destapo la auditoria de las derrotas: `ttt_advance`
+    devuelve recompensa 0 tanto si la partida se PIERDE como si simplemente
+    SIGUE, asi que el peso SMC no puede distinguirlas y la busqueda no tiene
+    ningun motivo para bloquear una amenaza.
+
+    Cuatro particulas, una por desenlace, todas a profundidad 0 para que el
+    descuento no enturbie la lectura.
+    """
+    boards = List[Scalar[dtype]]()
+    # p0 gana: X en 0 y 1, juega la 2.
+    for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
+    # p1 pierde: O en 3 y 4, X juega la 8 (no bloquea) y el rival remata la 5.
+    for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
+    # p2 empata: tablero casi lleno sin lineas, X cierra la ultima casilla.
+    for b in board9(1,-1,1, 1,-1,-1, -1,1,0): boards.append(b)
+    # p3 sigue: tablero vacio.
+    for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
+
+    acts = List[Scalar[idx_dtype]]()
+    acts.append(Scalar[idx_dtype](2))    # gana
+    acts.append(Scalar[idx_dtype](8))    # no bloquea
+    acts.append(Scalar[idx_dtype](8))    # empata
+    acts.append(Scalar[idx_dtype](4))    # sigue
+    us = List[Scalar[dtype]]()
+    us.append(Scalar[dtype](0.1))
+    # Tras la jugada 8 de X quedan libres 2,5,6,7; u=0.3 elige la segunda, o sea
+    # la casilla 5, que le completa al rival la linea 3-4-5.
+    us.append(Scalar[dtype](0.3))
+    us.append(Scalar[dtype](0.1))
+    us.append(Scalar[dtype](0.1))
+    depths = List[Scalar[idx_dtype]]()
+    for _ in range(4): depths.append(Scalar[idx_dtype](0))
+
+    # Sin castigo: perder y seguir dan lo mismo, que es justo el problema.
+    plain = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 0)
+    assert_close(plain.reward[0], Scalar[dtype](1), TOL, "sin castigo, ganar")
+    assert_close(plain.reward[1], Scalar[dtype](0), TOL, "sin castigo, perder")
+    assert_close(plain.reward[3], Scalar[dtype](0), TOL, "sin castigo, seguir")
+    if plain.discount[1] != Scalar[dtype](0):
+        raise Error("la particula 1 deberia haber perdido (discount 0)")
+
+    # Con castigo 1: el convenio +1 / 0 / -1 de los juegos.
+    pen = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 1)
+    assert_close(pen.reward[0], Scalar[dtype](1), TOL, "con castigo, ganar")
+    assert_close(pen.reward[1], Scalar[dtype](-1), TOL, "con castigo, perder")
+    assert_close(pen.reward[2], Scalar[dtype](0.5), TOL, "con castigo, empatar")
+    assert_close(pen.reward[3], Scalar[dtype](0), TOL, "con castigo, seguir")
+
+    # Y el castigo se descuenta por profundidad como cualquier recompensa:
+    # perder mas tarde duele menos, igual que ganar mas tarde premia menos.
+    deep = List[Scalar[idx_dtype]]()
+    for _ in range(4): deep.append(Scalar[idx_dtype](2))
+    d2 = run_dynamics_at(ctx, boards, acts, us, deep, 4, 0.5, 1)
+    assert_close(d2.reward[1], Scalar[dtype](-0.25), TOL,
+                 "perder en la profundidad 2 con gamma 0.5")
+    print("PASS loss_penalty separa perder de seguir, y se descuenta igual")
+
+
+def test_encode_obs_two_planes(ctx: DeviceContext) raises:
+    """El tablero se traduce a dos planos binarios, calculados a mano.
+
+    Es lo que comeran el critico y el actor, asi que un error aqui envenenaria
+    todo el M-step sin que nada falle: la red simplemente aprenderia mal.
+    """
+    # X . O / . X . / . . .
+    b = board9(1,0,-1, 0,1,0, 0,0,0)
+    got = run_encode(ctx, b, 1)
+
+    # plano 0 = mis fichas (casillas 0 y 4), plano 1 = las suyas (casilla 2).
+    want_mine = board9(1,0,0, 0,1,0, 0,0,0)
+    want_theirs = board9(0,0,1, 0,0,0, 0,0,0)
+    for c in range(NUM_CELLS):
+        assert_close(got[c], want_mine[c], TOL,
+                     String("plano propio, casilla ", c))
+        assert_close(got[NUM_CELLS + c], want_theirs[c], TOL,
+                     String("plano del rival, casilla ", c))
+    print("PASS la observacion son dos planos binarios (mias / suyas)")
+
+
+def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
+    """Vacio, lleno, y la invariante que los relaciona.
+
+    La invariante importa: una casilla no puede estar en los dos planos a la vez,
+    y una ocupada tiene que estar exactamente en uno. Eso caza un intercambio de
+    planos o una comparacion mal escrita.
+    """
+    boards = List[Scalar[dtype]]()
+    empty = board9(0,0,0, 0,0,0, 0,0,0)
+    full = board9(1,-1,1, -1,1,-1, 1,-1,1)
+    for c in range(NUM_CELLS): boards.append(empty[c])
+    for c in range(NUM_CELLS): boards.append(full[c])
+
+    got = run_encode(ctx, boards, 2)
+
+    # El vacio: los 18 valores a cero (nada en ningun plano).
+    for i in range(OBS_DIM):
+        assert_close(got[i], Scalar[dtype](0), TOL,
+                     String("tablero vacio, valor ", i))
+
+    # El lleno y la invariante, sobre los dos tableros.
+    for t in range(2):
+        base = t * OBS_DIM
+        for c in range(NUM_CELLS):
+            mine = got[base + c]
+            theirs = got[base + NUM_CELLS + c]
+            if mine + theirs > Scalar[dtype](1.5):
+                raise Error("la casilla ", c, " del tablero ", t,
+                            " esta en LOS DOS planos")
+            # El tablero de origen sale del array plano, sin copiar listas.
+            cell = boards[t * NUM_CELLS + c]
+            occupied = Scalar[dtype](0) if cell == CELL_EMPTY else Scalar[dtype](1)
+            assert_close(mine + theirs, occupied, TOL,
+                         String("ocupada = en exactamente un plano, tablero ", t,
+                                " casilla ", c))
+    print("PASS bordes: vacio a cero, y cada casilla ocupada en un solo plano")
+
+
+def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
+    """Varios tableros seguidos: ninguno pisa la observacion del vecino.
+
+    Mismo tipo de comprobacion que el layout de A1a, pero sobre el paso OBS_DIM
+    en vez de STATE_DIM.
+    """
+    b0 = board9(1,1,1, 0,0,0, 0,0,0)      # solo mias, la fila de arriba
+    b1 = board9(-1,-1,-1, 0,0,0, 0,0,0)   # solo suyas, la misma fila
+    b2 = board9(0,0,0, 0,0,0, 0,0,1)      # una mia, la esquina
+
+    boards = List[Scalar[dtype]]()
+    for c in range(NUM_CELLS): boards.append(b0[c])
+    for c in range(NUM_CELLS): boards.append(b1[c])
+    for c in range(NUM_CELLS): boards.append(b2[c])
+    got = run_encode(ctx, boards, 3)
+
+    # Tablero 0: tres unos en el plano propio, nada en el del rival.
+    for c in range(3):
+        assert_close(got[c], Scalar[dtype](1), TOL, String("t0 mia ", c))
+    for c in range(NUM_CELLS):
+        assert_close(got[NUM_CELLS + c], Scalar[dtype](0), TOL,
+                     String("t0 no deberia tener fichas del rival, ", c))
+    # Tablero 1: al reves, y en su propio hueco.
+    for c in range(3):
+        assert_close(got[OBS_DIM + NUM_CELLS + c], Scalar[dtype](1), TOL,
+                     String("t1 suya ", c))
+        assert_close(got[OBS_DIM + c], Scalar[dtype](0), TOL,
+                     String("t1 no deberia tener fichas mias, ", c))
+    # Tablero 2: solo la casilla 8 en el plano propio.
+    assert_close(got[2 * OBS_DIM + 8], Scalar[dtype](1), TOL, "t2 esquina mia")
+    total = Scalar[dtype](0)
+    for i in range(OBS_DIM):
+        total += got[2 * OBS_DIM + i]
+    assert_close(total, Scalar[dtype](1), TOL, "t2 deberia tener una sola ficha")
+    print("PASS tres tableros seguidos, cada observacion en su hueco")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -587,5 +758,9 @@ def main() raises:
         test_prior_masks_illegal(ctx)
         test_step_all_paths(ctx)
         test_step_discounts_reward_by_depth(ctx)
+        test_encode_obs_two_planes(ctx)
+        test_encode_obs_edge_cases(ctx)
+        test_encode_obs_no_overlap(ctx)
         test_model_eval_root(ctx)
         test_model_step(ctx)
+        test_loss_penalty_separates_losing_from_continuing(ctx)
