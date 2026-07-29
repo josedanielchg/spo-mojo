@@ -162,8 +162,64 @@ def test_truncation_cuts_the_accumulator(ctx: DeviceContext) raises:
     print("PASS la truncacion corta el acumulado pero conserva su propio delta")
 
 
+def test_multiblock_batch(ctx: DeviceContext) raises:
+    """Mas secuencias que hilos por bloque: la ruta multi-bloque.
+
+    Los casos del golden usan B = 1, 4 y 8, todos por debajo de TPB_GAE (128), o
+    sea que la GAE nunca habia corrido en mas de un bloque. Es el mismo punto
+    ciego que aparecio en E1.4 con el backward.
+
+    Montaje comprobable a mano: todas las secuencias identicas, con recompensa 1
+    en cada paso, valores a 0 y sin truncar. Entonces cada delta vale 1 y la
+    ventaja del paso t es la suma geometrica 1 + (g*l) + (g*l)^2 + ... hacia
+    atras. Se comprueba el ULTIMO paso (que vale exactamente 1, no acumula nada)
+    y que TODAS las secuencias dan lo mismo: si algun bloque calculara de mas o de
+    menos, unas filas diferirian de otras.
+    """
+    b = 300          # > 128: tres bloques
+    t = 5
+    n = b * t
+
+    r = List[Scalar[dtype]]()
+    d = List[Scalar[dtype]]()
+    z = List[Scalar[dtype]]()
+    tr = List[Scalar[dtype]]()
+    for _ in range(n):
+        r.append(Scalar[dtype](1))
+        d.append(GAMMA)
+        z.append(Scalar[dtype](0))
+        tr.append(Scalar[dtype](0))
+
+    adv = zeros[dtype](ctx, n)
+    targets = zeros[dtype](ctx, n)
+    truncated_gae(ctx, adv, targets, upload[dtype](ctx, r), upload[dtype](ctx, d),
+                  upload[dtype](ctx, z), upload[dtype](ctx, z),
+                  upload[dtype](ctx, tr), b, t, LAMBDA)
+    ctx.synchronize()
+    got = download[dtype](adv, n)
+
+    # El ultimo paso de cada secuencia no arrastra nada: vale su delta = 1.
+    # Y hacia atras se acumula la geometrica.
+    want = List[Scalar[dtype]]()
+    acc = Scalar[dtype](0)
+    for _ in range(t):
+        acc = Scalar[dtype](1) + GAMMA * LAMBDA * acc
+        want.append(acc)          # want[k] = ventaja a k pasos del final
+
+    for seq in range(b):
+        for step in range(t):
+            from_end = t - 1 - step
+            expected = want[from_end]
+            v = got[seq * t + step]
+            if abs(v - expected) > TOL:
+                raise Error("secuencia ", seq, " paso ", step, ": ", v,
+                            " y deberia ser ", expected)
+    print("PASS multi-bloque: las", b, "secuencias (3 bloques) dan lo mismo")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_single_step_is_td_error(ctx)
         test_truncation_cuts_the_accumulator(ctx)
+        test_multiblock_batch(ctx)
         test_against_stoix(ctx)
