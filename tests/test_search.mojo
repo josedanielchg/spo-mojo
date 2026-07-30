@@ -16,7 +16,9 @@ from envs.toy_chain import (default_toy_chain, ToyChain,
 from systems.spo.particles import SearchWorkspace
 from systems.spo.spo_types import SPOConfig
 from systems.spo.search import search
-from tests.helpers import upload, download, assert_close
+from systems.spo.readout import readout_greedy
+from ops.buffers import zero_buffer
+from tests.helpers import upload, download, write_into, assert_close
 
 comptime TOL = Scalar[dtype](1e-5)
 
@@ -272,6 +274,109 @@ def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
     print("PASS reutilizar el workspace da el mismo resultado que uno nuevo")
 
 
+def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
+    """El readout codicioso coge la accion con mas MASA de q, no la particula
+    con mas peso.
+
+    La distincion importa y es facil de confundir. q es un histograma ponderado:
+    varias particulas comparten accion raiz y sus pesos se SUMAN. Un "argmax
+    sobre particulas" cogeria la particula individual mas pesada, que no tiene por
+    que pertenecer a la accion mas votada.
+
+    Los dos envs estan montados justo para separar las dos cosas, y ademas con
+    respuestas distintas para que un cruce de envs tambien se vea:
+
+        env 0   accion 0: una particula de 0.40  <- la particula mas pesada
+                accion 1: 0.16+0.16+0.16+0.12 = 0.60  <- la moda, la correcta
+        env 1   accion 0: 0.20+0.20+0.20 = 0.60   <- la moda, la correcta
+                accion 1: una particula de 0.30 y otra de 0.10
+
+    El juguete tiene 2 acciones, asi que q es [env0_a0, env0_a1, env1_a0, env1_a1].
+    """
+    num_envs = 2
+    num_particles = 5
+    cfg = make_config(num_envs, num_particles, 2, 2)
+    ws = SearchWorkspace(ctx, cfg)
+    q_buf = zero_buffer[dtype](ctx, num_envs * NUM_ACTIONS)
+
+    roots = List[Scalar[idx_dtype]]()
+    weights = List[Scalar[dtype]]()
+
+    # Las dos listas en paralelo: accion raiz de la particula y su peso.
+    acts = List[Int]();     ws_ = List[Float64]()
+    acts.append(0); ws_.append(0.40)          # env 0, la particula mas pesada
+    acts.append(1); ws_.append(0.16)
+    acts.append(1); ws_.append(0.16)
+    acts.append(1); ws_.append(0.16)
+    acts.append(1); ws_.append(0.12)          # la accion 1 suma 0.60
+    acts.append(1); ws_.append(0.30)          # env 1, la particula mas pesada
+    acts.append(0); ws_.append(0.20)
+    acts.append(0); ws_.append(0.20)
+    acts.append(0); ws_.append(0.20)          # la accion 0 suma 0.60
+    acts.append(1); ws_.append(0.10)
+    for i in range(len(acts)):
+        roots.append(Scalar[idx_dtype](acts[i]))
+        weights.append(Scalar[dtype](ws_[i]))
+
+    write_into[idx_dtype](ws.particles.root_actions, roots)
+    write_into[dtype](ws.output.sampled_action_weights, weights)
+    ctx.synchronize()
+
+    readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
+    ctx.synchronize()
+
+    # Primero la q agregada, que es lo que se quiere comprobar de verdad.
+    q = download[dtype](q_buf, num_envs * NUM_ACTIONS)
+    assert_close(q[0], Scalar[dtype](0.40), TOL, "q[env0, accion 0]")
+    assert_close(q[1], Scalar[dtype](0.60), TOL, "q[env0, accion 1]")
+    assert_close(q[2], Scalar[dtype](0.60), TOL, "q[env1, accion 0]")
+    assert_close(q[3], Scalar[dtype](0.40), TOL, "q[env1, accion 1]")
+
+    got = download[idx_dtype](ws.output.action, num_envs)
+    if Int(got[0]) != 1:
+        raise Error("el env 0 deberia elegir la accion 1 (masa 0.60) y no la ",
+                    Int(got[0]), "; si salio la 0 es que mira particulas "
+                    "sueltas en vez de agregar por accion")
+    if Int(got[1]) != 0:
+        raise Error("el env 1 deberia elegir la accion 0 (masa 0.60), salio ",
+                    Int(got[1]))
+    print("PASS el readout codicioso coge la moda de q, no la particula mayor")
+
+
+def test_greedy_is_deterministic(ctx: DeviceContext) raises:
+    """Dos lecturas codiciosas seguidas dan la misma accion.
+
+    Es la diferencia con `readout_weighted`, que sortea: si evaluamos en modo
+    codicioso, el mismo estado tiene que dar siempre la misma jugada, o los
+    numeros de la comparacion no serian reproducibles.
+    """
+    num_envs = 3
+    num_particles = 8
+    cfg = make_config(num_envs, num_particles, 3, 3)
+    ws = SearchWorkspace(ctx, cfg)
+    q_buf = zero_buffer[dtype](ctx, num_envs * NUM_ACTIONS)
+    model = default_toy_chain()
+
+    roots = List[Scalar[dtype]]()
+    for _ in range(num_envs * STATE_DIM):
+        roots.append(Scalar[dtype](0))
+    root_state = upload[dtype](ctx, roots)
+
+    search[ToyChain](ctx, ws, cfg, model, root_state, UInt32(7))
+    readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
+    ctx.synchronize()
+    a = download[idx_dtype](ws.output.action, num_envs)
+
+    readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
+    ctx.synchronize()
+    b = download[idx_dtype](ws.output.action, num_envs)
+
+    for e in range(num_envs):
+        if Int(a[e]) != Int(b[e]):
+            raise Error("el readout codicioso deberia ser determinista, env ", e)
+    print("PASS el readout codicioso es determinista")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_ess_drops_and_recovers_after_resampling(ctx)
@@ -279,3 +384,5 @@ def main() raises:
         test_more_particles_is_not_worse(ctx)
         test_search_is_reproducible(ctx)
         test_reusing_the_workspace_gives_the_same_result(ctx)
+        test_greedy_readout_takes_the_mode_of_q(ctx)
+        test_greedy_is_deterministic(ctx)

@@ -45,6 +45,79 @@ def mean_over_particles_kernel(out_mean: GlobalF32, values: GlobalF32,
     out_mean[env] = total / Scalar[dtype](num_particles)
 
 
+def q_histogram_kernel(q_out: GlobalF32, root_actions: GlobalI32,
+                       weights: GlobalF32, num_envs: Int, num_particles: Int,
+                       num_actions: Int):
+    """q[env, a] = suma de los pesos de las particulas cuya accion raiz es `a`.
+
+    Es la ecuacion 6 del paper escrita como array de verdad: `readout_weighted`
+    deja q implicita (acciones + pesos, con repeticiones) porque para muestrear
+    basta con eso, pero para coger el maximo hay que agregar por accion primero.
+
+    Un hilo por (env, accion), y cada uno recorre las particulas de su env. Sin
+    atomicos: cada hilo escribe en su propia casilla.
+    """
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i >= num_envs * num_actions:
+        return
+    env = i // num_actions
+    a = i % num_actions
+    total = Scalar[dtype](0)
+    for n in range(num_particles):
+        if Int(root_actions[env * num_particles + n]) == a:
+            total += weights[env * num_particles + n]
+    q_out[i] = total
+
+
+def argmax_action_kernel(action_out: GlobalI32, q: GlobalF32, num_envs: Int,
+                         num_actions: Int):
+    """La accion con mas masa de q. Un hilo por env.
+
+    Empate resuelto por el indice mas bajo (`>` estricto), que es determinista y
+    es lo que hace `jnp.argmax`.
+    """
+    env = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if env >= num_envs:
+        return
+    best = 0
+    best_q = q[env * num_actions]
+    for a in range(1, num_actions):
+        v = q[env * num_actions + a]
+        if v > best_q:
+            best_q = v
+            best = a
+    action_out[env] = Scalar[idx_dtype](best)
+
+
+def readout_greedy(ctx: DeviceContext, particles: Particles, output: SPOOutput,
+                   cfg: SPOConfig, q_buf: DeviceBuffer[dtype]) raises:
+    """La MODA de q en vez de una muestra de q. Para EVALUAR, no para entrenar.
+
+    Se llama DESPUES de `search`, y lo unico que hace es pisar `output.action`;
+    todo lo demas que produjo la busqueda (los pesos, las ventajas, el valor)
+    queda intacto, asi que el M-step seguiria viendo exactamente lo mismo.
+
+    Por que hace falta: `readout_weighted` sortea la accion de q, y ese sorteo ES
+    la exploracion del algoritmo. Perfecto mientras se aprende, pero al medir
+    fuerza mete a proposito jugadas subobtimas y la medida sale peor de lo que el
+    agente sabe jugar. Separar las dos cosas es lo normal en RL (muestrear para
+    entrenar, moda para evaluar) y aqui ademas hace falta para comparar de forma
+    justa contra un MCTS, que elige su jugada por el maximo de visitas.
+
+    `q_buf` es [num_envs, num_actions].
+    """
+    n_cells = cfg.num_envs * cfg.num_actions
+    ctx.enqueue_function[q_histogram_kernel, q_histogram_kernel](
+        q_buf.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        output.sampled_action_weights.unsafe_ptr(), cfg.num_envs,
+        cfg.num_particles, cfg.num_actions,
+        grid_dim=blocks_for(n_cells), block_dim=TPB)
+
+    ctx.enqueue_function[argmax_action_kernel, argmax_action_kernel](
+        output.action.unsafe_ptr(), q_buf.unsafe_ptr(), cfg.num_envs,
+        cfg.num_actions, grid_dim=blocks_for(cfg.num_envs), block_dim=TPB)
+
+
 def readout_weighted(ctx: DeviceContext, particles: Particles,
                      scratch: SearchScratch, output: SPOOutput, cfg: SPOConfig,
                      uniforms: DeviceBuffer[dtype]) raises:

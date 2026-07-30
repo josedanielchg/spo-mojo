@@ -117,6 +117,9 @@ struct TicTacToeCritic(SearchModel, Movable):
     """[max_batch, OBS_DIM] el tablero codificado, reutilizado en cada llamada."""
     var hidden: Int
 
+    var loss_penalty: Scalar[dtype]
+    """Lo que vale perder, en negativo. Ver `TicTacToe.loss_penalty`."""
+
     var depth_discounted: Bool
     """Si el bootstrap lleva gamma^(d+1) (escala coherente con la recompensa) o
     solo `search_gamma` (el contrato literal del SearchModel, como Stoix). Ver
@@ -124,7 +127,8 @@ struct TicTacToeCritic(SearchModel, Movable):
 
     def __init__(out self, ctx: DeviceContext, max_batch: Int, hidden: Int,
                  reward_gamma: Scalar[dtype],
-                 depth_discounted: Bool = False) raises:
+                 depth_discounted: Bool = False,
+                 loss_penalty: Scalar[dtype] = 0) raises:
         """Reserva todo para `max_batch` tableros a la vez.
 
         `max_batch` tiene que cubrir el uso mayor de los dos: `num_envs` en la raiz
@@ -133,6 +137,7 @@ struct TicTacToeCritic(SearchModel, Movable):
         self.reward_gamma = reward_gamma
         self.hidden = hidden
         self.depth_discounted = depth_discounted
+        self.loss_penalty = loss_penalty
         self.params = zero_critic_params(ctx, OBS_DIM, hidden, 1)
         self.cache = CriticCache(ctx, max_batch, hidden, 1)
         self.obs = zero_buffer[dtype](ctx, max_batch * OBS_DIM)
@@ -196,7 +201,7 @@ struct TicTacToeCritic(SearchModel, Movable):
             step_uniforms.unsafe_ptr(), particles.depth.unsafe_ptr(),
             outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
             outputs.next_value.unsafe_ptr(), p_total, self.reward_gamma,
-            grid_dim=blocks, block_dim=TPB_TTT)
+            self.loss_penalty, grid_dim=blocks, block_dim=TPB_TTT)
 
         # 2. V(s') sobre el estado NUEVO.
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](

@@ -369,7 +369,8 @@ def run_dynamics_at(ctx: DeviceContext, boards: List[Scalar[dtype]],
                     actions: List[Scalar[idx_dtype]],
                     uniforms: List[Scalar[dtype]],
                     depths: List[Scalar[idx_dtype]], n: Int,
-                    reward_gamma: Scalar[dtype]) raises -> DynResult:
+                    reward_gamma: Scalar[dtype],
+                    loss_penalty: Scalar[dtype] = 0) raises -> DynResult:
     """Corre ttt_dynamics_kernel con la profundidad y el descuento dados."""
     state = upload[dtype](ctx, boards)
     action = upload[idx_dtype](ctx, actions)
@@ -381,7 +382,7 @@ def run_dynamics_at(ctx: DeviceContext, boards: List[Scalar[dtype]],
     ctx.enqueue_function[ttt_dynamics_kernel, ttt_dynamics_kernel](
         state.unsafe_ptr(), action.unsafe_ptr(), us.unsafe_ptr(),
         depth.unsafe_ptr(), reward.unsafe_ptr(), discount.unsafe_ptr(),
-        next_value.unsafe_ptr(), n, reward_gamma,
+        next_value.unsafe_ptr(), n, reward_gamma, loss_penalty,
         grid_dim=1, block_dim=TPB_TTT)
     ctx.synchronize()
     return DynResult(download[dtype](state, n * NUM_CELLS),
@@ -587,6 +588,67 @@ def run_encode(ctx: DeviceContext, boards: List[Scalar[dtype]],
     return download[dtype](obs, n * OBS_DIM)
 
 
+def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raises:
+    """Con `loss_penalty`, perder deja de valer lo mismo que seguir jugando.
+
+    Es el problema que destapo la auditoria de las derrotas: `ttt_advance`
+    devuelve recompensa 0 tanto si la partida se PIERDE como si simplemente
+    SIGUE, asi que el peso SMC no puede distinguirlas y la busqueda no tiene
+    ningun motivo para bloquear una amenaza.
+
+    Cuatro particulas, una por desenlace, todas a profundidad 0 para que el
+    descuento no enturbie la lectura.
+    """
+    boards = List[Scalar[dtype]]()
+    # p0 gana: X en 0 y 1, juega la 2.
+    for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
+    # p1 pierde: O en 3 y 4, X juega la 8 (no bloquea) y el rival remata la 5.
+    for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
+    # p2 empata: tablero casi lleno sin lineas, X cierra la ultima casilla.
+    for b in board9(1,-1,1, 1,-1,-1, -1,1,0): boards.append(b)
+    # p3 sigue: tablero vacio.
+    for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
+
+    acts = List[Scalar[idx_dtype]]()
+    acts.append(Scalar[idx_dtype](2))    # gana
+    acts.append(Scalar[idx_dtype](8))    # no bloquea
+    acts.append(Scalar[idx_dtype](8))    # empata
+    acts.append(Scalar[idx_dtype](4))    # sigue
+    us = List[Scalar[dtype]]()
+    us.append(Scalar[dtype](0.1))
+    # Tras la jugada 8 de X quedan libres 2,5,6,7; u=0.3 elige la segunda, o sea
+    # la casilla 5, que le completa al rival la linea 3-4-5.
+    us.append(Scalar[dtype](0.3))
+    us.append(Scalar[dtype](0.1))
+    us.append(Scalar[dtype](0.1))
+    depths = List[Scalar[idx_dtype]]()
+    for _ in range(4): depths.append(Scalar[idx_dtype](0))
+
+    # Sin castigo: perder y seguir dan lo mismo, que es justo el problema.
+    plain = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 0)
+    assert_close(plain.reward[0], Scalar[dtype](1), TOL, "sin castigo, ganar")
+    assert_close(plain.reward[1], Scalar[dtype](0), TOL, "sin castigo, perder")
+    assert_close(plain.reward[3], Scalar[dtype](0), TOL, "sin castigo, seguir")
+    if plain.discount[1] != Scalar[dtype](0):
+        raise Error("la particula 1 deberia haber perdido (discount 0)")
+
+    # Con castigo 1: el convenio +1 / 0 / -1 de los juegos.
+    pen = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 1)
+    assert_close(pen.reward[0], Scalar[dtype](1), TOL, "con castigo, ganar")
+    assert_close(pen.reward[1], Scalar[dtype](-1), TOL, "con castigo, perder")
+    assert_close(pen.reward[2], Scalar[dtype](0.5), TOL, "con castigo, empatar")
+    assert_close(pen.reward[3], Scalar[dtype](0), TOL, "con castigo, seguir")
+
+    # Y el castigo se descuenta por profundidad como cualquier recompensa:
+    # perder mas tarde duele menos, igual que ganar mas tarde premia menos.
+    deep = List[Scalar[idx_dtype]]()
+    for _ in range(4): deep.append(Scalar[idx_dtype](2))
+    d2 = run_dynamics_at(ctx, boards, acts, us, deep, 4, 0.5, 1)
+    assert_close(d2.reward[1], Scalar[dtype](-0.25), TOL,
+                 "perder en la profundidad 2 con gamma 0.5")
+    print("PASS loss_penalty separa perder de seguir, y se descuenta igual")
+
+
 def test_encode_obs_two_planes(ctx: DeviceContext) raises:
     """El tablero se traduce a dos planos binarios, calculados a mano.
 
@@ -701,3 +763,4 @@ def main() raises:
         test_encode_obs_no_overlap(ctx)
         test_model_eval_root(ctx)
         test_model_step(ctx)
+        test_loss_penalty_separates_losing_from_continuing(ctx)

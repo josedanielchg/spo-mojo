@@ -64,6 +64,7 @@ from rl_utils.buffer import TrajectoryBuffer
 from systems.spo.particles import SearchWorkspace
 from systems.spo.spo_types import SPOConfig
 from systems.spo.search import search
+from systems.spo.readout import readout_greedy
 from systems.spo.search_model import SearchModel
 from tests.helpers import download, write_into
 from demos.train_critic import (Critic, init_critic_weights, collect, update,
@@ -108,14 +109,20 @@ def eval_config(reward_gamma: Scalar[dtype]) -> SPOConfig:
 
 
 def play[M: SearchModel](ctx: DeviceContext, name: String, model: M,
-                         cfg: SPOConfig, steps: Int) raises -> Arm:
+                         cfg: SPOConfig, steps: Int,
+                         greedy: Bool = False) raises -> Arm:
     """Juega `steps` turnos en EVAL_ENVS partidas y cuenta el marcador.
 
     Es el bucle de A7 tal cual: buscar, jugar, dejar responder al rival, anotar
     las que acaben y resetear las acabadas. La semilla del rival depende solo del
     paso, asi que todos los brazos se enfrentan a la misma secuencia de rivales.
+
+    Con `greedy` la jugada es la MODA de q en vez de una muestra de q. Muestrear
+    es lo correcto para entrenar (es de donde sale la exploracion) pero mete
+    jugadas subobtimas a proposito, asi que al medir fuerza hay que separarlo.
     """
     ws = SearchWorkspace(ctx, cfg)
+    q_buf = zero_buffer[dtype](ctx, EVAL_ENVS * NUM_ACTIONS)
     blocks = (EVAL_ENVS + TPB_TTT - 1) // TPB_TTT
 
     state = zero_buffer[dtype](ctx, EVAL_ENVS * STATE_DIM)
@@ -134,6 +141,8 @@ def play[M: SearchModel](ctx: DeviceContext, name: String, model: M,
     for step in range(steps):
         search[M](ctx, ws, cfg, model, state,
                   EVAL_SEED ^ (UInt32(step) * 2654435761))
+        if greedy:
+            readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
         ctx.enqueue_function[fill_uniform, fill_uniform](
             u_rival.unsafe_ptr(), EVAL_SEED, RNG_RIVAL + UInt32(step), EVAL_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
@@ -370,6 +379,17 @@ def main() raises:
         show(a_const)
         print()
 
+        print("--- 2b. los mismos, pero jugando la MODA de q en vez de una muestra ---")
+        g_base = play[TicTacToe](ctx, "sin critico  gamma_r=0.7  CODICIOSO",
+                                 TicTacToe(Scalar[dtype](0.7)),
+                                 eval_config(0.7), EVAL_STEPS, greedy=True)
+        show(g_base)
+        g_dd = play[TicTacToeCritic](ctx, "CON critico  coherente   CODICIOSO",
+                                     m_dd, eval_config(0.7), EVAL_STEPS,
+                                     greedy=True)
+        show(g_dd)
+        print()
+
         print("--- 3. veredicto (IC de Wilson al 95% sobre las derrotas) ---")
         verdict(a_base, a_c07)
         verdict(a_base, a_c10)
@@ -378,6 +398,10 @@ def main() raises:
         print()
         print("--- 4. ¿aporta el critico algo mas que su media? ---")
         verdict(a_dd, a_const)
+        print()
+        print("--- 5. ¿cuanto de las derrotas era el muestreo de q? ---")
+        verdict(a_base, g_base)
+        verdict(g_base, g_dd)
         print()
         print("   referencia exacta: el juego optimo pierde 0.00%;")
         print("   jugar al azar pierde 28.81%.")

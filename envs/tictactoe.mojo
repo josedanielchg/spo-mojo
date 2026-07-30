@@ -292,7 +292,8 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
                         step_uniforms: GlobalF32, depth: GlobalI32,
                         reward_out: GlobalF32, discount_out: GlobalF32,
                         next_value_out: GlobalF32, n_particles: Int,
-                        reward_gamma: Scalar[dtype]):
+                        reward_gamma: Scalar[dtype],
+                        loss_penalty: Scalar[dtype]):
     """El step estocastico de TTT para la BUSQUEDA: un turno + gamma plegada.
 
     Avanza con `ttt_advance` y traduce el resultado al contrato del nucleo SMC:
@@ -314,7 +315,18 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
     g = Scalar[dtype](1)
     for _ in range(Int(depth[p])):
         g *= reward_gamma
-    reward_out[p] = out.reward * g
+
+    # Castigo por derrota. Sin el, `ttt_advance` devuelve 0 tanto si la partida se
+    # PIERDE como si simplemente SIGUE, asi que el peso SMC no puede distinguir
+    # las dos cosas y la busqueda no tiene ningun motivo para bloquear una
+    # amenaza. Con loss_penalty > 0 una derrota pasa a valer -loss_penalty, que es
+    # el convenio habitual de los juegos (+1 / 0 / -1). Con 0 se recupera el
+    # comportamiento original.
+    r = out.reward
+    if loss_penalty != 0 and out.terminal != 0 and out.reward == 0:
+        r = -loss_penalty
+
+    reward_out[p] = r * g
     discount_out[p] = Scalar[dtype](1) - out.terminal
     next_value_out[p] = Scalar[dtype](0)
 
@@ -420,7 +432,6 @@ def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
             cells_out[p * NUM_CELLS + c] = ttt_cell(state, p, c)
 
 
-@fieldwise_init
 struct TicTacToe(SearchModel, Copyable, Movable):
     """Tic-Tac-Toe como modelo de busqueda: el agente (X) contra un rival aleatorio.
 
@@ -437,6 +448,17 @@ struct TicTacToe(SearchModel, Copyable, Movable):
     """Descuento de la recompensa por profundidad. 1.0 = sin descuento (ganar ya
     vale igual que ganar despues, que en un juego con premio terminal deja el peso
     SMC casi ciego); <1 premia ganar rapido."""
+
+    var loss_penalty: Scalar[dtype]
+    """Lo que vale perder, en negativo. 0 = el convenio original (perder vale 0,
+    lo mismo que no haber resuelto la partida); 1 = el convenio de juegos
+    +1/0/-1. Es MODELADO de recompensa dentro de la busqueda: la recompensa del
+    entorno real, la que cuenta el marcador, no se toca."""
+
+    def __init__(out self, reward_gamma: Scalar[dtype],
+                 loss_penalty: Scalar[dtype] = 0):
+        self.reward_gamma = reward_gamma
+        self.loss_penalty = loss_penalty
 
     def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
                   root_state: DeviceBuffer[dtype],
@@ -463,7 +485,7 @@ struct TicTacToe(SearchModel, Copyable, Movable):
             step_uniforms.unsafe_ptr(), particles.depth.unsafe_ptr(),
             outputs.reward.unsafe_ptr(), outputs.discount.unsafe_ptr(),
             outputs.next_value.unsafe_ptr(), p_total, self.reward_gamma,
-            grid_dim=blocks, block_dim=TPB_TTT)
+            self.loss_penalty, grid_dim=blocks, block_dim=TPB_TTT)
 
         ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
             outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),
