@@ -16,7 +16,8 @@ from envs.toy_chain import (default_toy_chain, ToyChain,
 from systems.spo.particles import SearchWorkspace
 from systems.spo.spo_types import SPOConfig
 from systems.spo.search import search
-from systems.spo.readout import readout_greedy
+from systems.spo.readout import (readout_greedy, readout_expected,
+                                 readout_weighted)
 from ops.buffers import zero_buffer
 from tests.helpers import upload, download, write_into, assert_close
 
@@ -377,6 +378,116 @@ def test_greedy_is_deterministic(ctx: DeviceContext) raises:
     print("PASS el readout codicioso es determinista")
 
 
+def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
+    """La variante castiga el riesgo; el readout de SPO no. Mismos pesos, distinta
+    jugada.
+
+    Es el test que fija el hallazgo de la auditoria de derrotas, asi que el montaje
+    reproduce la situacion real: una accion ARRIESGADA (una particula estupenda y
+    tres desastrosas) contra una SEGURA (cuatro particulas mediocres pero iguales).
+
+        accion 0   pesos  1.0, -1.0, -1.0, -1.0    media -0.50
+        accion 1   pesos  0.2,  0.2,  0.2,  0.2    media  0.20
+
+    SPO hace q(a) = SUMA exp(peso/tau), que con tau=0.5 da
+
+        accion 0   e^2 + 3*e^-2 = 7.39 + 0.41 = 7.80   <- gana la arriesgada
+        accion 1   4 * e^0.4                  = 5.97
+
+    porque las tres particulas malas aportan casi cero pero NO RESTAN. La variante
+    promedia primero, y entonces gana la segura. Las dos lecturas son correctas
+    para lo que estiman: la de SPO estima E[exp(A/tau)] y la variante exp(E[A]/tau).
+    Coinciden si el entorno es determinista; con un rival al azar, no.
+    """
+    num_envs = 1
+    num_particles = 8
+    cfg = make_config(num_envs, num_particles, 2, 2)   # temperatura 0.5
+    ws = SearchWorkspace(ctx, cfg)
+    q_buf = zero_buffer[dtype](ctx, num_envs * NUM_ACTIONS)
+    logits_buf = zero_buffer[dtype](ctx, num_envs * NUM_ACTIONS)
+    us = zero_buffer[dtype](ctx, num_particles)
+
+    roots = List[Scalar[idx_dtype]]()
+    w = List[Scalar[dtype]]()
+    for _ in range(4):
+        roots.append(Scalar[idx_dtype](0))
+    for _ in range(4):
+        roots.append(Scalar[idx_dtype](1))
+    w.append(Scalar[dtype](1.0))                       # la unica buena
+    for _ in range(3): w.append(Scalar[dtype](-1.0))
+    for _ in range(4): w.append(Scalar[dtype](0.2))
+    write_into[idx_dtype](ws.particles.root_actions, roots)
+    write_into[dtype](ws.particles.resample_td_weights, w)
+    ctx.synchronize()
+
+    # 1. El readout de SPO: se queda con la arriesgada.
+    readout_weighted(ctx, ws.particles, ws.scratch, ws.output, cfg, us)
+    readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
+    ctx.synchronize()
+    spo = download[idx_dtype](ws.output.action, num_envs)
+    if Int(spo[0]) != 0:
+        raise Error("con el readout de SPO deberia salir la accion 0 (la de la "
+                    "particula buena), salio ", Int(spo[0]))
+
+    # 2. La variante: se queda con la segura.
+    readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf, q_buf, us,
+                     True)
+    ctx.synchronize()
+    exp_a = download[idx_dtype](ws.output.action, num_envs)
+    if Int(exp_a[0]) != 1:
+        raise Error("con la variante deberia salir la accion 1 (media mayor), "
+                    "salio ", Int(exp_a[0]))
+
+    # Y las medias, que son lo que la variante calcula de verdad.
+    logits = download[dtype](logits_buf, num_envs * NUM_ACTIONS)
+    tau = Scalar[dtype](0.5)
+    assert_close(logits[0] * tau, Scalar[dtype](-0.5), TOL, "media de la accion 0")
+    assert_close(logits[1] * tau, Scalar[dtype](0.2), TOL, "media de la accion 1")
+    print("PASS la variante castiga el riesgo donde el readout de SPO no puede")
+
+
+def test_expected_readout_ignores_unsampled_actions(ctx: DeviceContext) raises:
+    """Una accion que ninguna particula probo se queda con q = 0.
+
+    Sin esto, la media de cero particulas seria 0/0 y podria salir NaN o, peor,
+    un 0 que compite de tu a tu con acciones de media negativa y acabaria
+    eligiendose una jugada que la busqueda nunca evaluo.
+    """
+    num_envs = 1
+    num_particles = 4
+    cfg = make_config(num_envs, num_particles, 2, 2)
+    ws = SearchWorkspace(ctx, cfg)
+    q_buf = zero_buffer[dtype](ctx, num_envs * NUM_ACTIONS)
+    logits_buf = zero_buffer[dtype](ctx, num_envs * NUM_ACTIONS)
+    us = zero_buffer[dtype](ctx, num_particles)
+
+    # Todas las particulas juegan la accion 1, y ademas con media NEGATIVA: si la
+    # accion 0 (sin probar) contara como 0, le ganaria.
+    roots = List[Scalar[idx_dtype]]()
+    w = List[Scalar[dtype]]()
+    for _ in range(4):
+        roots.append(Scalar[idx_dtype](1))
+        w.append(Scalar[dtype](-2.0))
+    write_into[idx_dtype](ws.particles.root_actions, roots)
+    write_into[dtype](ws.particles.resample_td_weights, w)
+    ctx.synchronize()
+
+    readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf, q_buf, us,
+                     True)
+    ctx.synchronize()
+
+    q = download[dtype](q_buf, num_envs * NUM_ACTIONS)
+    assert_close(q[0], Scalar[dtype](0), TOL,
+                 "una accion que nadie probo tiene que quedarse con q = 0")
+    assert_close(q[1], Scalar[dtype](1), TOL,
+                 "toda la masa va a la unica accion probada")
+    got = download[idx_dtype](ws.output.action, num_envs)
+    if Int(got[0]) != 1:
+        raise Error("deberia jugar la 1 aunque su media sea negativa: es la "
+                    "unica que la busqueda evaluo, salio ", Int(got[0]))
+    print("PASS las acciones sin probar no compiten con las evaluadas")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_ess_drops_and_recovers_after_resampling(ctx)
@@ -386,3 +497,5 @@ def main() raises:
         test_reusing_the_workspace_gives_the_same_result(ctx)
         test_greedy_readout_takes_the_mode_of_q(ctx)
         test_greedy_is_deterministic(ctx)
+        test_expected_readout_punishes_risk(ctx)
+        test_expected_readout_ignores_unsampled_actions(ctx)

@@ -118,6 +118,94 @@ def readout_greedy(ctx: DeviceContext, particles: Particles, output: SPOOutput,
         cfg.num_actions, grid_dim=blocks_for(cfg.num_envs), block_dim=TPB)
 
 
+def action_mean_logits_kernel(logits_out: GlobalF32, root_actions: GlobalI32,
+                              raw_weights: GlobalF32, num_envs: Int,
+                              num_particles: Int, num_actions: Int,
+                              temperature: Scalar[dtype]):
+    """logits[env, a] = (media de los pesos de las particulas de `a`) / temperatura.
+
+    La diferencia con `q_histogram_kernel` es dónde entra la exponencial, y esa
+    diferencia lo cambia todo. La ecuacion 6 hace
+
+        q(a)  =  SUMA_{p en a}  exp(peso_p / tau)          <- exponencial primero
+
+    y aqui se hace
+
+        q(a)  ∝  exp( MEDIA_{p en a}(peso_p) / tau )       <- media primero
+
+    Con la suma de exponenciales una particula mala aporta ~0, pero es que ya
+    aportaba ~0 comparada con una buena: nunca RESTA. Por eso la accion se juzga
+    por sus mejores particulas y el riesgo es invisible. Con la media, una
+    particula que pierde arrastra a su accion hacia abajo en proporcion a lo
+    frecuente que sea.
+
+    Formalmente: es la diferencia entre estimar E[exp(A/tau)] y exp(E[A]/tau).
+    Coinciden si el entorno es DETERMINISTA (los del paper); con un rival
+    aleatorio no, y la brecha de Jensen es un sesgo optimista.
+
+    Una accion que ninguna particula probo se marca con -inf para que su q sea 0.
+    """
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i >= num_envs * num_actions:
+        return
+    env = i // num_actions
+    a = i % num_actions
+    total = Scalar[dtype](0)
+    count = 0
+    for n in range(num_particles):
+        if Int(root_actions[env * num_particles + n]) == a:
+            total += raw_weights[env * num_particles + n]
+            count += 1
+    if count == 0:
+        logits_out[i] = Scalar[dtype](-1e30)
+    else:
+        logits_out[i] = (total / Scalar[dtype](count)) / temperature
+
+
+def readout_expected(ctx: DeviceContext, particles: Particles,
+                     output: SPOOutput, cfg: SPOConfig,
+                     logits_buf: DeviceBuffer[dtype],
+                     q_buf: DeviceBuffer[dtype],
+                     uniforms: DeviceBuffer[dtype], greedy: Bool) raises:
+    """Readout que promedia por accion ANTES de exponenciar. VARIANTE, no SPO.
+
+    Se aparta a proposito de la ecuacion 6 del paper. Esta aqui porque la
+    auditoria de `demos/audit_blunders.mojo` mostro que el readout original no
+    puede castigar el riesgo (ver `action_mean_logits_kernel`), y la unica forma
+    de DEMOSTRAR que esa es la causa es cambiarlo y ver si el bloqueo sube.
+
+    Deja `output.action` y `q_buf` [num_envs, num_actions]. No toca
+    `sampled_action_weights` ni `sampled_advantages`, asi que lo que vería el
+    M-step sigue siendo lo de SPO.
+
+    `greedy` elige entre la moda (evaluar) y una muestra (entrenar/explorar).
+    """
+    n_cells = cfg.num_envs * cfg.num_actions
+
+    ctx.enqueue_function[action_mean_logits_kernel, action_mean_logits_kernel](
+        logits_buf.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        particles.resample_td_weights.unsafe_ptr(), cfg.num_envs,
+        cfg.num_particles, cfg.num_actions, cfg.temperature,
+        grid_dim=blocks_for(n_cells), block_dim=TPB)
+
+    ctx.enqueue_function[softmax_rows[TPB_PARTICLES], softmax_rows[TPB_PARTICLES]](
+        q_buf.unsafe_ptr(), logits_buf.unsafe_ptr(), cfg.num_actions,
+        grid_dim=cfg.num_envs, block_dim=TPB_PARTICLES)
+
+    if greedy:
+        ctx.enqueue_function[argmax_action_kernel, argmax_action_kernel](
+            output.action.unsafe_ptr(), q_buf.unsafe_ptr(), cfg.num_envs,
+            cfg.num_actions, grid_dim=blocks_for(cfg.num_envs), block_dim=TPB)
+    else:
+        # Aqui la categorica es sobre ACCIONES, no sobre particulas: el indice que
+        # sale ya ES la jugada, sin pasar por root_actions.
+        ctx.enqueue_function[categorical_from_logits[TPB_PARTICLES],
+                             categorical_from_logits[TPB_PARTICLES]](
+            output.action.unsafe_ptr(), logits_buf.unsafe_ptr(),
+            uniforms.unsafe_ptr(), cfg.num_actions,
+            grid_dim=cfg.num_envs, block_dim=TPB_PARTICLES)
+
+
 def readout_weighted(ctx: DeviceContext, particles: Particles,
                      scratch: SearchScratch, output: SPOOutput, cfg: SPOConfig,
                      uniforms: DeviceBuffer[dtype]) raises:

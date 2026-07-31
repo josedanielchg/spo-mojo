@@ -45,7 +45,7 @@ from envs.tictactoe_runner import RNG_RIVAL
 from systems.spo.particles import SearchWorkspace
 from systems.spo.spo_types import SPOConfig
 from systems.spo.search import search
-from systems.spo.readout import readout_greedy
+from systems.spo.readout import readout_greedy, readout_expected
 
 comptime SEED = UInt32(20260731)
 comptime ENVS = 128
@@ -122,6 +122,8 @@ struct Audit(Copyable, Movable):
     var reward_gamma: Scalar[dtype]
     var loss_penalty: Scalar[dtype]
     var particles: Int
+    var expected: Bool
+    var period: Int
     var wins: Int
     var draws: Int
     var losses: Int
@@ -141,16 +143,20 @@ struct Audit(Copyable, Movable):
 def audit(ctx: DeviceContext, temperature: Scalar[dtype],
           reward_gamma: Scalar[dtype], steps: Int,
           loss_penalty: Scalar[dtype] = 0,
-          num_particles: Int = NUM_PARTICLES) raises -> Audit:
+          num_particles: Int = NUM_PARTICLES,
+          expected: Bool = False,
+          period: Int = RESAMPLE_PERIOD) raises -> Audit:
     """Juega y clasifica cada turno del agente. Ver la cabecera del fichero."""
     cfg = SPOConfig(num_envs=ENVS, num_particles=num_particles,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
-                    search_depth=SEARCH_DEPTH, resample_period=RESAMPLE_PERIOD,
+                    search_depth=SEARCH_DEPTH, resample_period=period,
                     temperature=temperature, search_gamma=1.0,
                     search_gae_lambda=1.0)
     model = TicTacToe(reward_gamma, loss_penalty)
     ws = SearchWorkspace(ctx, cfg)
     q_buf = zero_buffer[dtype](ctx, ENVS * NUM_ACTIONS)
+    logits_buf = zero_buffer[dtype](ctx, ENVS * NUM_ACTIONS)
+    us_dummy = zero_buffer[dtype](ctx, ENVS)
     blocks = (ENVS + TPB_TTT - 1) // TPB_TTT
 
     state = zero_buffer[dtype](ctx, ENVS * STATE_DIM)
@@ -170,7 +176,11 @@ def audit(ctx: DeviceContext, temperature: Scalar[dtype],
     for step in range(steps):
         search[TicTacToe](ctx, ws, cfg, model, state,
                           SEED ^ (UInt32(step) * 2654435761))
-        readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
+        if expected:
+            readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf,
+                             q_buf, us_dummy, True)
+        else:
+            readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
         ctx.synchronize()
 
         board = List[Scalar[dtype]]()
@@ -237,8 +247,8 @@ def audit(ctx: DeviceContext, temperature: Scalar[dtype],
             state.unsafe_ptr(), done.unsafe_ptr(), ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
     ctx.synchronize()
-    return Audit(temperature, reward_gamma, loss_penalty, num_particles, wins,
-                 draws, losses, can_win,
+    return Audit(temperature, reward_gamma, loss_penalty, num_particles,
+                 expected, period, wins, draws, losses, can_win,
                  took_win, must_block, blocked, forked, created_fork,
                  q_missed, missed)
 
@@ -253,6 +263,8 @@ def row(a: Audit) raises:
           " gamma_r=", fmt_fixed(Float64(a.reward_gamma), 2),
           " castigo=", fmt_fixed(Float64(a.loss_penalty), 2),
           " N=", a.particles,
+          "  " + ("MEDIA" if a.expected else " SPO "),
+          " resamp=" + ("no " if a.period > SEARCH_DEPTH else "si "),
           "  bloquea ", fmt_fixed(blk, 1), "%",
           "  remata ", fmt_fixed(fin, 1), "%",
           "  pierde ", pct(Float64(a.losses) / Float64(n)),
@@ -343,3 +355,82 @@ def main() raises:
             a = audit(ctx, TEMPERATURE, REWARD_GAMMA, SWEEP_STEPS_BIG,
                       Scalar[dtype](0), ns[ni])
             row(a)
+
+        print()
+        print("=== 5. la causa real, y el arreglo ===")
+        print("   La sonda destapo algo que el razonamiento no habia visto: tras")
+        print("   la busqueda los pesos finales son TODOS CERO. Es correcto -")
+        print("   resampling.mojo:151 los pone a cero al remuestrear, porque en")
+        print("   SMC la informacion del peso pasa a la MULTIPLICIDAD de las")
+        print("   particulas. Con profundidad 6 y periodo 3 el ultimo remuestreo")
+        print("   cae casi al final, asi que el readout acaba leyendo el")
+        print("   histograma de cuentas y nada mas.")
+        print()
+        print("   Y ahi esta el fallo de verdad: al remuestrear, una particula que")
+        print("   PIERDE se mata, pero su hueco lo rellena una COPIA de otra")
+        print("   particula con peso alto, que puede tener la misma accion raiz.")
+        print("   Matar perdedoras no le baja la cuenta a su accion. Por eso el")
+        print("   castigo por derrota no hacia nada: la particula ya iba a morir.")
+        print()
+        print("   Dos cambios, y hacen falta LOS DOS:")
+        print("     1. sin remuestreo, para que los pesos lleguen enteros al final")
+        print("     2. promediar por accion antes de exponenciar, para que una")
+        print("        derrota arrastre a su accion en vez de solo desaparecer")
+        print()
+        gs = List[Float64](); ps = List[Float64]()
+        es = List[Float64](); pe = List[Int]()
+        gs.append(0.7); ps.append(0.0); es.append(0.0); pe.append(3)    # la base
+        gs.append(0.7); ps.append(0.0); es.append(0.0); pe.append(99)
+        gs.append(0.7); ps.append(0.0); es.append(1.0); pe.append(99)
+        gs.append(1.0); ps.append(0.0); es.append(1.0); pe.append(99)
+        gs.append(1.0); ps.append(1.0); es.append(1.0); pe.append(99)
+        gs.append(0.9); ps.append(1.0); es.append(1.0); pe.append(99)
+        for i in range(len(gs)):
+            a = audit(ctx, TEMPERATURE, Scalar[dtype](gs[i]), SWEEP_STEPS,
+                      Scalar[dtype](ps[i]), NUM_PARTICLES, es[i] > 0.5, pe[i])
+            row(a)
+
+        print()
+        print("=== 6. ¿hasta donde llega? ===")
+        print("   Con el estimador de SUMA de exponenciales, subir N saturaba")
+        print("   (28.8 -> 40.0 -> 36.4): era SESGO, no ruido. Con la MEDIA el")
+        print("   sesgo desaparece y lo que queda es varianza, asi que ahora N SI")
+        print("   tiene que ayudar. Es la prueba definitiva de que el diagnostico")
+        print("   era correcto.")
+        print()
+        ns2 = List[Int]()
+        ns2.append(16); ns2.append(32); ns2.append(64); ns2.append(128)
+        ns2.append(256); ns2.append(512)
+        for i in range(len(ns2)):
+            a = audit(ctx, TEMPERATURE, Scalar[dtype](0.9), SWEEP_STEPS,
+                      Scalar[dtype](1.0), ns2[i], True, 99)
+            row(a)
+        print()
+        print()
+        print("   La temperatura NO se barre aqui a proposito: con lectura")
+        print("   codiciosa q = softmax(media/tau) y argmax(softmax(x/tau)) =")
+        print("   argmax(x) para cualquier tau > 0, asi que no puede cambiar la")
+        print("   jugada. Si importaba con el readout de SPO, porque una SUMA de")
+        print("   exponenciales no es invariante de escala. Volvera a importar")
+        print("   cuando la lectura vuelva a muestrear, en el M-step.")
+
+        print()
+        print("=== 7. confirmacion, tanda larga ===")
+        print("   El montaje ganador con", STEPS, "turnos, contra la base en las")
+        print("   mismas condiciones. Referencias exactas por recursion:")
+        print("   el juego optimo pierde 0.00% y saca score 0.9974; al azar,")
+        print("   28.81% y 0.6484.")
+        print()
+        final = audit(ctx, TEMPERATURE, Scalar[dtype](0.9), STEPS,
+                      Scalar[dtype](1.0), 512, True, 99)
+        row(base)
+        row(final)
+        nf = final.games()
+        print()
+        print("   derrotas", pct(Float64(base.losses) / Float64(n)), "->",
+              pct(Float64(final.losses) / Float64(nf)),
+              "   (", base.losses, "->", final.losses, "partidas perdidas )")
+        if wilson_hi(final.losses, nf) < wilson_lo(base.losses, n):
+            print("   los intervalos NO se solapan: la mejora es real.")
+        else:
+            print("   los intervalos se solapan: no se afirma mejora.")
