@@ -1,0 +1,23 @@
+in_dim 18
+out_dim 9
+hiddens 32 64 256
+batches 5 64
+neg_inf np.float32(-3.4028235e+38)
+los ficheros llevan el tag h<HIDDEN>:
+actor_h<H>_w1.bin      float32 in_dim x H
+actor_h<H>_b1.bin      float32 H
+actor_h<H>_w2.bin      float32 H x H
+actor_h<H>_b2.bin      float32 H
+actor_h<H>_w3.bin      float32 H x out_dim
+actor_h<H>_b3.bin      float32 out_dim
+actor_h<H>_x<M>.bin      float32 M x in_dim  (dos planos 0/1)
+actor_h<H>_mask<M>.bin   float32 M x out_dim (1 legal, 0 ocupada)
+actor_h<H>_raw<M>.bin    float32 M x out_dim (logits SIN enmascarar)
+actor_h<H>_masked<M>.bin float32 M x out_dim (logits enmascarados)
+actor_h<H>_probs<M>.bin  float32 M x out_dim (softmax enmascarado)
+hidden 32 batch 5  pesos 1961  legales/fila min 2 max 6
+hidden 32 batch 64  pesos 1961  legales/fila min 1 max 7
+hidden 64 batch 5  pesos 5961  legales/fila min 2 max 7
+hidden 64 batch 64  pesos 5961  legales/fila min 1 max 7
+hidden 256 batch 5  pesos 72969  legales/fila min 3 max 5
+hidden 256 batch 64  pesos 72969  legales/fila min 1 max 6
