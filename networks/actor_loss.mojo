@@ -32,6 +32,8 @@ from std.math import log
 from std.gpu.host import DeviceContext, DeviceBuffer
 
 from ops.common import dtype, GlobalF32
+from networks.mlp import (CriticParams, CriticCache, CriticGrads,
+                          CriticScratch, backward_from_dvalue)
 from systems.spo.launch import TPB, blocks_for
 
 
@@ -144,3 +146,68 @@ def kl_rows(ctx: DeviceContext, kl_out: DeviceBuffer[dtype],
     ctx.enqueue_function[kl_rows_kernel, kl_rows_kernel](
         kl_out.unsafe_ptr(), cross_entropy.unsafe_ptr(), entropy.unsafe_ptr(),
         n_rows, grid_dim=blocks_for(n_rows), block_dim=TPB)
+
+
+# ---------------------------------------------------------------------------
+# El backward. El gradiente de la ecuacion 11 respecto a los LOGITS sale limpio:
+#
+#     L = -SUM_a q(a) log pi(a),     pi = softmax(z)
+#     d log pi(a) / d z_j = delta_aj - pi(j)
+#     dL/dz_j = -SUM_a q(a) (delta_aj - pi(j)) = pi(j) - q(j)
+#
+# (usando SUM_a q(a) = 1). Es el mismo resultado que la forma de particulas del
+# plan, SUM_n w_n (softmax - onehot(a_n)), porque SUM_n w_n onehot(a_n) = q.
+#
+# Interpretacion util: el gradiente es "lo que la red dice MENOS lo que la
+# busqueda dice". Empuja pi hacia q y se anula cuando coinciden, que es justo lo
+# que la ecuacion 11 pide.
+# ---------------------------------------------------------------------------
+
+
+def logits_grad_kernel(dz: GlobalF32, pi: GlobalF32, q: GlobalF32,
+                       mask: GlobalF32, n: Int, scale: Scalar[dtype]):
+    """dL/dz = (pi - q) * scale, y CERO donde la accion es ilegal.
+
+    `scale` es normalmente 1/n_rows, para que el gradiente corresponda a la MEDIA
+    sobre el batch y no a la suma. Se pasa desde fuera igual que en
+    `value_loss_grad_kernel`.
+
+    Lo de la mascara merece explicacion, porque ahi el gradiente ya saldria 0 solo:
+    en una casilla ilegal pi vale 0 exacto (exp(NEG_INF - max) desborda a cero) y q
+    tambien, asi que pi - q = 0. Se fuerza igualmente por dos razones. Una, que
+    depender de que un desbordamiento de cero para que un gradiente sea correcto es
+    fragil: basta cambiar el enmascarado para que deje de cumplirse. Y dos, que ese
+    logit **no es un parametro**: el forward lo pisa con NEG_INF, asi que la red no
+    influye en el y su derivada tiene que ser 0 por construccion, no por
+    casualidad numerica.
+    """
+    i = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if i >= n:
+        return
+    if mask[i] == Scalar[dtype](0):
+        dz[i] = Scalar[dtype](0)
+    else:
+        dz[i] = (pi[i] - q[i]) * scale
+
+
+def actor_backward(ctx: DeviceContext, params: CriticParams,
+                   cache: CriticCache, grads: CriticGrads,
+                   scratch: CriticScratch, x: DeviceBuffer[dtype],
+                   pi: DeviceBuffer[dtype], q: DeviceBuffer[dtype],
+                   mask: DeviceBuffer[dtype], m: Int) raises:
+    """Gradientes de los 6 tensores del actor para la perdida de la ecuacion 11.
+
+    `pi` tiene que venir de un forward con la MISMA x y los mismos pesos que
+    dejaron `cache`; si no, los gradientes salen mal sin que nada falle. Es la
+    misma precondicion que `critic_backward`.
+
+    El camino hacia atras a partir de los logits es identico al del critico -- la
+    red es la misma -- asi que se reutiliza `backward_from_dvalue`, que ya esta
+    verificado contra el autodiff de JAX desde E1.5.
+    """
+    n_out = m * params.out_dim
+    ctx.enqueue_function[logits_grad_kernel, logits_grad_kernel](
+        scratch.dvalue.unsafe_ptr(), pi.unsafe_ptr(), q.unsafe_ptr(),
+        mask.unsafe_ptr(), n_out, Scalar[dtype](1) / Scalar[dtype](m),
+        grid_dim=blocks_for(n_out), block_dim=TPB)
+    backward_from_dvalue(ctx, params, cache, grads, scratch, x, m)

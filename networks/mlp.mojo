@@ -217,13 +217,32 @@ def critic_backward(ctx: DeviceContext, params: CriticParams,
     que nada fallara.
     """
     n_out = m * params.out_dim
-    n_hidden = m * params.hidden
 
     # 1. Por donde entra todo: la derivada de la perdida respecto a V.
     ctx.enqueue_function[value_loss_grad_kernel, value_loss_grad_kernel](
         scratch.dvalue.unsafe_ptr(), cache.value.unsafe_ptr(),
         target.unsafe_ptr(), n_out, Scalar[dtype](1) / Scalar[dtype](n_out),
         grid_dim=(n_out + TPB_NET - 1) // TPB_NET, block_dim=TPB_NET)
+
+    # 2..6: el resto no depende de QUE perdida sea, solo del gradiente que baja.
+    backward_from_dvalue(ctx, params, cache, grads, scratch, x, m)
+
+
+def backward_from_dvalue(ctx: DeviceContext, params: CriticParams,
+                         cache: CriticCache, grads: CriticGrads,
+                         scratch: CriticScratch, x: DeviceBuffer[dtype],
+                         m: Int) raises:
+    """El backward de la red a partir de `scratch.dvalue`, ya calculado.
+
+    Se separo de `critic_backward` cuando llego el actor: la red es la misma y el
+    camino hacia atras tambien, lo unico que cambia es POR DONDE ENTRA el
+    gradiente. El critico entra con d(L2)/dV = (V - target)/n y el actor con
+    dL/dlogits = (pi - q)/n. Todo lo de aqui abajo es identico.
+
+    Sigue dando por hecho que `cache` viene de un forward con la MISMA x y los
+    mismos pesos.
+    """
+    n_hidden = m * params.hidden
 
     # 2. Tercera capa: su entrada fue a2.
     linear_backward(ctx, grads.dw3, grads.db3, scratch.da2,
