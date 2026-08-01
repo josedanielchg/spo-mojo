@@ -20,7 +20,7 @@ from std.math import log
 from ops.buffers import zero_buffer
 from ops.common import dtype, NEG_INF
 from ops.softmax import log_softmax_rows
-from networks.actor_loss import cross_entropy_rows
+from networks.actor_loss import cross_entropy_rows, entropy_rows, kl_rows
 from tests.golden_io import read_f32
 from tests.helpers import upload, download, filled, assert_close
 
@@ -76,11 +76,32 @@ def check_case(ctx: DeviceContext, name: String, batch: Int) raises:
         assert_close(got_per[b], want_per[b], TOL,
                      String(name, " perdida del estado ", b))
 
+    # 3. La descomposicion H(q,pi) = H(q) + KL(q||pi).
+    h = zero_buffer[dtype](ctx, batch)
+    kl = zero_buffer[dtype](ctx, batch)
+    entropy_rows(ctx, h, q, batch, NUM_ACTIONS)
+    kl_rows(ctx, kl, per_state, h, batch)
+    ctx.synchronize()
+
+    want_h = read_f32(tag + "entropy.bin")
+    want_kl = read_f32(tag + "kl.bin")
+    got_h = download[dtype](h, batch)
+    got_kl = download[dtype](kl, batch)
+    for b in range(batch):
+        assert_close(got_h[b], want_h[b], TOL, String(name, " H(q) del estado ", b))
+        assert_close(got_kl[b], want_kl[b], TOL, String(name, " KL del estado ", b))
+        # La KL es una divergencia: nunca negativa.
+        if got_kl[b] < Scalar[dtype](-1e-5):
+            raise Error(name, ": KL negativa en el estado ", b, ": ", got_kl[b])
+        # Y la descomposicion tiene que cerrar exactamente.
+        assert_close(got_h[b] + got_kl[b], got_per[b], TOL,
+                     String(name, " H(q)+KL deberia dar la perdida en ", b))
+
     want_loss = read_f32(tag + "loss.bin")
     got_loss = mean_of(got_per, batch)
     assert_close(got_loss, want_loss[0], TOL, String(name, " perdida media"))
-    print("PASS ce ", name, " (B=", batch, ") coincide con el golden de Stoix: ",
-          got_loss)
+    print("PASS ce ", name, " (B=", batch, "): perdida ", got_loss,
+          " = H(q) ", mean_of(got_h, batch), " + KL ", mean_of(got_kl, batch))
 
 
 def test_matches_stoix_golden(ctx: DeviceContext) raises:
@@ -209,8 +230,86 @@ def test_loss_is_minimised_when_pi_equals_q(ctx: DeviceContext) raises:
           "), uniforme ", got_uniform, ", invertida ", got_flipped)
 
 
+def test_kl_is_zero_exactly_when_pi_equals_q(ctx: DeviceContext) raises:
+    """La KL vale 0 en pi=q y es positiva en cuanto se aparta.
+
+    Es lo que hace util el diagnostico: la ENTROPIA CRUZADA en pi=q vale H(q), que
+    puede ser cualquier numero y ademas cambia entre iteraciones porque q la
+    produce la busqueda. La KL tiene un cero con significado -- "el actor
+    reproduce exactamente lo que dice la busqueda" -- y ese cero es el mismo en
+    todas las configuraciones, asi que si se puede comparar entre brazos.
+    """
+    q_vals = List[Scalar[dtype]]()
+    q_vals.append(0.5); q_vals.append(0.3); q_vals.append(0.2)
+
+    at_min = List[Scalar[dtype]]()
+    for a in range(3):
+        at_min.append(log(q_vals[a]))
+    uniform = List[Scalar[dtype]]()
+    for _ in range(3):
+        uniform.append(log(Scalar[dtype](1) / Scalar[dtype](3)))
+
+    ce_min = loss_of(ctx, at_min, q_vals)
+    ce_uni = loss_of(ctx, uniform, q_vals)
+
+    # H(q) con el kernel, sobre el mismo vector relleno a 9 acciones.
+    qs = List[Scalar[dtype]]()
+    for a in range(NUM_ACTIONS):
+        qs.append(q_vals[a] if a < 3 else Scalar[dtype](0))
+    q = upload[dtype](ctx, qs)
+    h = zero_buffer[dtype](ctx, 1)
+    entropy_rows(ctx, h, q, 1, NUM_ACTIONS)
+    ctx.synchronize()
+    got_h = download[dtype](h, 1)[0]
+
+    # H(q) a mano: 1.0296531 para (0.5, 0.3, 0.2).
+    assert_close(got_h, Scalar[dtype](1.0296531), TOL, "H(q) de (0.5,0.3,0.2)")
+    assert_close(ce_min - got_h, Scalar[dtype](0), Scalar[dtype](1e-5),
+                 "la KL en pi=q tiene que ser 0")
+    if ce_uni - got_h <= Scalar[dtype](0):
+        raise Error("la KL de la uniforme deberia ser positiva: ", ce_uni - got_h)
+    print("PASS KL = 0 en pi=q (perdida ", ce_min, " = H(q) ", got_h,
+          ") y ", ce_uni - got_h, " con la uniforme")
+
+
+def test_entropy_edge_cases(ctx: DeviceContext) raises:
+    """H de una one-hot es 0 y H de una uniforme sobre k es log(k).
+
+    Los dos extremos, que son los que fijan la escala. El one-hot es ademas el
+    caso peligroso: q vale 1 en una casilla y 0 en las otras ocho, asi que si el
+    guard `w > 0` faltara habria ocho terminos 0*log(0) = NaN y H saldria NaN en
+    vez de 0. Y es un caso REAL: la q de nuestro readout corregido sale casi
+    one-hot (medimos 0.9999999).
+    """
+    # Fila 0: one-hot. Fila 1: uniforme sobre 3. Fila 2: uniforme sobre las 9.
+    qs = List[Scalar[dtype]]()
+    for a in range(NUM_ACTIONS):
+        qs.append(Scalar[dtype](1) if a == 4 else Scalar[dtype](0))
+    for a in range(NUM_ACTIONS):
+        qs.append(Scalar[dtype](1) / Scalar[dtype](3) if a < 3
+                  else Scalar[dtype](0))
+    for _ in range(NUM_ACTIONS):
+        qs.append(Scalar[dtype](1) / Scalar[dtype](NUM_ACTIONS))
+
+    q = upload[dtype](ctx, qs)
+    h = zero_buffer[dtype](ctx, 3)
+    entropy_rows(ctx, h, q, 3, NUM_ACTIONS)
+    ctx.synchronize()
+    got = download[dtype](h, 3)
+
+    if got[0] != got[0]:
+        raise Error("H de una one-hot salio NaN: falta el guard de q == 0")
+    assert_close(got[0], Scalar[dtype](0), TOL, "H de una one-hot")
+    assert_close(got[1], log(Scalar[dtype](3)), TOL, "H de la uniforme sobre 3")
+    assert_close(got[2], log(Scalar[dtype](NUM_ACTIONS)), TOL,
+                 "H de la uniforme sobre 9")
+    print("PASS H(one-hot)=0 sin NaN, H(uniforme sobre k)=log k")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_matches_stoix_golden(ctx)
         test_zero_weight_terms_do_not_produce_nan(ctx)
         test_loss_is_minimised_when_pi_equals_q(ctx)
+        test_kl_is_zero_exactly_when_pi_equals_q(ctx)
+        test_entropy_edge_cases(ctx)

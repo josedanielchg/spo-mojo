@@ -120,6 +120,22 @@ for name, batch, num_particles in CASES:
         per_state[b] = -acc
     loss_dense = float(per_state.mean())
 
+    # Entropia de q y divergencia KL. La entropia cruzada se descompone en
+    #     H(q, pi) = H(q) + KL(q || pi)
+    # y H(q) NO depende de pi: es el suelo de la perdida. Lo que el entrenamiento
+    # puede bajar es solo la KL. Reportar la entropia cruzada cruda hace ilegible
+    # la curva, porque su suelo se mueve cuando cambia q; la KL tiene un cero con
+    # significado ("el actor reproduce lo que dice la busqueda").
+    entropy = np.zeros(batch, dtype=np.float64)
+    for b in range(batch):
+        acc = 0.0
+        for a in range(NUM_ACTIONS):
+            if q[b, a] > 0.0:
+                acc += q[b, a] * np.log(q[b, a])
+        entropy[b] = -acc
+    kl = per_state - entropy
+    assert (kl > -1e-9).all(), "la KL no puede ser negativa"
+
     # LA comprobacion: las dos formas tienen que dar el mismo numero.
     diff = abs(loss_particles - loss_dense)
     assert diff < 2e-5, (
@@ -134,6 +150,8 @@ for name, batch, num_particles in CASES:
     q.astype(np.float32).tofile(os.path.join(OUT, f"ce_{name}_q.bin"))
     log_pi.astype(np.float32).tofile(os.path.join(OUT, f"ce_{name}_logpi.bin"))
     per_state.astype(np.float32).tofile(os.path.join(OUT, f"ce_{name}_per_state.bin"))
+    entropy.astype(np.float32).tofile(os.path.join(OUT, f"ce_{name}_entropy.bin"))
+    kl.astype(np.float32).tofile(os.path.join(OUT, f"ce_{name}_kl.bin"))
     np.float32(loss_dense).tofile(os.path.join(OUT, f"ce_{name}_loss.bin"))
 
     n_illegal = int((mask == 0).sum())
@@ -142,7 +160,7 @@ for name, batch, num_particles in CASES:
                  f"diff_particles_vs_dense {diff:.3e}")
     print(f"  {name:6} B={batch:2} N={num_particles:3}  "
           f"loss={loss_dense:.6f}  |particulas-densa|={diff:.2e}  "
-          f"ilegales={n_illegal}")
+          f"ilegales={n_illegal}  H(q)={entropy.mean():.4f}  KL={kl.mean():.4f}")
 
 with open(os.path.join(OUT, "ce_loss.txt"), "w") as f:
     f.write(f"num_actions {NUM_ACTIONS}\n")
@@ -153,6 +171,8 @@ with open(os.path.join(OUT, "ce_loss.txt"), "w") as f:
     f.write("ce_<caso>_q.bin         float32 B x 9  (la q agregada, suma 1)\n")
     f.write("ce_<caso>_logpi.bin     float32 B x 9  (log_softmax; -inf en ilegales)\n")
     f.write("ce_<caso>_per_state.bin float32 B     (la perdida de cada estado)\n")
+    f.write("ce_<caso>_entropy.bin   float32 B     (H(q), el suelo de la perdida)\n")
+    f.write("ce_<caso>_kl.bin        float32 B     (KL(q||pi) = perdida - H(q))\n")
     f.write("ce_<caso>_loss.bin      float32 1     (la media sobre el batch)\n")
     f.write("\n")
     f.write("La forma de particulas se calcula con compute_cross_entropy_loss de\n")
