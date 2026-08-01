@@ -13,12 +13,14 @@ que tapar la casilla equivocada cambia la distribucion de forma detectable.
 """
 
 from std.gpu.host import DeviceContext
+from std.math import exp
 
 from ops.buffers import zero_buffer
 from ops.common import dtype, idx_dtype
 from envs.tictactoe import (NUM_ACTIONS, NUM_CELLS, STATE_DIM, OBS_DIM, NEG_INF,
                             TPB_TTT, ttt_encode_obs_kernel)
-from networks.actor import Actor, actor_logits, actor_probs, zero_actor_params
+from networks.actor import (Actor, actor_logits, actor_probs,
+                            actor_log_probs, zero_actor_params)
 from tests.golden_io import read_f32
 from tests.helpers import upload, download, write_into, filled, assert_close
 
@@ -269,6 +271,81 @@ def test_mask_comes_from_the_state(ctx: DeviceContext) raises:
     print("PASS la mascara sale del estado y coincide con las casillas vacias")
 
 
+def test_forward_log_is_consistent_with_forward(ctx: DeviceContext) raises:
+    """`forward_log` da log de lo que da `forward`, y no NaN en las ilegales.
+
+    Este camino se anadio para el M-step (la entropia cruzada trabaja en
+    log-espacio) y hasta ahora no tenia prueba: codigo nuevo sin cobertura, que es
+    justo lo que este proyecto se ha propuesto no hacer.
+
+    Se comprueban dos cosas distintas. Que exp(log pi) reproduce pi en las casillas
+    legales -- si el log-softmax usara otro denominador que el softmax, aqui se
+    veria. Y que en las ilegales sale un valor muy negativo y FINITO, no un -inf ni
+    un NaN: la perdida se salta esos terminos, pero un NaN en el buffer se
+    propagaria igual al primer gradiente que lo toque.
+    """
+    actor = load_actor(ctx, 64)
+    boards = List[Scalar[dtype]]()
+    for b in board9(1,0,-1, 0,1,0, 0,0,0): boards.append(b)
+    for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
+    for b in board9(1,1,-1, -1,-1,1, 1,-1,0): boards.append(b)
+    n = 3
+    state = upload[dtype](ctx, boards)
+    obs = zero_buffer[dtype](ctx, n * OBS_DIM)
+    ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
+        obs.unsafe_ptr(), state.unsafe_ptr(), n, grid_dim=1, block_dim=TPB_TTT)
+    ctx.synchronize()
+
+    actor.forward(ctx, state, obs, n)
+    ctx.synchronize()
+    p = download[dtype](actor.probs, n * NUM_ACTIONS)
+
+    actor.forward_log(ctx, state, obs, n)
+    ctx.synchronize()
+    lp = download[dtype](actor.log_probs, n * NUM_ACTIONS)
+
+    for e in range(n):
+        for c in range(NUM_ACTIONS):
+            i = e * NUM_ACTIONS + c
+            if lp[i] != lp[i]:
+                raise Error("log pi es NaN en el tablero ", e, " casilla ", c)
+            if boards[e * NUM_CELLS + c] != Scalar[dtype](0):
+                if lp[i] > Scalar[dtype](-1e30):
+                    raise Error("la casilla ocupada ", c, " del tablero ", e,
+                                " deberia tener log pi muy negativo, y vale ",
+                                lp[i])
+            else:
+                assert_close(exp(lp[i]), p[i], Scalar[dtype](1e-5),
+                             String("exp(log pi) vs pi en ", e, ",", c))
+    print("PASS forward_log coincide con log(forward) y no produce NaN")
+
+
+def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
+    """Pedir mas tableros de los reservados da error, no corrupcion silenciosa.
+
+    Los buffers del actor se dimensionan en el constructor. Sin la comprobacion,
+    una llamada con m mayor escribiria fuera y el sintoma saldria mucho despues,
+    en otro buffer y sin relacion aparente con la causa. Es la clase de fallo que
+    mas caro sale de depurar, y evitarlo cuesta una comparacion en host.
+    """
+    small = Actor(ctx, 2, 32)
+    state = zero_buffer[dtype](ctx, 8 * STATE_DIM)
+    obs = zero_buffer[dtype](ctx, 8 * OBS_DIM)
+
+    failed = False
+    try:
+        small.forward(ctx, state, obs, 8)
+    except:
+        failed = True
+    if not failed:
+        raise Error("deberia rechazar 8 tableros con sitio para 2")
+
+    # Y con los que si caben, funciona.
+    small.forward(ctx, state, obs, 2)
+    ctx.synchronize()
+    print("PASS el actor rechaza mas tableros de los reservados")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_actor_matches_golden(ctx)
@@ -276,3 +353,5 @@ def main() raises:
         test_masking_changes_the_ranking(ctx)
         test_full_board_does_not_produce_nan(ctx)
         test_mask_comes_from_the_state(ctx)
+        test_forward_log_is_consistent_with_forward(ctx)
+        test_rejects_more_boards_than_reserved(ctx)

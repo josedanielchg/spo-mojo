@@ -27,7 +27,7 @@ from std.gpu.host import DeviceContext, DeviceBuffer
 
 from ops.buffers import zero_buffer
 from ops.common import dtype, GlobalF32
-from ops.softmax import softmax_rows
+from ops.softmax import softmax_rows, log_softmax_rows
 from envs.tictactoe import NUM_ACTIONS, NEG_INF, OBS_DIM, ttt_legal_mask_kernel
 from networks.mlp import (CriticParams, CriticCache, critic_forward,
                           zero_critic_params)
@@ -102,6 +102,25 @@ def actor_probs(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
         grid_dim=m, block_dim=TPB_ACTOR)
 
 
+def actor_log_probs(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
+                    obs: DeviceBuffer[dtype], mask: DeviceBuffer[dtype],
+                    log_probs_out: DeviceBuffer[dtype], m: Int) raises:
+    """log pi(a|s) para m tableros. Es lo que come la perdida del M-step.
+
+    No se calcula como log(actor_probs): un logit muy bajo desborda el softmax a 0
+    y su log seria -inf aunque el valor exacto fuera representable. La entropia
+    cruzada pesa justo los terminos pequenos, asi que se calcula el log-softmax
+    directo (ver `log_softmax_rows`).
+
+    En las casillas ilegales sale un finito muy negativo (NEG_INF sin mover). El
+    kernel de la perdida se salta esos terminos porque su q vale 0.
+    """
+    actor_logits(ctx, params, cache, obs, mask, m)
+    ctx.enqueue_function[log_softmax_rows[TPB_ACTOR], log_softmax_rows[TPB_ACTOR]](
+        log_probs_out.unsafe_ptr(), cache.value.unsafe_ptr(), params.out_dim,
+        grid_dim=m, block_dim=TPB_ACTOR)
+
+
 struct Actor(Movable):
     """El actor con sus buffers, listo para usarse desde la busqueda o el learner.
 
@@ -116,7 +135,12 @@ struct Actor(Movable):
     """[max_batch, NUM_ACTIONS] 1 legal, 0 ocupada."""
     var probs: DeviceBuffer[dtype]
     """[max_batch, NUM_ACTIONS] la politica, tras el softmax enmascarado."""
+    var log_probs: DeviceBuffer[dtype]
+    """[max_batch, NUM_ACTIONS] log pi, para la perdida del M-step."""
     var hidden: Int
+    var max_batch: Int
+    """Cuantos tableros caben. Pedir mas escribiria fuera de los buffers, asi que
+    los metodos lo comprueban en vez de corromper memoria en silencio."""
 
     def __init__(out self, ctx: DeviceContext, max_batch: Int,
                  hidden: Int) raises:
@@ -124,12 +148,26 @@ struct Actor(Movable):
         self.cache = ActorCache(ctx, max_batch, hidden, NUM_ACTIONS)
         self.mask = zero_buffer[dtype](ctx, max_batch * NUM_ACTIONS)
         self.probs = zero_buffer[dtype](ctx, max_batch * NUM_ACTIONS)
+        self.log_probs = zero_buffer[dtype](ctx, max_batch * NUM_ACTIONS)
         self.hidden = hidden
+        self.max_batch = max_batch
+
+    def _check(self, m: Int) raises:
+        """Un error ruidoso en vez de una escritura fuera de rango.
+
+        Sin esto, pedir mas tableros de los reservados pisaria memoria ajena y el
+        sintoma aparecerian mucho despues, en otro buffer. Cuesta una comparacion
+        en host por llamada.
+        """
+        if m > self.max_batch:
+            raise Error("el actor se reservo para ", self.max_batch,
+                        " tableros y se le piden ", m)
 
     def mask_from_state(self, ctx: DeviceContext, state: DeviceBuffer[dtype],
                         m: Int) raises:
         """Rellena la mascara leyendo el tablero. La legalidad NO se pasa por
         fuera: se deriva del estado, que es la unica fuente de verdad."""
+        self._check(m)
         ctx.enqueue_function[ttt_legal_mask_kernel, ttt_legal_mask_kernel](
             self.mask.unsafe_ptr(), state.unsafe_ptr(), m,
             grid_dim=(m + TPB_ACTOR - 1) // TPB_ACTOR, block_dim=TPB_ACTOR)
@@ -142,5 +180,14 @@ struct Actor(Movable):
         `ttt_encode_obs_kernel`); el actor no la calcula para no duplicar esa
         conversion, que ya vive en el entorno.
         """
+        self._check(m)
         self.mask_from_state(ctx, state, m)
         actor_probs(ctx, self.params, self.cache, obs, self.mask, self.probs, m)
+
+    def forward_log(self, ctx: DeviceContext, state: DeviceBuffer[dtype],
+                    obs: DeviceBuffer[dtype], m: Int) raises:
+        """Del tablero a log pi, que es lo que necesita el M-step."""
+        self._check(m)
+        self.mask_from_state(ctx, state, m)
+        actor_log_probs(ctx, self.params, self.cache, obs, self.mask,
+                        self.log_probs, m)

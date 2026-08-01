@@ -1,0 +1,16 @@
+num_actions 9
+neg_inf np.float32(-3.4028235e+38)
+casos: small mid big multiblock
+ce_<caso>_logits.bin    float32 B x 9  (ya enmascarados con NEG_INF)
+ce_<caso>_mask.bin      float32 B x 9  (1 legal, 0 ocupada)
+ce_<caso>_q.bin         float32 B x 9  (la q agregada, suma 1)
+ce_<caso>_logpi.bin     float32 B x 9  (log_softmax; -inf en ilegales)
+ce_<caso>_per_state.bin float32 B     (la perdida de cada estado)
+ce_<caso>_loss.bin      float32 1     (la media sobre el batch)
+
+La forma de particulas se calcula con compute_cross_entropy_loss de
+Stoix (importada) y coincide con la densa; ver la columna diff.
+small batch 3 particles 16 loss 2.00388050 illegal_cells 9 diff_particles_vs_dense 1.499e-09
+mid batch 7 particles 64 loss 2.33122536 illegal_cells 13 diff_particles_vs_dense 3.876e-08
+big batch 32 particles 512 loss 1.89128131 illegal_cells 113 diff_particles_vs_dense 5.376e-08
+multiblock batch 70 particles 64 loss 1.92101482 illegal_cells 256 diff_particles_vs_dense 8.436e-08

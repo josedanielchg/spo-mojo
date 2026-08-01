@@ -94,3 +94,39 @@ def logsumexp_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int
 
     if tid == 0:
         out_ptr[row] = row_max + log(row_sum)
+
+
+def log_softmax_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32,
+                               row_size: Int):
+    """out = log(softmax(a)) por filas, calculado sin pasar por el softmax.
+
+    Identidad: log softmax(a)[i] = a[i] - (m + log(SUM exp(a - m))), con m el
+    maximo de la fila. Es el mismo denominador que `logsumexp_rows`.
+
+    Por que no `log(softmax(a))` y ya: el softmax de un logit muy bajo desborda a
+    0 y su log seria -inf aunque el valor exacto fuera perfectamente
+    representable (-40, pongamos). Calcularlo directo conserva esos valores, que
+    es justo lo que necesita una entropia cruzada: los terminos con probabilidad
+    pequena son los que mas pesan en el log.
+
+    En las casillas ENMASCARADAS la entrada es NEG_INF (el float32 finito mas
+    negativo) y la salida se queda ahi: restarle un denominador de orden 1 no la
+    mueve, porque a esa magnitud el ULP es ~1e31. Sale un valor finito y muy
+    negativo, no un -inf, que es lo que conviene para no propagar NaN.
+    """
+    debug_assert(Int(block_dim.x) == TPB,
+                 "log_softmax_rows: block_dim tiene que ser TPB")
+
+    shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
+    tid = Int(thread_idx.x)
+    row = Int(block_idx.x)
+    base = row * row_size
+
+    row_max = _row_max[TPB](shared, a_ptr, base, row_size, tid)
+    row_sum = _row_sum_exp[TPB](shared, a_ptr, base, row_size, tid, row_max)
+    log_denom = row_max + log(row_sum)
+
+    i = tid
+    while i < row_size:
+        out_ptr[base + i] = a_ptr[base + i] - log_denom
+        i += TPB
