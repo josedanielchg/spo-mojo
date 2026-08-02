@@ -12,7 +12,6 @@ para poder poner los dos ficheros uno al lado del otro y comparar.
 from ops.common import dtype
 
 
-@fieldwise_init
 struct SPOConfig(Copyable, Movable):
     """Los hiperparametros de la busqueda. Valores por defecto = ff_spo.yaml."""
 
@@ -42,6 +41,39 @@ struct SPOConfig(Copyable, Movable):
             lambda bajo = ventaja más basada en pasos cercanos
             lambda alto = considera más profundamente la trayectoria completa
     """
+
+    var dirichlet_alpha: Scalar[dtype]
+    """Concentracion del ruido de Dirichlet en la raiz. Stoix:
+    `root_exploration_dirichlet_alpha = 1.0`. Solo esta implementado alpha = 1
+    (Dirichlet simetrica con alpha=1 es la uniforme sobre el simplex, que se
+    muestrea normalizando exponenciales); otro valor pediria un muestreador Gamma.
+    Como el valor por defecto de Stoix ES 1.0, no hace falta mas."""
+
+    var dirichlet_fraction: Scalar[dtype]
+    """Cuanto ruido se mezcla. Stoix:
+    `root_exploration_dirichlet_fraction = 0.0`, o sea APAGADO por defecto. Con 0
+    la busqueda es exactamente la de antes."""
+
+    def __init__(out self, num_envs: Int, num_particles: Int, num_actions: Int,
+                 state_dim: Int, search_depth: Int, resample_period: Int,
+                 temperature: Scalar[dtype], search_gamma: Scalar[dtype],
+                 search_gae_lambda: Scalar[dtype],
+                 dirichlet_alpha: Scalar[dtype] = 1.0,
+                 dirichlet_fraction: Scalar[dtype] = 0.0):
+        # Init explicito y no `@fieldwise_init` para poder dar valores por defecto
+        # a los dos campos nuevos: asi las decenas de sitios que ya construyen
+        # SPOConfig siguen compilando sin tocarlos.
+        self.num_envs = num_envs
+        self.num_particles = num_particles
+        self.num_actions = num_actions
+        self.state_dim = state_dim
+        self.search_depth = search_depth
+        self.resample_period = resample_period
+        self.temperature = temperature
+        self.search_gamma = search_gamma
+        self.search_gae_lambda = search_gae_lambda
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_fraction = dirichlet_fraction
 
     def num_search_particles(self) -> Int:
         """P = envs * particulas. Es el tamano de casi todos los buffers."""

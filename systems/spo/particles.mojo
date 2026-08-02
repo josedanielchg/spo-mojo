@@ -216,6 +216,12 @@ struct SearchWorkspace(Movable):
     del rival aleatorio en TTT). Uno por particula, se rellena de nuevo en cada
     profundidad desde su propio stream. Un modelo determinista los ignora."""
 
+    var u_noise: DeviceBuffer[dtype]
+    """[num_envs, num_actions] uniformes del ruido de Dirichlet en la raiz. Va en
+    su propio buffer para que el ruido no comparta secuencia con el muestreo de
+    acciones: si la compartieran, la exploracion que el ruido intenta anadir
+    estaria correlacionada con lo que ya se muestreo."""
+
     var u_resample: DeviceBuffer[dtype]
     """[P] uniformes del resampling, en un buffer aparte para que el muestreo de
     acciones y el de resampling no compartan secuencia."""
@@ -230,4 +236,5 @@ struct SearchWorkspace(Movable):
         self.root_value = zero_buffer[dtype](ctx, cfg.num_envs)
         self.u_action = zero_buffer[dtype](ctx, p)
         self.u_step = zero_buffer[dtype](ctx, p)
+        self.u_noise = zero_buffer[dtype](ctx, cfg.num_envs * cfg.num_actions)
         self.u_resample = zero_buffer[dtype](ctx, p)

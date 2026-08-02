@@ -38,7 +38,7 @@ from systems.spo.particles import (Particles, StepOutputs, SearchScratch,
                                    SPOOutput, SearchWorkspace)
 from systems.spo.readout import readout_weighted
 from systems.spo.resampling import resample
-from systems.spo.root import root_fn, sample_next_actions, snapshot_root_values
+from systems.spo.root import root_fn, add_dirichlet_noise_kernel, sample_next_actions, snapshot_root_values
 from systems.spo.search_model import SearchModel
 from systems.spo.spo_types import SPOConfig
 from systems.spo.weighting import update_particles
@@ -54,6 +54,9 @@ comptime RNG_ACTION = UInt32(100)
 comptime RNG_STEP = UInt32(500)
 comptime RNG_RESAMPLE = UInt32(900)
 comptime RNG_READOUT = UInt32(7777)
+comptime RNG_NOISE = UInt32(3333)
+"""Stream propio del ruido de Dirichlet: no comparte secuencia con
+ninguno de los otros."""
 
 
 def smc_depth_close(ctx: DeviceContext, particles: Particles,
@@ -92,6 +95,21 @@ def search[M: SearchModel](ctx: DeviceContext, ws: SearchWorkspace,
 
     # El modelo evaluado en la raiz, un estado por entorno.
     model.eval_root(ctx, cfg, root_state, ws.root_logits, ws.root_value)
+
+    # Ruido de exploracion en la raiz, en el mismo sitio que Stoix: sobre los
+    # prior_logits, ANTES de sortear las acciones de las particulas. Con
+    # `dirichlet_fraction = 0` (el defecto de Stoix) no se encola nada y la
+    # busqueda es bit a bit la de antes.
+    if cfg.dirichlet_fraction > 0:
+        n_cells = cfg.num_envs * cfg.num_actions
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            ws.u_noise.unsafe_ptr(), seed, RNG_NOISE, n_cells,
+            grid_dim=blocks_for(n_cells), block_dim=TPB)
+        ctx.enqueue_function[add_dirichlet_noise_kernel,
+                             add_dirichlet_noise_kernel](
+            ws.root_logits.unsafe_ptr(), ws.u_noise.unsafe_ptr(), cfg.num_envs,
+            cfg.num_actions, cfg.dirichlet_fraction,
+            grid_dim=blocks_for(cfg.num_envs), block_dim=TPB)
 
     ctx.enqueue_function[fill_uniform, fill_uniform](
         ws.u_action.unsafe_ptr(), seed, RNG_ROOT, p_total,

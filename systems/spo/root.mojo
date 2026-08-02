@@ -109,6 +109,52 @@ def log_prob_of_action_kernel(log_prob_out: GlobalF32, logits: GlobalF32,
     log_prob_out[p] = logits[base + chosen] - (biggest + log(total))
 
 
+def add_dirichlet_noise_kernel(logits: GlobalF32, u: GlobalF32, n_envs: Int,
+                               n_actions: Int, fraction: Scalar[dtype]):
+    """Ruido de exploracion de Dirichlet en la raiz. Un hilo por env.
+
+    Espeja `apply_exploration_noise` de Stoix (`ff_spo.py:119`), que llama a
+    `rlax.add_dirichlet_noise` y hace
+
+        noisy = (1 - fraction) * prior + fraction * noise,   noise ~ Dir(alpha)
+
+    **Un detalle que hay que decir en voz alta:** Stoix le pasa `pi.logits`, o sea
+    que mezcla un vector de LOGITS con un vector de PROBABILIDADES (la Dirichlet
+    suma 1). El docstring de rlax dice "prior policy vector", asi que la semantica
+    no cuadra del todo. Con `fraction = 0` (su valor por defecto) da igual porque
+    el termino desaparece; con fraction > 0 el ruido aporta como mucho `fraction`
+    a un logit. Se reproduce igual porque es lo que hace la referencia, y se anota
+    la rareza en vez de "arreglarla" por nuestra cuenta.
+
+    Con alpha = 1 la Dirichlet simetrica es la uniforme sobre el simplex, y se
+    muestrea normalizando exponenciales: e_i = -ln(u_i), noise = e / SUM(e). Es
+    exacto, sin muestreador Gamma. alpha = 1 es el valor por defecto de Stoix.
+
+    Las casillas tapadas (NEG_INF) siguen tapadas: (1-f)*NEG_INF domina cualquier
+    ruido acotado en [0,1] mientras f < 1.
+    """
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e >= n_envs:
+        return
+    base = e * n_actions
+    total = Scalar[dtype](0)
+    for a in range(n_actions):
+        # -ln(u) con u en (0,1]. Se acota por abajo para no pedir log(0).
+        uu = u[base + a]
+        if uu < Scalar[dtype](1e-7):
+            uu = Scalar[dtype](1e-7)
+        total += -log(uu)
+    if total <= Scalar[dtype](0):
+        return
+    for a in range(n_actions):
+        uu = u[base + a]
+        if uu < Scalar[dtype](1e-7):
+            uu = Scalar[dtype](1e-7)
+        noise = (-log(uu)) / total
+        logits[base + a] = (Scalar[dtype](1) - fraction) * logits[base + a] \
+                           + fraction * noise
+
+
 def root_fn(ctx: DeviceContext, particles: Particles, outputs: StepOutputs,
             cfg: SPOConfig, root_state: DeviceBuffer[dtype],
             root_logits: DeviceBuffer[dtype], root_value: DeviceBuffer[dtype],
