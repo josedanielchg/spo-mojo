@@ -89,6 +89,28 @@ def argmax_action_kernel(action_out: GlobalI32, q: GlobalF32, num_envs: Int,
     action_out[env] = Scalar[idx_dtype](best)
 
 
+def q_histogram(ctx: DeviceContext, particles: Particles, output: SPOOutput,
+                cfg: SPOConfig, q_buf: DeviceBuffer[dtype]) raises:
+    """La q de SPO como array denso [num_envs, num_actions], SIN tocar la accion.
+
+    `readout_weighted` deja q implicita (acciones raiz + pesos, con repeticiones)
+    porque para muestrear basta con eso. El M-step, en cambio, necesita q como
+    vector: es lo que come la entropia cruzada de la ecuacion 11. Agregar por
+    accion es exactamente la reagrupacion `SUMA_n w_n = SUMA_a q(a)` -- no cambia
+    nada, solo la forma.
+
+    No pisa `output.action`: la accion ya la eligio `search` sorteando de q, que es
+    lo que hace SPO. Sirve para entrenar al actor con la q de SPO sin cambiar como
+    se juega.
+    """
+    n_cells = cfg.num_envs * cfg.num_actions
+    ctx.enqueue_function[q_histogram_kernel, q_histogram_kernel](
+        q_buf.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
+        output.sampled_action_weights.unsafe_ptr(), cfg.num_envs,
+        cfg.num_particles, cfg.num_actions,
+        grid_dim=blocks_for(n_cells), block_dim=TPB)
+
+
 def readout_greedy(ctx: DeviceContext, particles: Particles, output: SPOOutput,
                    cfg: SPOConfig, q_buf: DeviceBuffer[dtype]) raises:
     """La MODA de q en vez de una muestra de q. Para EVALUAR, no para entrenar.
@@ -106,13 +128,7 @@ def readout_greedy(ctx: DeviceContext, particles: Particles, output: SPOOutput,
 
     `q_buf` es [num_envs, num_actions].
     """
-    n_cells = cfg.num_envs * cfg.num_actions
-    ctx.enqueue_function[q_histogram_kernel, q_histogram_kernel](
-        q_buf.unsafe_ptr(), particles.root_actions.unsafe_ptr(),
-        output.sampled_action_weights.unsafe_ptr(), cfg.num_envs,
-        cfg.num_particles, cfg.num_actions,
-        grid_dim=blocks_for(n_cells), block_dim=TPB)
-
+    q_histogram(ctx, particles, output, cfg, q_buf)
     ctx.enqueue_function[argmax_action_kernel, argmax_action_kernel](
         output.action.unsafe_ptr(), q_buf.unsafe_ptr(), cfg.num_envs,
         cfg.num_actions, grid_dim=blocks_for(cfg.num_envs), block_dim=TPB)

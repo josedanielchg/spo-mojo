@@ -51,7 +51,7 @@ from networks.optim import (AdamState, adam_step, ema_update, sum_squares,
 from rl_utils.buffer import TrajectoryBuffer
 from rl_utils.multistep import truncated_gae
 from systems.spo.particles import SearchWorkspace
-from systems.spo.readout import readout_expected
+from systems.spo.readout import readout_expected, q_histogram
 from systems.spo.spo_types import SPOConfig
 from systems.spo.search import search
 from tests.helpers import upload, download, write_into
@@ -151,7 +151,7 @@ def init_actor_weights(ctx: DeviceContext, mut actor: ActorLearner,
 
 def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             model: TicTacToe, amodel: TicTacToeActor, use_actor: Bool,
-            ws: SearchWorkspace, state: DeviceBuffer[dtype],
+            spo_readout: Bool, ws: SearchWorkspace, state: DeviceBuffer[dtype],
             obs_buf: DeviceBuffer[dtype], next_obs_buf: DeviceBuffer[dtype],
             q_buf: DeviceBuffer[dtype], logits_buf: DeviceBuffer[dtype],
             reward: DeviceBuffer[dtype], done: DeviceBuffer[idx_dtype],
@@ -210,8 +210,13 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
         ctx.enqueue_function[fill_uniform, fill_uniform](
             u_readout.unsafe_ptr(), seed, RNG_READOUT + stream, NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
-        readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf, q_buf,
-                         u_readout, False)
+        if spo_readout:
+            # La q de SPO tal cual: agregar por accion los pesos por particula.
+            # La accion ejecutada es la que ya eligio `search` (sorteada de q).
+            q_histogram(ctx, ws.particles, ws.output, cfg, q_buf)
+        else:
+            readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf,
+                             q_buf, u_readout, False)
         ctx.synchronize()
 
         obs_now = download[dtype](obs_buf, NUM_ENVS * OBS_DIM)
@@ -555,20 +560,39 @@ struct ArmResult(Copyable, Movable):
     var hq_last: Scalar[dtype]
 
 
-def train_run(ctx: DeviceContext, name: String,
-              use_actor: Bool) raises -> ArmResult:
+struct TrainOutcome(Movable):
+    """Lo que sale de entrenar: las metricas Y el actor, para poder medirlo.
+
+    Va junto porque `ActorLearner` posee `DeviceBuffer` y solo es `Movable`: si el
+    entrenamiento no lo devolviera, habria que reentrenar para medir.
+    """
+    var result: ArmResult
+    var actor: ActorLearner
+
+    def __init__(out self, var result: ArmResult, var actor: ActorLearner):
+        # Init explicito: `@fieldwise_init` no vale porque `ActorLearner` posee
+        # DeviceBuffers y hay que TRANSFERIRLO, no copiarlo.
+        self.result = result^
+        self.actor = actor^
+
+
+def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
+              spo_readout: Bool = False, period: Int = NO_RESAMPLE,
+              gamma_r: Scalar[dtype] = REWARD_GAMMA,
+              penalty: Scalar[dtype] = LOSS_PENALTY,
+              particles: Int = NUM_PARTICLES) raises -> TrainOutcome:
     """Un brazo completo: entrena actor y critico, con o sin prior aprendido.
 
     Los dos brazos comparten semilla, config y numero de pasos. Lo unico que
     cambia es de donde sale el prior de la busqueda, asi que la diferencia se
     puede atribuir a eso y no a otra cosa.
     """
-    cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=NUM_PARTICLES,
+    cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=particles,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
-                    search_depth=SEARCH_DEPTH, resample_period=NO_RESAMPLE,
+                    search_depth=SEARCH_DEPTH, resample_period=period,
                     temperature=TEMPERATURE, search_gamma=1.0,
                     search_gae_lambda=1.0)
-    model = TicTacToe(REWARD_GAMMA, LOSS_PENALTY)
+    model = TicTacToe(gamma_r, penalty)
     ws = SearchWorkspace(ctx, cfg)
 
     n_rows = BATCH * ROLLOUT
@@ -577,7 +601,7 @@ def train_run(ctx: DeviceContext, name: String,
     actor = ActorLearner(ctx, n_rows)
     init_actor_weights(ctx, actor, SEED)
     amodel = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN,
-                            REWARD_GAMMA, LOSS_PENALTY)
+                            gamma_r, penalty)
     amodel.sync_from(ctx, actor.net.params)
     buf = TrajectoryBuffer(BUFFER_CAP, ROLLOUT, OBS_DIM, NUM_ACTIONS)
 
@@ -601,7 +625,8 @@ def train_run(ctx: DeviceContext, name: String,
     last = Report(0, 0, 0, 0, 0, 0)
     last_score = Scalar[dtype](0)
     for round_idx in range(TRAIN_ROUNDS):
-        score = collect(ctx, buf, cfg, model, amodel, use_actor, ws, state,
+        score = collect(ctx, buf, cfg, model, amodel, use_actor, spo_readout,
+                        ws, state,
                         obs_buf, next_obs_buf, q_buf, logits_buf, reward, done,
                         u_rival, u_readout, SEED, round_idx)
         last_score = score
@@ -627,9 +652,10 @@ def train_run(ctx: DeviceContext, name: String,
     floor = measure_q_noise(ctx, cfg, model, amodel, use_actor, ws, state,
                             q_buf, logits_buf, u_readout, 48, SEED)
     print()
-    return ArmResult(name, first.kl, last.kl, floor, first.critic_loss,
-                     last.critic_loss, last_score, first.entropy_q,
-                     last.entropy_q)
+    res = ArmResult(name, first.kl, last.kl, floor, first.critic_loss,
+                    last.critic_loss, last_score, first.entropy_q,
+                    last.entropy_q)
+    return TrainOutcome(res^, actor^)
 
 
 def show(r: ArmResult) raises:
@@ -662,8 +688,8 @@ def main() raises:
                             True)
 
         print("=== comparacion ===")
-        show(uniform)
-        show(learned)
+        show(uniform.result)
+        show(learned.result)
         print()
         print("   El score es contra rival aleatorio, con la accion sorteada de q")
         print("   (no la moda), asi que no es comparable con el 0.9936 de E1.11c,")
