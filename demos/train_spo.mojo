@@ -39,6 +39,7 @@ from envs.tictactoe import (TicTacToe, ttt_reset_kernel, ttt_env_step_kernel,
                             ttt_auto_reset_kernel, ttt_encode_obs_kernel,
                             ttt_legal_mask_from_obs_kernel, NUM_ACTIONS,
                             NUM_CELLS, STATE_DIM, OBS_DIM, TPB_TTT)
+from envs.tictactoe_actor import TicTacToeActor
 from envs.tictactoe_runner import RNG_RIVAL
 from networks.actor import Actor, actor_probs
 from networks.actor_loss import (actor_backward, cross_entropy_rows,
@@ -149,7 +150,8 @@ def init_actor_weights(ctx: DeviceContext, mut actor: ActorLearner,
 
 
 def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
-            model: TicTacToe, ws: SearchWorkspace, state: DeviceBuffer[dtype],
+            model: TicTacToe, amodel: TicTacToeActor, use_actor: Bool,
+            ws: SearchWorkspace, state: DeviceBuffer[dtype],
             obs_buf: DeviceBuffer[dtype], next_obs_buf: DeviceBuffer[dtype],
             q_buf: DeviceBuffer[dtype], logits_buf: DeviceBuffer[dtype],
             reward: DeviceBuffer[dtype], done: DeviceBuffer[idx_dtype],
@@ -192,8 +194,14 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             obs_buf.unsafe_ptr(), state.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
 
-        search[TicTacToe](ctx, ws, cfg, model, state,
-                          seed ^ (stream * 2654435761))
+        # Con `use_actor`, la busqueda parte del prior de la red en vez de
+        # uniforme: es lo que cierra el bucle EM.
+        if use_actor:
+            search[TicTacToeActor](ctx, ws, cfg, amodel, state,
+                                   seed ^ (stream * 2654435761))
+        else:
+            search[TicTacToe](ctx, ws, cfg, model, state,
+                              seed ^ (stream * 2654435761))
         # El readout de la variante deja q densa en q_buf Y elige la accion.
         # Se sortea de q (greedy=False) en vez de coger la moda: ese sorteo ES la
         # exploracion de SPO, y sin el el buffer solo veria una linea de juego.
@@ -298,6 +306,7 @@ def states_from_buffer(buf: TrajectoryBuffer, n_want: Int, seed: UInt32,
 
 
 def measure_q_noise(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
+                    amodel: TicTacToeActor, use_actor: Bool,
                     ws: SearchWorkspace, state: DeviceBuffer[dtype],
                     q_buf: DeviceBuffer[dtype], logits_buf: DeviceBuffer[dtype],
                     u_readout: DeviceBuffer[dtype], reps: Int,
@@ -332,8 +341,16 @@ def measure_q_noise(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
     blocks = (cfg.num_envs + TPB_TTT - 1) // TPB_TTT
 
     for k in range(reps):
-        search[TicTacToe](ctx, ws, cfg, model, state,
-                          seed ^ (UInt32(7919 + k) * 2654435761))
+        # Con EL MISMO modelo que genero los datos de entrenamiento. Medirlo con
+        # otro da un suelo de otra distribucion de q y el numero no es comparable:
+        # me volvio a pasar aqui -- salio un "138% de lo reducible", imposible, y
+        # era esto.
+        if use_actor:
+            search[TicTacToeActor](ctx, ws, cfg, amodel, state,
+                                   seed ^ (UInt32(7919 + k) * 2654435761))
+        else:
+            search[TicTacToe](ctx, ws, cfg, model, state,
+                              seed ^ (UInt32(7919 + k) * 2654435761))
         ctx.enqueue_function[fill_uniform, fill_uniform](
             u_readout.unsafe_ptr(), seed, UInt32(50000 + k), cfg.num_envs,
             grid_dim=blocks, block_dim=TPB_TTT)
@@ -525,102 +542,130 @@ def update(ctx: DeviceContext, mut critic: Critic, mut actor: ActorLearner,
     return Report(c_loss, ce_m, hq_m, kl_m, a_norm, a_scale)
 
 
+@fieldwise_init
+struct ArmResult(Copyable, Movable):
+    var name: String
+    var kl_first: Scalar[dtype]
+    var kl_last: Scalar[dtype]
+    var floor: Scalar[dtype]
+    var critic_first: Scalar[dtype]
+    var critic_last: Scalar[dtype]
+    var score: Scalar[dtype]
+    var hq_first: Scalar[dtype]
+    var hq_last: Scalar[dtype]
+
+
+def train_run(ctx: DeviceContext, name: String,
+              use_actor: Bool) raises -> ArmResult:
+    """Un brazo completo: entrena actor y critico, con o sin prior aprendido.
+
+    Los dos brazos comparten semilla, config y numero de pasos. Lo unico que
+    cambia es de donde sale el prior de la busqueda, asi que la diferencia se
+    puede atribuir a eso y no a otra cosa.
+    """
+    cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=NUM_PARTICLES,
+                    num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
+                    search_depth=SEARCH_DEPTH, resample_period=NO_RESAMPLE,
+                    temperature=TEMPERATURE, search_gamma=1.0,
+                    search_gae_lambda=1.0)
+    model = TicTacToe(REWARD_GAMMA, LOSS_PENALTY)
+    ws = SearchWorkspace(ctx, cfg)
+
+    n_rows = BATCH * ROLLOUT
+    critic = Critic(ctx, n_rows)
+    init_critic_weights(ctx, critic, SEED)
+    actor = ActorLearner(ctx, n_rows)
+    init_actor_weights(ctx, actor, SEED)
+    amodel = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN,
+                            REWARD_GAMMA, LOSS_PENALTY)
+    amodel.sync_from(ctx, actor.net.params)
+    buf = TrajectoryBuffer(BUFFER_CAP, ROLLOUT, OBS_DIM, NUM_ACTIONS)
+
+    blocks = (NUM_ENVS + TPB_TTT - 1) // TPB_TTT
+    state = zero_buffer[dtype](ctx, NUM_ENVS * STATE_DIM)
+    obs_buf = zero_buffer[dtype](ctx, NUM_ENVS * OBS_DIM)
+    next_obs_buf = zero_buffer[dtype](ctx, NUM_ENVS * OBS_DIM)
+    q_buf = zero_buffer[dtype](ctx, NUM_ENVS * NUM_ACTIONS)
+    logits_buf = zero_buffer[dtype](ctx, NUM_ENVS * NUM_ACTIONS)
+    reward = zero_buffer[dtype](ctx, NUM_ENVS)
+    done = zero_buffer[idx_dtype](ctx, NUM_ENVS)
+    u_rival = zero_buffer[dtype](ctx, NUM_ENVS)
+    u_readout = zero_buffer[dtype](ctx, NUM_ENVS)
+    ctx.enqueue_function[ttt_reset_kernel, ttt_reset_kernel](
+        state.unsafe_ptr(), NUM_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+
+    print("--- brazo:", name, "---")
+    print("  ronda   score    critico      H(q)       KL      |g_actor|")
+    step = 0
+    first = Report(0, 0, 0, 0, 0, 0)
+    last = Report(0, 0, 0, 0, 0, 0)
+    last_score = Scalar[dtype](0)
+    for round_idx in range(TRAIN_ROUNDS):
+        score = collect(ctx, buf, cfg, model, amodel, use_actor, ws, state,
+                        obs_buf, next_obs_buf, q_buf, logits_buf, reward, done,
+                        u_rival, u_readout, SEED, round_idx)
+        last_score = score
+        for e in range(UPDATES_PER_ROUND):
+            step += 1
+            r = update(ctx, critic, actor, buf, step, SEED)
+            if round_idx == 0 and e == 0:
+                first = r.copy()
+            last = r.copy()
+        # AQUI se cierra el bucle: la busqueda de la ronda siguiente vera al actor
+        # que se acaba de entrenar. Sin esta linea el M-step entrenaria una red que
+        # nadie usa.
+        if use_actor:
+            amodel.sync_from(ctx, actor.net.params)
+            ctx.synchronize()
+        if round_idx % 6 == 0 or round_idx == TRAIN_ROUNDS - 1:
+            print("   ", round_idx, "  ", score, "  ", last.critic_loss,
+                  "  ", last.entropy_q, "  ", last.kl, "  ", last.actor_gnorm)
+
+    st_vals = states_from_buffer(buf, NUM_ENVS, SEED, UInt32(999))
+    write_into[dtype](state, st_vals)
+    ctx.synchronize()
+    floor = measure_q_noise(ctx, cfg, model, amodel, use_actor, ws, state,
+                            q_buf, logits_buf, u_readout, 48, SEED)
+    print()
+    return ArmResult(name, first.kl, last.kl, floor, first.critic_loss,
+                     last.critic_loss, last_score, first.entropy_q,
+                     last.entropy_q)
+
+
+def show(r: ArmResult) raises:
+    reducible = r.kl_first - r.floor
+    frac = (r.kl_first - r.kl_last) / reducible if reducible > 0 \
+           else Scalar[dtype](0)
+    print("  ", r.name)
+    print("      critico ", r.critic_first, " -> ", r.critic_last)
+    print("      KL ", r.kl_first, " -> ", r.kl_last, "   suelo ", r.floor,
+          "   recorrido ", frac * Scalar[dtype](100), "% de lo reducible")
+    print("      score de la busqueda al final: ", r.score)
+    print("      H(q) ", r.hq_first, " -> ", r.hq_last,
+          "   <- si esto cambia, las KL de los dos brazos miden objetivos "
+          "distintos")
+
+
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== E2.4: actor y critico entrenando a la vez ===")
+        print("=== E2.5: el prior del actor entra en la busqueda ===")
         print("   envs", NUM_ENVS, " rollout", ROLLOUT, " red", HIDDEN,
-              " batch", BATCH, " lr actor", ACTOR_LR, " critico", CRITIC_LR)
+              " batch", BATCH, " lr", ACTOR_LR)
         print("   busqueda: N", NUM_PARTICLES, " profundidad", SEARCH_DEPTH,
               " sin remuestreo, readout de media")
+        print("   Los dos brazos comparten semilla y pasos; lo unico que cambia")
+        print("   es de donde sale el prior.")
         print()
 
-        cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=NUM_PARTICLES,
-                        num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
-                        search_depth=SEARCH_DEPTH,
-                        resample_period=NO_RESAMPLE,
-                        temperature=TEMPERATURE, search_gamma=1.0,
-                        search_gae_lambda=1.0)
-        model = TicTacToe(REWARD_GAMMA, LOSS_PENALTY)
-        ws = SearchWorkspace(ctx, cfg)
+        uniform = train_run(ctx, String("prior UNIFORME (E2.4)"), False)
+        learned = train_run(ctx, String("prior del ACTOR (bucle EM cerrado)"),
+                            True)
 
-        n_rows = BATCH * ROLLOUT
-        critic = Critic(ctx, n_rows)
-        init_critic_weights(ctx, critic, SEED)
-        actor = ActorLearner(ctx, n_rows)
-        init_actor_weights(ctx, actor, SEED)
-        buf = TrajectoryBuffer(BUFFER_CAP, ROLLOUT, OBS_DIM, NUM_ACTIONS)
-
-        blocks = (NUM_ENVS + TPB_TTT - 1) // TPB_TTT
-        state = zero_buffer[dtype](ctx, NUM_ENVS * STATE_DIM)
-        obs_buf = zero_buffer[dtype](ctx, NUM_ENVS * OBS_DIM)
-        next_obs_buf = zero_buffer[dtype](ctx, NUM_ENVS * OBS_DIM)
-        q_buf = zero_buffer[dtype](ctx, NUM_ENVS * NUM_ACTIONS)
-        logits_buf = zero_buffer[dtype](ctx, NUM_ENVS * NUM_ACTIONS)
-        reward = zero_buffer[dtype](ctx, NUM_ENVS)
-        done = zero_buffer[idx_dtype](ctx, NUM_ENVS)
-        u_rival = zero_buffer[dtype](ctx, NUM_ENVS)
-        u_readout = zero_buffer[dtype](ctx, NUM_ENVS)
-        ctx.enqueue_function[ttt_reset_kernel, ttt_reset_kernel](
-            state.unsafe_ptr(), NUM_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
-
-        print("  ronda   score    critico      H(q)       KL      |g_actor|  clip")
-        step = 0
-        first = Report(0, 0, 0, 0, 0, 0)
-        last = Report(0, 0, 0, 0, 0, 0)
-        for round_idx in range(TRAIN_ROUNDS):
-            score = collect(ctx, buf, cfg, model, ws, state, obs_buf,
-                            next_obs_buf, q_buf, logits_buf, reward, done,
-                            u_rival, u_readout, SEED, round_idx)
-            for e in range(UPDATES_PER_ROUND):
-                step += 1
-                r = update(ctx, critic, actor, buf, step, SEED)
-                if round_idx == 0 and e == 0:
-                    first = r.copy()
-                last = r.copy()
-            if round_idx % 5 == 0 or round_idx == TRAIN_ROUNDS - 1:
-                print("   ", round_idx, "  ", score, "  ", last.critic_loss,
-                      "  ", last.entropy_q, "  ", last.kl,
-                      "  ", last.actor_gnorm, "  ", last.actor_clip)
-
+        print("=== comparacion ===")
+        show(uniform)
+        show(learned)
         print()
-        print("--- que ha aprendido cada uno ---")
-        print("   critico: perdida ", first.critic_loss, " -> ",
-              last.critic_loss)
-        print("   actor:   KL(q||pi) ", first.kl, " -> ", last.kl)
-        print("   (la entropia cruzada fue ", first.cross_entropy, " -> ",
-              last.cross_entropy, ", pero de ella H(q) = ", last.entropy_q,
-              " es suelo y no depende del actor)")
-
-        # El suelo, medido sobre los MISMOS estados del buffer.
-        st_vals = states_from_buffer(buf, NUM_ENVS, SEED, UInt32(999))
-        write_into[dtype](state, st_vals)
-        ctx.synchronize()
-        floor16 = measure_q_noise(ctx, cfg, model, ws, state, q_buf, logits_buf,
-                                  u_readout, 16, SEED)
-        floor48 = measure_q_noise(ctx, cfg, model, ws, state, q_buf, logits_buf,
-                                  u_readout, 48, SEED)
-        floor = floor48
-        print()
-        print("--- el suelo de la KL ---")
-        print("   ruido de q entre busquedas repetidas de los MISMOS estados:")
-        print("      con 16 repeticiones: ", floor16)
-        print("      con 48 repeticiones: ", floor48,
-              "  <- se usa esta; si las dos se parecen, la medida es estable")
-        print("   Un actor es una funcion determinista del estado, asi que lo")
-        print("   mejor que puede aprender es la MEDIA de las q, y la KL no baja")
-        print("   de ese ruido. El suelo se mide sobre estados sacados del buffer,")
-        print("   que es la distribucion con la que se entreno.")
-        reducible = first.kl - floor
-        done_frac = (first.kl - last.kl) / reducible if reducible > 0 \
-                    else Scalar[dtype](0)
-        print("   KL inicial ", first.kl, " -> final ", last.kl,
-              " , suelo ", floor)
-        print("   O sea que de lo REDUCIBLE (", reducible,
-              ") el actor ha recorrido el ", done_frac * Scalar[dtype](100), "%")
-        if last.kl < floor:
-            print("   (por debajo del suelo: revisar, no deberia poder)")
-        print()
-        print("   La KL es el numero que mira: su cero significa que el actor")
-        print("   reproduce exactamente lo que dice la busqueda. Todavia NO")
-        print("   decide nada -- el prior de la busqueda sigue siendo uniforme.")
-        print("   Eso es E2.5.")
+        print("   El score es contra rival aleatorio, con la accion sorteada de q")
+        print("   (no la moda), asi que no es comparable con el 0.9936 de E1.11c,")
+        print("   que se midio jugando la moda. La medicion buena, con partidas")
+        print("   suficientes y las cuatro celdas del 2x2, es E2.6.")
