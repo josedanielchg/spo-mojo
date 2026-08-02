@@ -13,6 +13,7 @@ from envs.tictactoe import (ttt_read_cells_kernel, ttt_has_won_kernel,
                             ttt_legal_mask_kernel, ttt_apply_kernel,
                             ttt_outcome_kernel, ttt_prior_logits_kernel,
                             ttt_dynamics_kernel, ttt_encode_obs_kernel,
+                            ttt_legal_mask_from_obs_kernel,
                             TicTacToe, default_tictactoe,
                             NUM_CELLS, NUM_ACTIONS, STATE_DIM, OBS_DIM,
                             CELL_EMPTY, CELL_AGENT, CELL_RIVAL, TPB_TTT)
@@ -745,6 +746,63 @@ def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
     print("PASS tres tableros seguidos, cada observacion en su hueco")
 
 
+def test_mask_from_obs_matches_mask_from_state(ctx: DeviceContext) raises:
+    """La mascara sacada de la OBSERVACION coincide con la sacada del tablero.
+
+    El buffer de entrenamiento guarda observaciones (18 floats), no estados (9),
+    asi que el actor necesita derivar la legalidad de ahi. Las dos rutas TIENEN que
+    dar lo mismo: si divergieran, el actor entrenaria con una mascara distinta de
+    la que usa al jugar, y pondria probabilidad sobre casillas ocupadas sin que
+    nada fallara.
+
+    Se prueba con 40 tableros para pasar de un bloque (TPB=32) y con tamano no
+    redondo.
+    """
+    boards = List[Scalar[dtype]]()
+    n = 40
+    for i in range(n):
+        # Tableros variados y deterministas: la casilla c se llena segun i y c.
+        for c in range(NUM_CELLS):
+            v = (i * 7 + c * 3) % 5
+            if v == 0: boards.append(Scalar[dtype](1))
+            elif v == 1: boards.append(Scalar[dtype](-1))
+            else: boards.append(Scalar[dtype](0))
+
+    state = upload[dtype](ctx, boards)
+    obs = zeros[dtype](ctx, n * OBS_DIM)
+    from_state = zeros[dtype](ctx, n * NUM_ACTIONS)
+    from_obs = filled[dtype](ctx, n * NUM_ACTIONS, Scalar[dtype](-1))
+
+    blocks = (n + TPB_TTT - 1) // TPB_TTT
+    ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
+        obs.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.enqueue_function[ttt_legal_mask_kernel, ttt_legal_mask_kernel](
+        from_state.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.enqueue_function[ttt_legal_mask_from_obs_kernel,
+                         ttt_legal_mask_from_obs_kernel](
+        from_obs.unsafe_ptr(), obs.unsafe_ptr(), n,
+        grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.synchronize()
+
+    a = download[dtype](from_state, n * NUM_ACTIONS)
+    b = download[dtype](from_obs, n * NUM_ACTIONS)
+    for i in range(n * NUM_ACTIONS):
+        if a[i] != b[i]:
+            raise Error("la mascara difiere en ", i, ": del estado ", a[i],
+                        " y de la observacion ", b[i])
+        # Y contra el tablero, no solo una contra la otra: si las dos estuvieran
+        # mal igual, compararlas entre si no lo detectaria.
+        want = Scalar[dtype](1) if boards[(i // NUM_ACTIONS) * NUM_CELLS
+                                         + (i % NUM_ACTIONS)] == 0 \
+               else Scalar[dtype](0)
+        if b[i] != want:
+            raise Error("la mascara de la observacion en ", i, " deberia ser ",
+                        want)
+    print("PASS la mascara de la observacion coincide con la del tablero (40 filas)")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_cell_codes(ctx)
@@ -764,3 +822,4 @@ def main() raises:
         test_model_eval_root(ctx)
         test_model_step(ctx)
         test_loss_penalty_separates_losing_from_continuing(ctx)
+        test_mask_from_obs_matches_mask_from_state(ctx)

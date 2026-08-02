@@ -10,6 +10,7 @@ from rl_utils.buffer import TrajectoryBuffer
 
 comptime T_LEN = 4
 comptime OBS_DIM = 3
+comptime N_ACT = 4
 
 
 def seq_obs(value: Int) -> List[Scalar[dtype]]:
@@ -17,6 +18,15 @@ def seq_obs(value: Int) -> List[Scalar[dtype]]:
     out = List[Scalar[dtype]]()
     for i in range(T_LEN * OBS_DIM):
         out.append(Scalar[dtype](value * 100 + i))
+    return out^
+
+
+def q_for(value: Int) -> List[Scalar[dtype]]:
+    """Una q marcada con `value`, para reconocerla al salir. A nivel de modulo:
+    una funcion anidada no puede capturar variables del ambito de fuera."""
+    out = List[Scalar[dtype]]()
+    for i in range(T_LEN * N_ACT):
+        out.append(Scalar[dtype](value * 1000 + i))
     return out^
 
 
@@ -232,6 +242,57 @@ def test_buffer_rejects_bad_input() raises:
     print("PASS el buffer rechaza secuencias mal formadas y el muestreo en vacio")
 
 
+def test_q_roundtrip_and_validation() raises:
+    """La q entra y sale intacta, y una q mal formada se rechaza.
+
+    La q es el objetivo del actor (ecuacion 11). Si se guardara mal, el actor
+    aprenderia de basura y NADA fallaria: la perdida bajaria igual, contra un
+    objetivo equivocado. De ahi que se compruebe el valor exacto y no una
+    tolerancia.
+    """
+    buf = TrajectoryBuffer(3, T_LEN, OBS_DIM, N_ACT)
+
+    for v in range(1, 4):
+        buf.add(seq_obs(v), seq_steps(v), seq_steps(v), seq_steps(v),
+                seq_obs(v + 1000), q_for(v))
+
+    idx = List[Int](); idx.append(2); idx.append(0)
+    got = buf.gather_q(idx)
+    want_v = List[Int](); want_v.append(3); want_v.append(1)
+    span = T_LEN * N_ACT
+    for k in range(2):
+        expected = q_for(want_v[k])
+        for i in range(span):
+            if got[k * span + i] != expected[i]:
+                raise Error("q de la secuencia ", want_v[k], " valor ", i,
+                            ": ", got[k * span + i], " != ", expected[i])
+
+    # Una q con el tamano equivocado se rechaza.
+    short = List[Scalar[dtype]]()
+    for _ in range(span - 1):
+        short.append(Scalar[dtype](0))
+    failed = False
+    try:
+        buf.add(seq_obs(9), seq_steps(9), seq_steps(9), seq_steps(9),
+                seq_obs(9), short)
+    except:
+        failed = True
+    if not failed:
+        raise Error("deberia rechazar una q con menos valores de la cuenta")
+
+    # Y un buffer sin q no deja pedirla.
+    plain = TrajectoryBuffer(2, T_LEN, OBS_DIM)
+    add_marked(plain, 1)
+    failed2 = False
+    try:
+        _ = plain.gather_q(idx)
+    except:
+        failed2 = True
+    if not failed2:
+        raise Error("un buffer creado sin q no deberia dejar pedir gather_q")
+    print("PASS la q del buffer va y vuelve intacta, y valida su tamano")
+
+
 def main() raises:
     test_buffer_fifo_and_wraparound()
     test_buffer_fields_dont_cross()
@@ -239,3 +300,4 @@ def main() raises:
     test_gather_respects_order_and_repeats()
     test_sampling_more_than_stored()
     test_buffer_rejects_bad_input()
+    test_q_roundtrip_and_validation()

@@ -44,19 +44,26 @@ struct TrajectoryBuffer(Movable):
     var done: List[Scalar[dtype]]
     var truncated: List[Scalar[dtype]]
     var bootstrap_obs: List[Scalar[dtype]]
+    var q: List[Scalar[dtype]]
+    """[capacity, t_len, num_actions] la politica mejorada que produjo la busqueda
+    en cada paso. Es el objetivo del actor (ecuacion 11). Con num_actions = 0 no se
+    reserva nada: asi el bucle que solo entrena al critico no paga por esto."""
 
     var capacity: Int
     var t_len: Int
     var obs_dim: Int
+    var num_actions: Int
     var write: Int
     """Donde va la proxima secuencia. Da la vuelta al llegar al final."""
     var count: Int
     """Cuantas secuencias validas hay (se queda en capacity al llenarse)."""
 
-    def __init__(out self, capacity: Int, t_len: Int, obs_dim: Int):
+    def __init__(out self, capacity: Int, t_len: Int, obs_dim: Int,
+                 num_actions: Int = 0):
         self.capacity = capacity
         self.t_len = t_len
         self.obs_dim = obs_dim
+        self.num_actions = num_actions
         self.write = 0
         self.count = 0
 
@@ -74,6 +81,9 @@ struct TrajectoryBuffer(Movable):
             self.reward.append(Scalar[dtype](0))
             self.done.append(Scalar[dtype](0))
             self.truncated.append(Scalar[dtype](0))
+        self.q = List[Scalar[dtype]]()
+        for _ in range(n_step * num_actions):
+            self.q.append(Scalar[dtype](0))
 
     def size(self) -> Int:
         return self.count
@@ -83,14 +93,24 @@ struct TrajectoryBuffer(Movable):
 
     def add(mut self, obs: List[Scalar[dtype]], reward: List[Scalar[dtype]],
             done: List[Scalar[dtype]], truncated: List[Scalar[dtype]],
-            bootstrap_obs: List[Scalar[dtype]]) raises:
-        """Guarda UNA secuencia de t_len pasos. Al llenarse pisa la mas vieja."""
+            bootstrap_obs: List[Scalar[dtype]],
+            q: List[Scalar[dtype]] = List[Scalar[dtype]]()) raises:
+        """Guarda UNA secuencia de t_len pasos. Al llenarse pisa la mas vieja.
+
+        `q` solo hace falta si el buffer se creo con num_actions > 0 (o sea, si se
+        va a entrenar al actor). Se valida el tamano en vez de confiar: meter una q
+        corta escribiria basura en los pasos que faltan y el actor aprenderia de
+        ella sin que nada fallara."""
         if len(reward) != self.t_len or len(done) != self.t_len \
                 or len(truncated) != self.t_len:
             raise Error("la secuencia deberia tener ", self.t_len, " pasos")
         if len(obs) != self.t_len * self.obs_dim \
                 or len(bootstrap_obs) != self.t_len * self.obs_dim:
             raise Error("las observaciones deberian ser t_len * obs_dim")
+        if len(q) != self.t_len * self.num_actions:
+            raise Error("q deberia tener t_len * num_actions = ",
+                        self.t_len * self.num_actions, " valores, y tiene ",
+                        len(q))
 
         slot = self.write
         obs_base = slot * self.t_len * self.obs_dim
@@ -102,6 +122,9 @@ struct TrajectoryBuffer(Movable):
             self.reward[step_base + i] = reward[i]
             self.done[step_base + i] = done[i]
             self.truncated[step_base + i] = truncated[i]
+        q_base = slot * self.t_len * self.num_actions
+        for i in range(self.t_len * self.num_actions):
+            self.q[q_base + i] = q[i]
 
         self.write = (self.write + 1) % self.capacity
         if self.count < self.capacity:
@@ -170,4 +193,19 @@ struct TrajectoryBuffer(Movable):
             base = idx * span
             for i in range(span):
                 out.append(self.bootstrap_obs[base + i])
+        return out^
+
+    def gather_q(self, indices: List[Int]) raises -> List[Scalar[dtype]]:
+        """Las q de las secuencias pedidas, en el orden pedido."""
+        if self.num_actions == 0:
+            raise Error("este buffer se creo sin q (num_actions = 0)")
+        span = self.t_len * self.num_actions
+        out = List[Scalar[dtype]]()
+        for k in range(len(indices)):
+            idx = indices[k]
+            if idx < 0 or idx >= self.count:
+                raise Error("indice fuera de rango: ", idx)
+            base = idx * span
+            for i in range(span):
+                out.append(self.q[base + i])
         return out^

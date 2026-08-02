@@ -495,3 +495,26 @@ struct TicTacToe(SearchModel, Copyable, Movable):
 def default_tictactoe() -> TicTacToe:
     """El modelo de TTT con el descuento por defecto."""
     return TicTacToe(reward_gamma=0.7)
+
+
+def ttt_legal_mask_from_obs_kernel(mask_out: GlobalF32, obs: GlobalF32,
+                                   n: Int):
+    """Mascara de legales leyendo la OBSERVACION en vez del tablero.
+
+    Existe porque el buffer de entrenamiento guarda observaciones (18 floats), no
+    estados (9). Se podria guardar tambien el estado, pero seria duplicar
+    informacion que ya esta ahi: en la codificacion de dos planos una casilla esta
+    libre si y solo si vale 0 en LOS DOS.
+
+    Que la mascara salga siempre del mismo sitio que ve la red importa: si viniera
+    por un canal aparte podria desincronizarse y el actor acabaria poniendo
+    probabilidad sobre fichas ya puestas. Un hilo por fila.
+    """
+    r = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if r >= n:
+        return
+    for c in range(NUM_CELLS):
+        mine = obs[r * OBS_DIM + c]
+        theirs = obs[r * OBS_DIM + NUM_CELLS + c]
+        mask_out[r * NUM_ACTIONS + c] = Scalar[dtype](1) \
+            if (mine == 0 and theirs == 0) else Scalar[dtype](0)
