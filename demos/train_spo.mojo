@@ -585,7 +585,8 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
               penalty: Scalar[dtype] = LOSS_PENALTY,
               particles: Int = NUM_PARTICLES, use_critic: Bool = False,
               depth_disc: Bool = False,
-              dirichlet: Scalar[dtype] = 0) raises -> TrainOutcome:
+              dirichlet: Scalar[dtype] = 0,
+              temp: Scalar[dtype] = TEMPERATURE) raises -> TrainOutcome:
     """Un brazo completo: entrena actor y critico, con o sin prior aprendido.
 
     Los dos brazos comparten semilla, config y numero de pasos. Lo unico que
@@ -595,7 +596,7 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
     cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=particles,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                     search_depth=SEARCH_DEPTH, resample_period=period,
-                    temperature=TEMPERATURE, search_gamma=1.0,
+                    temperature=temp, search_gamma=1.0,
                     search_gae_lambda=1.0, dirichlet_alpha=1.0,
                     dirichlet_fraction=dirichlet)
     model = TicTacToe(gamma_r, penalty)
