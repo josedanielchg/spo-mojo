@@ -493,8 +493,22 @@ struct TicTacToe(SearchModel, Copyable, Movable):
 
 
 def default_tictactoe() -> TicTacToe:
-    """El modelo de TTT con el descuento por defecto."""
-    return TicTacToe(reward_gamma=0.7)
+    """El modelo de TTT **fiel a SPO**: sin descuento por profundidad.
+
+    Antes esto devolvia `reward_gamma = 0.7`, y eso estaba mal como DEFECTO. El
+    0.7 es un apano nuestro de A6 (plegar gamma^d dentro de la recompensa) que
+    Stoix no hace: su `recurrent_fn` pasa la recompensa cruda del entorno
+    (`reward=next_timestep.reward`, ff_spo.py:341). Tenerlo como valor por defecto
+    hacia que nuestra desviacion PARECIERA el metodo.
+
+    Y ademas resulto ser danina: con el actor conectado, gamma_r = 1.0 da 0.62% de
+    derrotas y gamma_r = 0.7 da 2.65%. El apano existia para compensar la falta de
+    politica; cuando la politica llega, estorba.
+
+    Se conserva el parametro para poder reproducir las medidas de A6 y E1.11, pero
+    hay que pasarlo a mano y a la vista.
+    """
+    return TicTacToe(reward_gamma=1.0)
 
 
 def ttt_legal_mask_from_obs_kernel(mask_out: GlobalF32, obs: GlobalF32,
