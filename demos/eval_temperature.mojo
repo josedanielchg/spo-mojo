@@ -113,6 +113,60 @@ def play(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
     return out^
 
 
+def play_g(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
+           temp: Scalar[dtype], gamma_r: Scalar[dtype], steps: Int,
+           greedy: Bool) raises -> List[Int]:
+    """Como `play` pero con gamma_r variable, para el barrido de abajo."""
+    depth_disc = gamma_r < Scalar[dtype](1)
+    cfg = SPOConfig(num_envs=EVAL_ENVS, num_particles=PARTICLES,
+                    num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
+                    search_depth=SEARCH_DEPTH, resample_period=PERIOD,
+                    temperature=temp, search_gamma=1.0, search_gae_lambda=1.0,
+                    dirichlet_alpha=1.0, dirichlet_fraction=NOISE)
+    amodel = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN, gamma_r,
+                            PENALTY, True, depth_disc)
+    amodel.sync_from(ctx, actor.net.params)
+    amodel.sync_critic_from(ctx, critic.online)
+    ws = SearchWorkspace(ctx, cfg)
+    q_buf = zero_buffer[dtype](ctx, EVAL_ENVS * NUM_ACTIONS)
+    blocks = (EVAL_ENVS + TPB_TTT - 1) // TPB_TTT
+    state = zero_buffer[dtype](ctx, EVAL_ENVS * STATE_DIM)
+    reward = zero_buffer[dtype](ctx, EVAL_ENVS)
+    done = zero_buffer[idx_dtype](ctx, EVAL_ENVS)
+    u_rival = zero_buffer[dtype](ctx, EVAL_ENVS)
+    ctx.enqueue_function[ttt_reset_kernel, ttt_reset_kernel](
+        state.unsafe_ptr(), EVAL_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.synchronize()
+    w = 0; d = 0; l = 0
+    for step in range(steps):
+        search[TicTacToeActor](ctx, ws, cfg, amodel, state,
+                               EVAL_SEED ^ (UInt32(step) * 2654435761))
+        if greedy:
+            readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            u_rival.unsafe_ptr(), EVAL_SEED, RNG_RIVAL + UInt32(step),
+            EVAL_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+        ctx.enqueue_function[ttt_env_step_kernel, ttt_env_step_kernel](
+            state.unsafe_ptr(), ws.output.action.unsafe_ptr(),
+            u_rival.unsafe_ptr(), reward.unsafe_ptr(), done.unsafe_ptr(),
+            EVAL_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+        ctx.synchronize()
+        with reward.map_to_host() as rh:
+            with done.map_to_host() as dh:
+                for e in range(EVAL_ENVS):
+                    if Int(dh[e]) != 0:
+                        r = rh[e]
+                        if r > Scalar[dtype](0.75): w += 1
+                        elif r > Scalar[dtype](0.25): d += 1
+                        else: l += 1
+        ctx.enqueue_function[ttt_auto_reset_kernel, ttt_auto_reset_kernel](
+            state.unsafe_ptr(), done.unsafe_ptr(), EVAL_ENVS,
+            grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.synchronize()
+    out = List[Int](); out.append(w); out.append(d); out.append(l)
+    return out^
+
+
 def main() raises:
     with DeviceContext() as ctx:
         print("=== La temperatura: nuestro 0.02 contra el 0.5 de Stoix ===")
@@ -159,6 +213,32 @@ def main() raises:
         print("=== resumen ===")
         for i in range(len(rows)):
             print(rows[i])
+        print()
+        print("=== gamma_r bajo LOS DOS protocolos ===")
+        print("   El veredicto de la auditoria (gamma_r=1.0 mejor que 0.7) se")
+        print("   midio SOLO con la moda. Con juego muestreado la cosa puede")
+        print("   cambiar: gamma_r rompe empates entre acciones que ganan, y esos")
+        print("   empates solo importan si se sortea.")
+        print()
+        gs = List[Float64]()
+        gs.append(1.0); gs.append(0.7)
+        for gi in range(len(gs)):
+            g = Scalar[dtype](gs[gi])
+            rr = train_run(ctx, String("gamma_r=", g), True, True, PERIOD, g,
+                           PENALTY, PARTICLES, True, g < Scalar[dtype](1),
+                           NOISE, Scalar[dtype](0.02))
+            for gg in range(2):
+                greedy = gg == 0
+                res = play_g(ctx, rr.actor, rr.critic, Scalar[dtype](0.02), g,
+                             EVAL_STEPS, greedy)
+                n = res[0] + res[1] + res[2]
+                sc = (Float64(res[0]) + 0.5 * Float64(res[1])) / Float64(n)
+                print("   gamma_r=", g, " ",
+                      "moda      " if greedy else "MUESTREADA",
+                      " pierde ", pct(Float64(res[2]) / Float64(n)),
+                      " IC[", fmt_fixed(wilson_lo(res[2], n) * 100.0, 2), ",",
+                      fmt_fixed(wilson_hi(res[2], n) * 100.0, 2), "]",
+                      " score ", fmt_fixed(sc, 4))
         print()
         print("   La fila MUESTREADA es el protocolo de Stoix (evaluator.py:57).")
         print("   La fila moda es una desviacion NUESTRA del protocolo de medida,")
