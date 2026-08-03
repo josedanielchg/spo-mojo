@@ -1,0 +1,258 @@
+"""Revision de la etapa 2: el critico reconectado y el ruido de Dirichlet.
+
+Salen de dos decisiones tomadas al revisar la etapa:
+
+**1. Reconectar el critico.** V esta en la ecuacion 10 del paper
+
+    A(s_t,a_t) = r_t + V(s_{t+1}) - V(s_t)
+
+y en `_critic_loss_fn` de Stoix. Tenerlo a 0 era una desviacion NUESTRA, no una
+eleccion del metodo. E1.11 midio que no ayudaba, pero lo midio con un critico
+entrenado con datos de un planificador que perdia el 2% y partia de prior uniforme.
+Ahora los datos vienen de un agente mucho mas fuerte que visita otras posiciones,
+asi que aquella medida no aplica y hay que repetirla.
+
+**2. Activar el ruido de Dirichlet en la raiz.** No es una desviacion: Stoix lo
+implementa (`apply_exploration_noise`, `ff_spo.py:119`, via
+`rlax.add_dirichlet_noise`) y solo lo tiene a `fraction = 0.0`. En E2.6 medimos que
+un prior aprendido muy seguro deja acciones legales con muy pocas particulas
+(0.96 por posicion frente a 0.001 con prior uniforme), y el ruido es el mecanismo
+de AlphaZero para exactamente eso.
+
+**Los dos montajes que se comparan:**
+
+  - **SPO literal**: gamma_r = 1.0 (sin nuestro descuento de A6), sin castigo por
+    derrota, con remuestreo, readout de SPO, critico con el bootstrap del contrato
+    (`discount * search_gamma * V`). Es SPO tal cual, y **nunca lo habiamos medido
+    con un critico entrenado de verdad**.
+  - **Variante**: gamma_r = 0.9, castigo 1, sin remuestreo, readout de media,
+    bootstrap descontado por profundidad. Es el montaje de E1.11c, con UNA
+    desviacion declarada.
+
+Cada montaje entrena su propio actor y su propio critico, y se mide el cruce
+{critico si/no} x {Dirichlet 0 / 0.25}. Todas las partidas con la MODA de q.
+"""
+
+from std.gpu.host import DeviceContext, DeviceBuffer
+
+from bench.metrics import fmt_fixed, wilson_lo, wilson_hi
+from ops.buffers import zero_buffer
+from ops.common import dtype, idx_dtype
+from ops.rng import fill_uniform
+from envs.tictactoe import (TicTacToe, ttt_reset_kernel, ttt_env_step_kernel,
+                            ttt_auto_reset_kernel, NUM_ACTIONS, STATE_DIM,
+                            TPB_TTT)
+from envs.tictactoe_actor import TicTacToeActor
+from envs.tictactoe_runner import RNG_RIVAL
+from systems.spo.particles import SearchWorkspace
+from systems.spo.readout import readout_greedy, readout_expected
+from systems.spo.spo_types import SPOConfig
+from systems.spo.search import search
+from demos.train_spo import (train_run, ActorLearner, HIDDEN, SEARCH_DEPTH,
+                             TEMPERATURE, NO_RESAMPLE)
+from demos.train_critic import Critic
+
+comptime EVAL_ENVS = 128
+comptime EVAL_STEPS = 300
+comptime EVAL_SEED = UInt32(20260804)
+comptime EVAL_PARTICLES = 128
+comptime NOISE = Scalar[dtype](0.25)
+
+# SPO literal: sin ninguna de nuestras anadiduras.
+comptime SPO_PERIOD = 3
+comptime SPO_GAMMA = Scalar[dtype](1.0)
+comptime SPO_PENALTY = Scalar[dtype](0.0)
+# La variante de E1.11c.
+comptime VAR_GAMMA = Scalar[dtype](0.9)
+comptime VAR_PENALTY = Scalar[dtype](1.0)
+
+
+@fieldwise_init
+struct Arm(Copyable, Movable):
+    var name: String
+    var wins: Int
+    var draws: Int
+    var losses: Int
+
+    def games(self) -> Int:
+        return self.wins + self.draws + self.losses
+
+    def score(self) -> Float64:
+        n = self.games()
+        return (Float64(self.wins) + 0.5 * Float64(self.draws)) / Float64(n)
+
+
+def pct(x: Float64) -> String:
+    return fmt_fixed(x * 100.0, 2) + "%"
+
+
+def show(a: Arm) raises:
+    n = a.games()
+    print("   ", a.name, " n=", n,
+          " gana ", pct(Float64(a.wins) / Float64(n)),
+          " empata ", pct(Float64(a.draws) / Float64(n)),
+          " PIERDE ", pct(Float64(a.losses) / Float64(n)),
+          " IC[", fmt_fixed(wilson_lo(a.losses, n) * 100.0, 2), ",",
+          fmt_fixed(wilson_hi(a.losses, n) * 100.0, 2), "]",
+          " score ", fmt_fixed(a.score(), 4))
+
+
+def verdict(base: Arm, other: Arm, what: String) raises:
+    n1 = base.games(); n2 = other.games()
+    hi2 = wilson_hi(other.losses, n2); lo1 = wilson_lo(base.losses, n1)
+    lo2 = wilson_lo(other.losses, n2); hi1 = wilson_hi(base.losses, n1)
+    print("      ", what, ": derrotas ",
+          pct(Float64(base.losses) / Float64(n1)), " -> ",
+          pct(Float64(other.losses) / Float64(n2)),
+          "   score ", fmt_fixed(base.score(), 4), " -> ",
+          fmt_fixed(other.score(), 4))
+    if hi2 < lo1:
+        print("          IC disjuntos, por debajo: MEJORA real.")
+    elif lo2 > hi1:
+        print("          IC disjuntos, por encima: EMPEORA de verdad.")
+    else:
+        print("          los IC se solapan: no se afirma diferencia.")
+
+
+def play(ctx: DeviceContext, name: String, actor: ActorLearner,
+         critic: Critic, spo_readout: Bool, use_critic: Bool,
+         noise: Scalar[dtype], steps: Int,
+         use_actor: Bool = True) raises -> Arm:
+    """Juega con o sin prior del actor, con o sin critico, con o sin ruido.
+
+    `use_actor = False` hace falta para la celda de control: sin ella no se puede
+    atribuir al actor la mejora del montaje literal.
+    """
+    period = SPO_PERIOD if spo_readout else NO_RESAMPLE
+    gamma_r = SPO_GAMMA if spo_readout else VAR_GAMMA
+    penalty = SPO_PENALTY if spo_readout else VAR_PENALTY
+    # El bootstrap descontado por profundidad SOLO hace falta si gamma_r < 1: es lo
+    # que pone la recompensa y el valor en la misma escala. Con gamma_r = 1 (SPO
+    # literal) el contrato del SearchModel vale tal cual.
+    depth_disc = gamma_r < Scalar[dtype](1)
+
+    cfg = SPOConfig(num_envs=EVAL_ENVS, num_particles=EVAL_PARTICLES,
+                    num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
+                    search_depth=SEARCH_DEPTH, resample_period=period,
+                    temperature=TEMPERATURE, search_gamma=1.0,
+                    search_gae_lambda=1.0, dirichlet_alpha=1.0,
+                    dirichlet_fraction=noise)
+    amodel = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN, gamma_r,
+                            penalty, use_critic, depth_disc)
+    amodel.sync_from(ctx, actor.net.params)
+    amodel.sync_critic_from(ctx, critic.online)
+    ws = SearchWorkspace(ctx, cfg)
+    q_buf = zero_buffer[dtype](ctx, EVAL_ENVS * NUM_ACTIONS)
+    logits_buf = zero_buffer[dtype](ctx, EVAL_ENVS * NUM_ACTIONS)
+    u_dummy = zero_buffer[dtype](ctx, EVAL_ENVS)
+
+    blocks = (EVAL_ENVS + TPB_TTT - 1) // TPB_TTT
+    state = zero_buffer[dtype](ctx, EVAL_ENVS * STATE_DIM)
+    reward = zero_buffer[dtype](ctx, EVAL_ENVS)
+    done = zero_buffer[idx_dtype](ctx, EVAL_ENVS)
+    u_rival = zero_buffer[dtype](ctx, EVAL_ENVS)
+    ctx.enqueue_function[ttt_reset_kernel, ttt_reset_kernel](
+        state.unsafe_ptr(), EVAL_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.synchronize()
+
+    wins = 0; draws = 0; losses = 0
+    umodel = TicTacToe(gamma_r, penalty)
+    for step in range(steps):
+        sd = EVAL_SEED ^ (UInt32(step) * 2654435761)
+        if use_actor:
+            search[TicTacToeActor](ctx, ws, cfg, amodel, state, sd)
+        else:
+            search[TicTacToe](ctx, ws, cfg, umodel, state, sd)
+        if spo_readout:
+            readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
+        else:
+            readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf,
+                             q_buf, u_dummy, True)
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            u_rival.unsafe_ptr(), EVAL_SEED, RNG_RIVAL + UInt32(step),
+            EVAL_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+        ctx.enqueue_function[ttt_env_step_kernel, ttt_env_step_kernel](
+            state.unsafe_ptr(), ws.output.action.unsafe_ptr(),
+            u_rival.unsafe_ptr(), reward.unsafe_ptr(), done.unsafe_ptr(),
+            EVAL_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+        ctx.synchronize()
+        with reward.map_to_host() as rh:
+            with done.map_to_host() as dh:
+                for e in range(EVAL_ENVS):
+                    if Int(dh[e]) != 0:
+                        r = rh[e]
+                        if r > Scalar[dtype](0.75): wins += 1
+                        elif r > Scalar[dtype](0.25): draws += 1
+                        else: losses += 1
+        ctx.enqueue_function[ttt_auto_reset_kernel, ttt_auto_reset_kernel](
+            state.unsafe_ptr(), done.unsafe_ptr(), EVAL_ENVS,
+            grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.synchronize()
+    return Arm(name, wins, draws, losses)
+
+
+def main() raises:
+    with DeviceContext() as ctx:
+        print("=== Revision: critico reconectado + ruido de Dirichlet ===")
+        print("   ", EVAL_ENVS, "partidas x", EVAL_STEPS, "turnos, moda de q,",
+              " N =", EVAL_PARTICLES)
+        print("   referencias exactas: azar 0.6484 | optimo 0.9974 (pierde 0.00%)")
+        print()
+
+        print("--- entrenamiento: cada montaje con su actor y su critico ---")
+        # El critico entra YA durante el entrenamiento: si la busqueda que genera
+        # los datos no lo usa, la q que aprende el actor no es la del sistema que
+        # despues se mide.
+        spo = train_run(ctx, String("SPO literal"), True, True, SPO_PERIOD,
+                        SPO_GAMMA, SPO_PENALTY, EVAL_PARTICLES, True, False, 0)
+        var_ = train_run(ctx, String("variante E1.11c"), True, False,
+                         NO_RESAMPLE, VAR_GAMMA, VAR_PENALTY, EVAL_PARTICLES,
+                         True, True, 0)
+
+        print("=== 0. la celda de control: SPO literal SIN actor ===")
+        print("    Sin esta celda no se puede atribuir al actor la mejora del")
+        print("    montaje literal, que es la afirmacion mas fuerte del bloque.")
+        base_noactor = play(ctx, String("SPO literal, prior UNIFORME"),
+                            spo.actor, spo.critic, True, False,
+                            Scalar[dtype](0), EVAL_STEPS, False)
+        base_noactor_c = play(ctx, String("  idem, CON critico        "),
+                              spo.actor, spo.critic, True, True,
+                              Scalar[dtype](0), EVAL_STEPS, False)
+        show(base_noactor); show(base_noactor_c)
+        print()
+
+        print("=== 1. SPO literal (gamma_r=1, con remuestreo, readout de SPO) ===")
+        s00 = play(ctx, String("sin critico, sin ruido "), spo.actor, spo.critic,
+                   True, False, Scalar[dtype](0), EVAL_STEPS)
+        s10 = play(ctx, String("CON critico, sin ruido "), spo.actor, spo.critic,
+                   True, True, Scalar[dtype](0), EVAL_STEPS)
+        s01 = play(ctx, String("sin critico, con ruido "), spo.actor, spo.critic,
+                   True, False, NOISE, EVAL_STEPS)
+        s11 = play(ctx, String("CON critico, con ruido "), spo.actor, spo.critic,
+                   True, True, NOISE, EVAL_STEPS)
+        show(s00); show(s10); show(s01); show(s11)
+        print("    veredictos:")
+        verdict(base_noactor, s00, String("anadir el ACTOR  "))
+        verdict(s00, s10, String("anadir el critico"))
+        verdict(s00, s01, String("anadir el ruido  "))
+        verdict(s00, s11, String("los dos          "))
+        print()
+
+        print("=== 2. Variante (gamma_r=0.9, castigo, sin remuestreo, media) ===")
+        v00 = play(ctx, String("sin critico, sin ruido "), var_.actor,
+                   var_.critic, False, False, Scalar[dtype](0), EVAL_STEPS)
+        v10 = play(ctx, String("CON critico, sin ruido "), var_.actor,
+                   var_.critic, False, True, Scalar[dtype](0), EVAL_STEPS)
+        v01 = play(ctx, String("sin critico, con ruido "), var_.actor,
+                   var_.critic, False, False, NOISE, EVAL_STEPS)
+        v11 = play(ctx, String("CON critico, con ruido "), var_.actor,
+                   var_.critic, False, True, NOISE, EVAL_STEPS)
+        show(v00); show(v10); show(v01); show(v11)
+        print("    veredictos:")
+        verdict(v00, v10, String("anadir el critico"))
+        verdict(v00, v01, String("anadir el ruido  "))
+        verdict(v00, v11, String("los dos          "))
+        print()
+        print("   El ruido y el critico son AMBOS parte de SPO (Stoix los tiene")
+        print("   los dos; el ruido con fraction=0 por defecto). Activarlos no")
+        print("   anade ninguna desviacion que defender.")

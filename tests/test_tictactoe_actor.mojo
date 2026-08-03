@@ -20,6 +20,7 @@ from envs.tictactoe import (NUM_ACTIONS, NUM_CELLS, STATE_DIM, OBS_DIM, NEG_INF,
                             CELL_EMPTY)
 from envs.tictactoe_actor import TicTacToeActor
 from networks.actor import zero_actor_params
+from networks.mlp import zero_critic_params
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.spo_types import SPOConfig
 from tests.helpers import (upload, download, write_into, zeros, filled,
@@ -287,6 +288,95 @@ def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
     print("PASS el modelo rechaza mas tableros de los reservados")
 
 
+def test_critic_value_reaches_the_search(ctx: DeviceContext) raises:
+    """Con `use_critic`, V sale de la red y el bootstrap respeta el terminal.
+
+    Es la reconexion del critico, que estaba desconectado por una medida de E1.11
+    hecha en otras condiciones. V esta en la ecuacion 10 del paper y en
+    `_critic_loss_fn` de Stoix, asi que tenerlo a 0 era una desviacion nuestra.
+
+    Truco de siempre: con w1 = w2 = w3 = 0 y b3 = c, la red da V = c para cualquier
+    tablero, asi que el valor esperado se sabe a mano.
+    """
+    num_envs = 2
+    cfg = cfg_for(num_envs, 3)
+    c = Scalar[dtype](0.6)
+    model = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN,
+                           Scalar[dtype](1.0), Scalar[dtype](0),
+                           use_critic=True)
+    src = zero_critic_params(ctx, OBS_DIM, HIDDEN, 1)
+    b3 = List[Scalar[dtype]](); b3.append(c)
+    write_into[dtype](src.b3, b3)
+    ctx.synchronize()
+    model.sync_critic_from(ctx, src)
+    ctx.synchronize()
+
+    boards = List[Scalar[dtype]]()
+    for b in board9(1,0,-1, 0,1,0, 0,0,0): boards.append(b)
+    for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
+    root_state = upload[dtype](ctx, boards)
+    logits = zeros[dtype](ctx, num_envs * NUM_ACTIONS)
+    value = filled[dtype](ctx, num_envs, Scalar[dtype](99))
+
+    model.eval_root(ctx, cfg, root_state, logits, value)
+    ctx.synchronize()
+    got = download[dtype](value, num_envs)
+    for e in range(num_envs):
+        assert_close(got[e], c, TOL, String("V de la raiz del env ", e))
+
+    # Y el bootstrap del step: gamma * V si sigue viva, 0 si acabo.
+    cfg2 = cfg_for(1, 2)
+    m2 = TicTacToeActor(ctx, cfg2.num_search_particles(), HIDDEN,
+                        Scalar[dtype](1.0), Scalar[dtype](0), use_critic=True)
+    m2.sync_critic_from(ctx, src)
+    ctx.synchronize()
+    particles = Particles(ctx, cfg2)
+    outputs = StepOutputs(ctx, cfg2)
+    st = List[Scalar[dtype]]()
+    for b in board9(0,0,0, 0,0,0, 0,0,0): st.append(b)      # sigue viva
+    for b in board9(1,1,0, -1,-1,0, 0,0,0): st.append(b)    # gana con la 2
+    write_into[dtype](particles.state, st)
+    acts = List[Scalar[idx_dtype]]()
+    acts.append(Scalar[idx_dtype](0)); acts.append(Scalar[idx_dtype](2))
+    write_into[idx_dtype](outputs.next_action, acts)
+    us = List[Scalar[dtype]]()
+    us.append(Scalar[dtype](0.1)); us.append(Scalar[dtype](0.1))
+    step_us = upload[dtype](ctx, us)
+    outputs.next_value.enqueue_fill(Scalar[dtype](-7))
+
+    m2.step(ctx, cfg2, particles, outputs, step_us)
+    ctx.synchronize()
+    nv = download[dtype](outputs.next_value, 2)
+    dsc = download[dtype](outputs.discount, 2)
+    assert_close(dsc[1], Scalar[dtype](0), TOL, "la particula 1 deberia acabar")
+    # search_gamma en cfg_for vale 1.0, asi que el bootstrap de la viva es c.
+    assert_close(nv[0], c, TOL, "bootstrap de la particula viva")
+    assert_close(nv[1], Scalar[dtype](0), TOL,
+                 "una particula terminal no arrastra valor futuro")
+
+    # Y sin use_critic, V vuelve a 0: los dos modos coexisten.
+    plain = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN,
+                           Scalar[dtype](1.0))
+    plain.sync_critic_from(ctx, src)
+    plain.eval_root(ctx, cfg, root_state, logits, value)
+    ctx.synchronize()
+    got0 = download[dtype](value, num_envs)
+    for e in range(num_envs):
+        assert_close(got0[e], Scalar[dtype](0), TOL,
+                     String("sin use_critic, V del env ", e, " deberia ser 0"))
+
+    # Forma incompatible: se rechaza.
+    bad = zero_critic_params(ctx, OBS_DIM, HIDDEN, 2)
+    failed = False
+    try:
+        model.sync_critic_from(ctx, bad)
+    except:
+        failed = True
+    if not failed:
+        raise Error("sync_critic_from deberia rechazar otra forma")
+    print("PASS el V del critico llega a la busqueda y respeta el terminal")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_root_prior_comes_from_the_network(ctx)
@@ -294,3 +384,4 @@ def main() raises:
         test_sync_from_brings_the_trained_actor(ctx)
         test_many_particles_multi_block(ctx)
         test_rejects_more_boards_than_reserved(ctx)
+        test_critic_value_reaches_the_search(ctx)

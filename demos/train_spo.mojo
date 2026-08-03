@@ -568,19 +568,24 @@ struct TrainOutcome(Movable):
     """
     var result: ArmResult
     var actor: ActorLearner
+    var critic: Critic
 
-    def __init__(out self, var result: ArmResult, var actor: ActorLearner):
+    def __init__(out self, var result: ArmResult, var actor: ActorLearner,
+                 var critic: Critic):
         # Init explicito: `@fieldwise_init` no vale porque `ActorLearner` posee
         # DeviceBuffers y hay que TRANSFERIRLO, no copiarlo.
         self.result = result^
         self.actor = actor^
+        self.critic = critic^
 
 
 def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
               spo_readout: Bool = False, period: Int = NO_RESAMPLE,
               gamma_r: Scalar[dtype] = REWARD_GAMMA,
               penalty: Scalar[dtype] = LOSS_PENALTY,
-              particles: Int = NUM_PARTICLES) raises -> TrainOutcome:
+              particles: Int = NUM_PARTICLES, use_critic: Bool = False,
+              depth_disc: Bool = False,
+              dirichlet: Scalar[dtype] = 0) raises -> TrainOutcome:
     """Un brazo completo: entrena actor y critico, con o sin prior aprendido.
 
     Los dos brazos comparten semilla, config y numero de pasos. Lo unico que
@@ -591,7 +596,8 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                     search_depth=SEARCH_DEPTH, resample_period=period,
                     temperature=TEMPERATURE, search_gamma=1.0,
-                    search_gae_lambda=1.0)
+                    search_gae_lambda=1.0, dirichlet_alpha=1.0,
+                    dirichlet_fraction=dirichlet)
     model = TicTacToe(gamma_r, penalty)
     ws = SearchWorkspace(ctx, cfg)
 
@@ -601,8 +607,9 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
     actor = ActorLearner(ctx, n_rows)
     init_actor_weights(ctx, actor, SEED)
     amodel = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN,
-                            gamma_r, penalty)
+                            gamma_r, penalty, use_critic, depth_disc)
     amodel.sync_from(ctx, actor.net.params)
+    amodel.sync_critic_from(ctx, critic.online)
     buf = TrajectoryBuffer(BUFFER_CAP, ROLLOUT, OBS_DIM, NUM_ACTIONS)
 
     blocks = (NUM_ENVS + TPB_TTT - 1) // TPB_TTT
@@ -640,7 +647,11 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
         # que se acaba de entrenar. Sin esta linea el M-step entrenaria una red que
         # nadie usa.
         if use_actor:
+            # Las DOS redes se refrescan: el bucle EM cierra sobre el actor, y el
+            # critico tambien tiene que ser el actual o la busqueda evaluaria con
+            # un V de hace 80 pasos de gradiente.
             amodel.sync_from(ctx, actor.net.params)
+            amodel.sync_critic_from(ctx, critic.online)
             ctx.synchronize()
         if round_idx % 6 == 0 or round_idx == TRAIN_ROUNDS - 1:
             print("   ", round_idx, "  ", score, "  ", last.critic_loss,
@@ -655,7 +666,7 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
     res = ArmResult(name, first.kl, last.kl, floor, first.critic_loss,
                     last.critic_loss, last_score, first.entropy_q,
                     last.entropy_q)
-    return TrainOutcome(res^, actor^)
+    return TrainOutcome(res^, actor^, critic^)
 
 
 def show(r: ArmResult) raises:

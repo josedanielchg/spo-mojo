@@ -346,6 +346,65 @@ def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
     print("PASS el actor rechaza mas tableros de los reservados")
 
 
+def test_argmax_of_masked_policy_is_always_legal(ctx: DeviceContext) raises:
+    """El argmax de pi cae SIEMPRE en una casilla libre. Es una invariante crítica.
+
+    Por que crítica: `ttt_apply` **no comprueba legalidad** (lo dice su propio
+    docstring). Si el actor eligiera una casilla ocupada, la jugada
+    **sobrescribiría la ficha del rival** con la suya y el score saldría inflado
+    sin que nada fallara. Todo el resultado de "la red jugando sola" (E2.6) depende
+    de esta invariante, así que va con prueba en vez de con razonamiento.
+
+    El argumento es que el softmax enmascarado da 0 EXACTO a las ocupadas y la fila
+    suma 1, luego alguna libre tiene masa positiva y gana el argmax. Aquí se
+    comprueba sobre 60 tableros variados, incluidos los que dejan una sola casilla
+    libre (el caso más apretado).
+    """
+    n = 60
+    actor = load_actor(ctx, 64)
+    small = Actor(ctx, n, 64)
+    # Los mismos pesos que el actor cargado, para tener una politica no trivial.
+    boards = List[Scalar[dtype]]()
+    for i in range(n):
+        filled_cells = i % 8            # de 0 a 7 casillas ocupadas
+        for c in range(NUM_CELLS):
+            if c < filled_cells:
+                boards.append(Scalar[dtype](1) if (i + c) % 2 == 0
+                              else Scalar[dtype](-1))
+            else:
+                boards.append(Scalar[dtype](0))
+    state = upload[dtype](ctx, boards)
+    obs = zero_buffer[dtype](ctx, n * OBS_DIM)
+    blocks = (n + TPB_TTT - 1) // TPB_TTT
+    ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
+        obs.unsafe_ptr(), state.unsafe_ptr(), n,
+        grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.synchronize()
+
+    small.forward(ctx, state, obs, n)
+    ctx.synchronize()
+    p = download[dtype](small.probs, n * NUM_ACTIONS)
+
+    for e in range(n):
+        best = 0
+        for c in range(1, NUM_ACTIONS):
+            if p[e * NUM_ACTIONS + c] > p[e * NUM_ACTIONS + best]:
+                best = c
+        if boards[e * NUM_CELLS + best] != Scalar[dtype](0):
+            raise Error("el argmax del tablero ", e, " cayo en la casilla ",
+                        best, ", que esta OCUPADA: ttt_apply pisaria la ficha "
+                        "del rival")
+        # Y la masa total sigue en 1: si el softmax hubiera degenerado, el argmax
+        # podria estar eligiendo entre ceros.
+        total = Scalar[dtype](0)
+        for c in range(NUM_ACTIONS):
+            total += p[e * NUM_ACTIONS + c]
+        assert_close(total, Scalar[dtype](1), Scalar[dtype](1e-5),
+                     String("la fila ", e, " deberia sumar 1"))
+    print("PASS el argmax de la politica enmascarada nunca cae en casilla "
+          "ocupada (60 tableros)")
+
+
 def main() raises:
     with DeviceContext() as ctx:
         test_actor_matches_golden(ctx)
@@ -355,3 +414,4 @@ def main() raises:
         test_mask_comes_from_the_state(ctx)
         test_forward_log_is_consistent_with_forward(ctx)
         test_rejects_more_boards_than_reserved(ctx)
+        test_argmax_of_masked_policy_is_always_legal(ctx)

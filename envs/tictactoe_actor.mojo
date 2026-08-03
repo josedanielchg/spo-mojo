@@ -25,11 +25,23 @@ Los pesos son una copia congelada con `sync_from`, igual que en
 en Mojo es un lio, y la copia deja claro en que momento la busqueda empieza a ver
 al actor nuevo.
 
-El valor se queda en 0. No es dejadez: E1.11 midio que el critico no baja las
-derrotas (los intervalos se solapan) y que es indistinguible de una constante, asi
-que el montaje que juega a 0.00% de derrotas es el de V = 0 con el readout
-corregido. Meter el critico aqui añadiria una variable que ya sabemos que no mueve
-nada.
+**El critico es opcional pero por defecto ENTRA**, y eso es una correccion respecto
+a la primera version de este fichero. V esta en la ecuacion 10 del paper
+
+    A(s_t,a_t) = r_t + V(s_{t+1}) - V(s_t)
+
+y en `_critic_loss_fn` de Stoix, asi que tenerlo desconectado era una desviacion
+nuestra, no una eleccion del metodo. E1.11 midio que no ayudaba, pero lo midio con
+un critico entrenado con datos de un PLANIFICADOR que perdia el 2% y partia de
+prior uniforme. Ahora los datos vienen de un agente mucho mas fuerte que visita
+otras posiciones, asi que la medida vieja no aplica y hay que repetirla.
+
+Los dos modos de bootstrap del critico son los de E1.11:
+  - `discount * search_gamma * V(s')`, el contrato literal del SearchModel y de
+    Stoix;
+  - `discount * gamma_r^(d+1) * V(s')`, que hace falta si `reward_gamma` < 1 porque
+    entonces la recompensa lleva gamma_r^d plegado y el valor tiene que estar en la
+    misma escala (ver `bootstrap_depth_kernel`).
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -40,8 +52,10 @@ from ops.copy import copy_kernel
 from envs.tictactoe import (ttt_dynamics_kernel, ttt_encode_obs_kernel,
                             ttt_legal_mask_kernel, NUM_ACTIONS, OBS_DIM,
                             TPB_TTT)
+from envs.tictactoe_critic import bootstrap_kernel, bootstrap_depth_kernel
 from networks.actor import ActorParams, ActorCache, actor_logits, zero_actor_params
-from networks.mlp import CriticParams
+from networks.mlp import (CriticParams, CriticCache, critic_forward,
+                          zero_critic_params)
 from systems.spo.particles import Particles, StepOutputs
 from systems.spo.search_model import SearchModel
 from systems.spo.spo_types import SPOConfig
@@ -63,18 +77,46 @@ struct TicTacToeActor(SearchModel, Movable):
     var hidden: Int
     var max_batch: Int
 
+    var critic: CriticParams
+    """Los pesos del critico, tambien en copia congelada."""
+    var ccache: CriticCache
+    var use_critic: Bool
+    """Si V sale de la red o se queda en 0."""
+    var depth_discounted: Bool
+    """Si el bootstrap lleva gamma_r^(d+1) en vez de solo `search_gamma`. Hace
+    falta cuando reward_gamma < 1; ver `bootstrap_depth_kernel`."""
+
     def __init__(out self, ctx: DeviceContext, max_batch: Int, hidden: Int,
                  reward_gamma: Scalar[dtype],
-                 loss_penalty: Scalar[dtype] = 0) raises:
+                 loss_penalty: Scalar[dtype] = 0,
+                 use_critic: Bool = False,
+                 depth_discounted: Bool = False) raises:
         """`max_batch` tiene que cubrir el uso mayor: num_envs * num_particles."""
         self.reward_gamma = reward_gamma
         self.loss_penalty = loss_penalty
         self.hidden = hidden
         self.max_batch = max_batch
+        self.use_critic = use_critic
+        self.depth_discounted = depth_discounted
         self.params = zero_actor_params(ctx, hidden)
         self.cache = ActorCache(ctx, max_batch, hidden, NUM_ACTIONS)
         self.obs = zero_buffer[dtype](ctx, max_batch * OBS_DIM)
         self.mask = zero_buffer[dtype](ctx, max_batch * NUM_ACTIONS)
+        self.critic = zero_critic_params(ctx, OBS_DIM, hidden, 1)
+        self.ccache = CriticCache(ctx, max_batch, hidden, 1)
+
+    def sync_critic_from(self, ctx: DeviceContext, src: CriticParams) raises:
+        """Trae los pesos del critico que se esta entrenando."""
+        if src.in_dim != OBS_DIM or src.hidden != self.hidden or src.out_dim != 1:
+            raise Error("el critico no tiene la forma del modelo: ", src.in_dim,
+                        "x", src.hidden, "x", src.out_dim)
+        h = self.hidden
+        self._copy(ctx, self.critic.w1, src.w1, OBS_DIM * h)
+        self._copy(ctx, self.critic.b1, src.b1, h)
+        self._copy(ctx, self.critic.w2, src.w2, h * h)
+        self._copy(ctx, self.critic.b2, src.b2, h)
+        self._copy(ctx, self.critic.w3, src.w3, h)
+        self._copy(ctx, self.critic.b3, src.b3, 1)
 
     def sync_from(self, ctx: DeviceContext, src: CriticParams) raises:
         """Trae los pesos del actor que se esta entrenando.
@@ -132,11 +174,20 @@ struct TicTacToeActor(SearchModel, Movable):
                   root_state: DeviceBuffer[dtype],
                   logits_out: DeviceBuffer[dtype],
                   value_out: DeviceBuffer[dtype]) raises:
-        """El prior de la RED en los estados raiz, y V = 0."""
+        """El prior de la RED en los estados raiz, y V del critico (o 0)."""
         self._prior(ctx, root_state, logits_out, cfg.num_envs)
-        # V = 0, como el planificador. Se pisa explicitamente porque el workspace
-        # se reutiliza entre busquedas y podria traer valores viejos (el bug de A6).
-        value_out.enqueue_fill(0)
+        if not self.use_critic:
+            # Se pisa explicitamente porque el workspace se reutiliza entre
+            # busquedas y podria traer valores viejos (el bug de A6).
+            value_out.enqueue_fill(0)
+            return
+        # `_prior` ya dejo la observacion codificada en self.obs, asi que no hace
+        # falta recalcularla.
+        critic_forward(ctx, self.critic, self.ccache, self.obs, cfg.num_envs)
+        n = cfg.num_envs
+        ctx.enqueue_function[copy_kernel[dtype], copy_kernel[dtype]](
+            value_out.unsafe_ptr(), self.ccache.value.unsafe_ptr(), n,
+            grid_dim=(n + 255) // 256, block_dim=256)
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
              outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
@@ -152,3 +203,21 @@ struct TicTacToeActor(SearchModel, Movable):
             self.loss_penalty, grid_dim=blocks, block_dim=TPB_TTT)
 
         self._prior(ctx, particles.state, outputs.action_logits, p_total)
+
+        if self.use_critic:
+            # self.obs ya tiene el estado NUEVO codificado, de `_prior`.
+            critic_forward(ctx, self.critic, self.ccache, self.obs, p_total)
+            if self.depth_discounted:
+                ctx.enqueue_function[bootstrap_depth_kernel,
+                                     bootstrap_depth_kernel](
+                    outputs.next_value.unsafe_ptr(),
+                    outputs.discount.unsafe_ptr(),
+                    self.ccache.value.unsafe_ptr(),
+                    particles.depth.unsafe_ptr(), p_total, self.reward_gamma,
+                    grid_dim=blocks, block_dim=TPB_TTT)
+            else:
+                ctx.enqueue_function[bootstrap_kernel, bootstrap_kernel](
+                    outputs.next_value.unsafe_ptr(),
+                    outputs.discount.unsafe_ptr(),
+                    self.ccache.value.unsafe_ptr(), p_total, cfg.search_gamma,
+                    grid_dim=blocks, block_dim=TPB_TTT)
