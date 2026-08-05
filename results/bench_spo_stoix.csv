@@ -1,0 +1,5 @@
+language,mode,games,iterations,exploration,seed,total_runtime_s,total_moves,mcts_decisions,total_simulations,total_nodes,x_wins,o_wins,draws,simulations_per_second,nodes_per_second,avg_decision_time_s
+jax-gpu,spo_stoix_moda_defaults,7295,16,0.500000,777,9.157930,25600,25600,1638400,0,7194,36,65,178905.052417,0.000000,0.000358
+jax-gpu,spo_stoix_muestreada_defaults,7003,16,0.500000,777,9.094773,25600,25600,1638400,0,6816,87,100,180147.437463,0.000000,0.000355
+jax-gpu,spo_stoix_moda_nuestros,7487,128,0.020000,777,9.395061,25600,25600,19660800,0,7415,0,72,2092674.075027,0.000000,0.000367
+jax-gpu,spo_stoix_muestreada_nuestros,7067,128,0.020000,777,9.321561,25600,25600,19660800,0,6944,46,77,2109174.566801,0.000000,0.000364

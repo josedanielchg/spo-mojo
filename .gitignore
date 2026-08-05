@@ -4,10 +4,15 @@
 __pycache__/
 *.pyc
 
-# salida generada por las demos y los scripts de graficas
-results/
+# salida generada por las demos y los scripts de graficas.
+# `results/*` y no `results/`: con la barra final git ni siquiera entra en el
+# directorio y las excepciones de abajo no se aplicarian.
+results/*
 *.csv
 !tests/golden/**/*.csv
+# El CSV de la comparacion si se versiona: es el resultado que sostiene el rapport,
+# y sin el las cifras no se pueden reproducir ni auditar.
+!results/bench_spo_stoix.csv
 
 # editor cruft
 .vscode/
