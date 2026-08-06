@@ -586,12 +586,19 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
               particles: Int = NUM_PARTICLES, use_critic: Bool = False,
               depth_disc: Bool = False,
               dirichlet: Scalar[dtype] = 0,
-              temp: Scalar[dtype] = TEMPERATURE) raises -> TrainOutcome:
+              temp: Scalar[dtype] = TEMPERATURE,
+              rounds: Int = TRAIN_ROUNDS) raises -> TrainOutcome:
     """Un brazo completo: entrena actor y critico, con o sin prior aprendido.
 
     Los dos brazos comparten semilla, config y numero de pasos. Lo unico que
     cambia es de donde sale el prior de la busqueda, asi que la diferencia se
     puede atribuir a eso y no a otra cosa.
+
+    `rounds` es el presupuesto de DATOS: cada ronda juega ROLLOUT turnos en NUM_ENVS
+    entornos, o sea ROLLOUT*NUM_ENVS pasos de entorno. Es parametro y no constante
+    porque la comparacion del Milestone 4 necesita igualar este presupuesto con el
+    de SPO-Stoix, y el defecto tiene que seguir siendo el de siempre para no mover
+    en silencio lo que miden los demas experimentos.
     """
     cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=particles,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
@@ -632,7 +639,7 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
     first = Report(0, 0, 0, 0, 0, 0)
     last = Report(0, 0, 0, 0, 0, 0)
     last_score = Scalar[dtype](0)
-    for round_idx in range(TRAIN_ROUNDS):
+    for round_idx in range(rounds):
         score = collect(ctx, buf, cfg, model, amodel, use_actor, spo_readout,
                         ws, state,
                         obs_buf, next_obs_buf, q_buf, logits_buf, reward, done,
@@ -654,7 +661,8 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
             amodel.sync_from(ctx, actor.net.params)
             amodel.sync_critic_from(ctx, critic.online)
             ctx.synchronize()
-        if round_idx % 6 == 0 or round_idx == TRAIN_ROUNDS - 1:
+        report_every = rounds // 8 if rounds >= 48 else 6
+        if round_idx % report_every == 0 or round_idx == rounds - 1:
             print("   ", round_idx, "  ", score, "  ", last.critic_loss,
                   "  ", last.entropy_q, "  ", last.kl, "  ", last.actor_gnorm)
 

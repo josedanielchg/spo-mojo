@@ -208,5 +208,24 @@ struct PlannerMetrics(Copyable, Movable):
 
 
 def write_csv(metrics: PlannerMetrics, path: String) raises:
+    """Escribe UNA fila, empezando el fichero de cero."""
+    rows = List[PlannerMetrics]()
+    rows.append(metrics)
+    write_csv_rows(rows, path)
+
+
+def write_csv_rows(rows: List[PlannerMetrics], path: String) raises:
+    """Escribe VARIAS filas de una tanda, con la cabecera delante.
+
+    Una tanda puede necesitar mas de una fila porque el esquema de 17 columnas solo
+    tiene un hueco para el tiempo (`avg_decision_time_s`) y la comparacion del
+    Milestone 4 necesita dos numeros distintos: la latencia de una decision suelta y
+    el coste repartido de un lote. Meterlos en la misma fila obligaria a cambiar el
+    esquema y romperia la concatenacion con el CSV del MCTS, que ya esta escrito.
+    Van como filas separadas, distinguidas por la etiqueta `mode`.
+    """
+    text = String(CSV_HEADER) + "\n"
+    for m in rows:
+        text += m.to_csv_row() + "\n"
     with open(path, "w") as out:
-        out.write(String(CSV_HEADER) + "\n" + metrics.to_csv_row() + "\n")
+        out.write(text)
