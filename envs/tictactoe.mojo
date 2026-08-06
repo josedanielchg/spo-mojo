@@ -331,13 +331,51 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
     next_value_out[p] = Scalar[dtype](0)
 
 
+def ttt_seat_opens_first(e: Int) -> Bool:
+    """Los entornos PARES los abre el agente; los IMPARES los abre el rival.
+
+    El reparto va por indice y no por sorteo. Con un numero par de entornos, la
+    mitad exacta juega de cada lado en cada tanda: no hay varianza de reparto que
+    se sume a la de la medida, y los dos asientos se pueden separar al agregar
+    porque el indice del env dice cual es cual.
+
+    Jugar segundo NO es el mismo problema que jugar primero, y las referencias
+    exactas lo prueban: contra el mismo rival uniforme, el juego que maximiza el
+    score saca 0.9974 abriendo y 0.9624 respondiendo, y sobre todo pierde 0.00%
+    en el primer caso contra 0.42% en el segundo. Respondiendo, maximizar el score
+    EXIGE aceptar derrotas; abriendo, no.
+    """
+    return e % 2 == 0
+
+
 def ttt_reset_kernel(state: GlobalF32, n_envs: Int):
-    """Empieza partida nueva: tablero vacio. El agente (X) siempre mueve primero,
-    asi que no hay nada mas que inicializar. Un hilo por env."""
+    """Empieza partida nueva: tablero vacio, abre el agente. Un hilo por env.
+
+    Variante de asiento fijo, conservada telle quelle: la usan los demos y los
+    tests de las fases anteriores, cuyas cifras se midieron con ella. Para la
+    comparacion final se usa `ttt_reset_alt_kernel`.
+    """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs:
         for c in range(NUM_CELLS):
             state[e * STATE_DIM + c] = CELL_EMPTY
+
+
+def ttt_reset_alt_kernel(state: GlobalF32, u_open: GlobalF32, n_envs: Int):
+    """Empieza partida nueva con el asiento que le toca al env.
+
+    Si abre el rival, juega su casilla aqui mismo. El resto del sistema no cambia
+    en absoluto: `ttt_advance` sigue haciendo "juega el agente, responde el rival",
+    la codificacion de dos planos ya sabe representar un tablero con una ficha
+    rival, y ni la busqueda ni las redes se enteran de nada. Un hilo por env.
+    """
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e < n_envs:
+        for c in range(NUM_CELLS):
+            state[e * STATE_DIM + c] = CELL_EMPTY
+        if not ttt_seat_opens_first(e):
+            cell = ttt_random_legal_cell(state, e, u_open[e])
+            ttt_apply(state, e, cell, CELL_RIVAL)
 
 
 def ttt_env_step_kernel(state: GlobalF32, action: GlobalI32,
@@ -365,11 +403,31 @@ def ttt_auto_reset_kernel(state: GlobalF32, done: GlobalI32, n_envs: Int):
     el resultado de la partida ya esta anotado en sus buffers. Es el auto-reset del
     entorno REAL; dentro de la busqueda no existe (una particula terminal se queda
     quieta y su peso lo congela la mascara terminal). Un hilo por env.
+
+    Variante de asiento fijo. Ver `ttt_auto_reset_alt_kernel`.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs and Int(done[e]) != 0:
         for c in range(NUM_CELLS):
             state[e * STATE_DIM + c] = CELL_EMPTY
+
+
+def ttt_auto_reset_alt_kernel(state: GlobalF32, done: GlobalI32,
+                              u_open: GlobalF32, n_envs: Int):
+    """Auto-reset con alternancia de asiento.
+
+    El asiento del env NO cambia entre partidas: el env 3 responde siempre. Es lo
+    que hace del reparto una estratificacion exacta en vez de un sorteo, y lo que
+    permite separar los dos asientos al agregar: basta con mirar la paridad del
+    indice. Un hilo por env.
+    """
+    e = Int(block_dim.x * block_idx.x + thread_idx.x)
+    if e < n_envs and Int(done[e]) != 0:
+        for c in range(NUM_CELLS):
+            state[e * STATE_DIM + c] = CELL_EMPTY
+        if not ttt_seat_opens_first(e):
+            cell = ttt_random_legal_cell(state, e, u_open[e])
+            ttt_apply(state, e, cell, CELL_RIVAL)
 
 
 def ttt_random_policy_kernel(action_out: GlobalI32, state: GlobalF32,

@@ -27,8 +27,20 @@ from envs.tictactoe import (ttt_reset_kernel, ttt_env_step_kernel,
 # de la busqueda (raiz 0, acciones 100+d, paso 500+d, resampling 900+d, readout
 # 7777), asi las partidas y la planificacion no comparten secuencia ni cuando
 # comparten semilla.
-comptime RNG_POLICY = UInt32(20000)
-comptime RNG_RIVAL = UInt32(30000)
+# Flux de nombres aleatoires au niveau de l'ENVIRONNEMENT. Chacun est decale par
+# un compteur de pas qui, sur un entrainement long, atteint plusieurs dizaines de
+# milliers : avec 16 pas par ronde et 1172 rondes, il monte a 18 752. Les flux
+# doivent donc etre espaces de bien plus que cela, sinon deux d'entre eux finissent
+# par tirer EXACTEMENT les memes nombres.
+#
+# Ce n'est pas hypothetique : espaces de 10 000, `RNG_RIVAL` et `RNG_READOUT` se
+# recouvraient a partir de la ronde 625, et l'adversaire rejouait alors les tirages
+# que la lecture avait deja utilises. C'est la meme faute que celle relevee dans
+# l'implementation de reference -- deux usages independants partageant une source.
+# Un espacement de 10^6 laisse de la marge pour environ cinquante fois plus de
+# rondes que la campagne la plus longue menee ici.
+comptime RNG_POLICY = UInt32(1_000_000)
+comptime RNG_RIVAL = UInt32(2_000_000)
 
 
 @fieldwise_init
