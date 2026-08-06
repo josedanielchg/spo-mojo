@@ -41,8 +41,14 @@ from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
 # Referencias exactas de tres en raya, por recursion sobre todos los estados.
-RANDOM_SCORE = 0.6484
-OPTIMAL_SCORE = 0.9974
+# Referencias exactas por recursion sobre todos los estados alcanzables.
+# El agente abre la mitad de las partidas y responde la otra mitad, y los dos
+# asientos NO son el mismo problema: contra el mismo rival uniforme, el juego que
+# maximiza el score saca 0.9974 abriendo y 0.9624 respondiendo. Y sobre todo,
+# pierde 0.00% de las que abre contra 0.42% de las que responde -- respondiendo,
+# maximizar el score EXIGE aceptar derrotas.
+RANDOM_FIRST, RANDOM_SECOND, RANDOM_MEAN = 0.6484, 0.3516, 0.5000
+OPTIMAL_FIRST, OPTIMAL_SECOND, OPTIMAL_MEAN = 0.9974, 0.9624, 0.9799
 
 CSV_HEADER = [
     "language", "mode", "games", "iterations", "exploration", "seed",
@@ -84,8 +90,16 @@ def _replace_rng(state: Any, keys: jnp.ndarray) -> Any:
     raise ValueError("no encuentro rng_key en el estado")
 
 
-def build(cfg: DictConfig) -> Tuple[Any, ...]:
-    """Monta el entorno, las redes y la busqueda, y carga los pesos entrenados."""
+def build(cfg: DictConfig, untrained: bool = False) -> Tuple[Any, ...]:
+    """Monta el entorno, las redes y la busqueda, y carga los pesos entrenados.
+
+    Con `untrained=True` NO se carga el checkpoint y se juega con los pesos recien
+    inicializados. Sirve para comparar la BUSQUEDA sola contra la de otra
+    implementacion: una red sin entrenar da un prior practicamente uniforme y un
+    critico sin informacion, asi que lo unico que queda trabajando es el SMC. Es la
+    unica forma de barrer los mandos de busqueda y que muevan algo -- con la red
+    entrenada el agente resuelve el tres en raya por si solo y todo satura.
+    """
     from stoix.systems.spo.ff_spo import learner_setup
     from stoix.utils.checkpointing import Checkpointer
     from stoix.utils.make_env import make as make_env
@@ -99,6 +113,9 @@ def build(cfg: DictConfig) -> Tuple[Any, ...]:
     # Los params vienen replicados por dispositivo y por update_batch: se coge el
     # primero de cada eje para tener un juego "plano" con el que jugar.
     params = jax.tree_util.tree_map(lambda x: x[0][0], learner_state.params)
+
+    if untrained:
+        return eval_env, root_fn, search_apply_fn, params
 
     ckpt = Checkpointer(
         model_name=cfg.system.system_name, **cfg.logger.checkpointing.load_args
@@ -146,7 +163,14 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
     step = jax.jit(jax.vmap(eval_env.step))
 
     state, ts = reset(keys)
-    wins = draws = losses = moves = 0
+    # El asiento se deduce del tablero recien reiniciado, sin plumbing extra: nueve
+    # casillas legales significa que abre el agente, ocho que el rival ya jugo.
+    # Hay que recalcularlo tras CADA reinicio, porque el sorteo es por partida.
+    seat = _seat_of(ts)
+    wins = np.zeros(2, dtype=np.int64)
+    draws = np.zeros(2, dtype=np.int64)
+    losses = np.zeros(2, dtype=np.int64)
+    moves = 0
     key = jax.random.PRNGKey(seed + 1)
     reset_counter = num_envs
 
@@ -176,9 +200,11 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
         r = np.asarray(ts.reward)
         done = np.asarray(ts.last())
         moves += num_envs
-        wins += int(((r > 0.75) & done).sum())
-        draws += int((((r > 0.25) & (r < 0.75)) & done).sum())
-        losses += int(((r < 0.25) & done).sum())
+        for k in (0, 1):
+            fin = done & (seat == k)
+            wins[k] += int(((r > 0.75) & fin).sum())
+            draws[k] += int((((r > 0.25) & (r < 0.75)) & fin).sum())
+            losses[k] += int(((r < 0.25) & fin).sum())
 
         # `eval_env` NO lleva auto-reset (los core wrappers van solo en `env`), asi
         # que hay que reiniciar a mano las partidas acabadas. Sin esto se sigue
@@ -194,25 +220,48 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
             fresh_state, fresh_ts = reset(fresh_keys)
             mask = jnp.asarray(done)
             state, ts = _select(mask, fresh_state, state), _select(mask, fresh_ts, ts)
+            # Los envs reiniciados han vuelto a sortear asiento: hay que releerlo.
+            seat = np.where(done, _seat_of(ts), seat)
     jax.block_until_ready(state)
     runtime = time.perf_counter() - start
 
     decisions = num_envs * steps
     particles = int(cfg.system.num_particles)
     depth = int(cfg.system.search_depth)
-    return {
-        "games": wins + draws + losses,
-        "iterations": particles,
-        "exploration": float(cfg.system.temperature.fixed_temperature),
-        "seed": seed,
-        "total_runtime_s": runtime,
-        "total_moves": moves,
-        "mcts_decisions": decisions,
-        "total_simulations": decisions * particles * depth,
-        "x_wins": wins,
-        "o_wins": losses,
-        "draws": draws,
-    }
+    # Una entrada por asiento. El tiempo, las decisiones y los movimientos se
+    # reparten por PARTE DE ENTORNOS del asiento, no por partidas: cada entorno
+    # decide una vez por paso sea cual sea su asiento, mientras que las partidas
+    # donde abre el rival son mas cortas y se terminan mas.
+    out = {}
+    for k, nom in ((0, "1er"), (1, "2e")):
+        n_env = int((seat == k).sum())
+        part = n_env / num_envs if num_envs else 0.0
+        out[nom] = {
+            "games": int(wins[k] + draws[k] + losses[k]),
+            "iterations": particles,
+            "exploration": float(cfg.system.temperature.fixed_temperature),
+            "seed": seed,
+            "total_runtime_s": runtime * part,
+            "total_moves": int(moves * part),
+            "mcts_decisions": int(decisions * part),
+            "total_simulations": int(decisions * part) * particles * depth,
+            "x_wins": int(wins[k]),
+            "o_wins": int(losses[k]),
+            "draws": int(draws[k]),
+        }
+    return out
+
+
+def _seat_of(ts: Any) -> Any:
+    """0 si el agente abre, 1 si responde, por entorno.
+
+    Se lee del numero de casillas legales justo tras el reinicio: nueve libres es
+    un tablero virgen, ocho significa que el rival ya ha abierto. No hace falta
+    propagar ninguna bandera por el arbol de estados -- lo cual importa, porque
+    anadir una capa de estado romperia el broadcast de particulas de la busqueda.
+    """
+    libres = np.asarray(ts.observation.action_mask).sum(axis=-1)
+    return (libres < 9).astype(np.int64)
 
 
 def score_and_se(m: Dict[str, Any]) -> Tuple[float, float]:
@@ -258,14 +307,41 @@ def row(mode: str, m: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def show(mode: str, m: Dict[str, Any]) -> None:
-    n = max(m["games"], 1)
-    score = (m["x_wins"] + 0.5 * m["draws"]) / n
-    print(
-        f"  {mode:22} n={n:6}  gana {100*m['x_wins']/n:6.2f}%"
-        f"  empata {100*m['draws']/n:5.2f}%  pierde {100*m['o_wins']/n:6.2f}%"
-        f"  score {score:.4f}"
+def score_moyen(d: Dict[str, Any]) -> Tuple[float, float]:
+    """Media NO PONDERADA de los dos asientos, y su error estandar.
+
+    Agrupar las partidas de los dos asientos en un solo contador sesgaria el
+    resultado: donde abre el rival, la partida es mas corta y se terminan mas, asi
+    que el promedio agrupado pesa hacia ese lado. Medido en Mojo con el mismo
+    montaje: 12 233 partidas contra 14 801, y una media agrupada de 0.4845 donde
+    la verdad exacta del juego al azar es 0.5000. El sesgo no es ruido y ninguna
+    barra de error lo delataria.
+    """
+    s0, e0 = score_and_se(d["1er"])
+    s1, e1 = score_and_se(d["2e"])
+    return 0.5 * (s0 + s1), 0.5 * (e0 * e0 + e1 * e1) ** 0.5
+
+
+def perte_moyenne(d: Dict[str, Any]) -> float:
+    return 0.5 * sum(
+        100.0 * d[k]["o_wins"] / max(d[k]["games"], 1) for k in ("1er", "2e")
     )
+
+
+def show(mode: str, d: Dict[str, Any]) -> None:
+    """Los dos asientos y su media no ponderada."""
+    trozos = []
+    for k in ("1er", "2e"):
+        m = d[k]
+        n = max(m["games"], 1)
+        trozos.append(
+            f"{k} {(m['x_wins'] + 0.5 * m['draws']) / n:.4f}"
+            f"/{100 * m['o_wins'] / n:.2f}%"
+        )
+    moy, _ = score_moyen(d)
+    n_tot = d["1er"]["games"] + d["2e"]["games"]
+    print(f"  {mode:28} " + "   ".join(trozos)
+          + f"   moy {moy:.4f}/{perte_moyenne(d):.2f}%   n={n_tot}")
 
 
 def main() -> None:
@@ -277,6 +353,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20260805)
     ap.add_argument("--out", default="mojo_spo/results/bench_spo_stoix.csv")
     ap.add_argument("--overrides", nargs="*", default=[])
+    ap.add_argument("--untrained", action="store_true",
+                    help="Juega con pesos sin entrenar: aisla la busqueda.")
     ap.add_argument("--tag", default=None,
                     help="Sufijo para la etiqueta `mode`. Por defecto el uid del "
                          "checkpoint, para que dos configuraciones distintas no se "
@@ -292,7 +370,12 @@ def main() -> None:
             config_name=args.config_name,
             overrides=[
                 f"arch.total_num_envs={args.num_envs}",
-                "logger.checkpointing.load_model=True",
+                # OJO: `learner_setup` carga el checkpoint EL SOLO cuando esto
+                # esta a True (`ff_spo.py:1836`), asi que con `--untrained` hay
+                # que apagarlo aqui. No basta con saltarse el `Checkpointer` de
+                # `build`: los pesos ya vendrian restaurados dentro de
+                # `learner_state.params` y el flag no haria nada.
+                f"logger.checkpointing.load_model={not args.untrained}",
                 f"logger.checkpointing.load_args.checkpoint_uid={args.checkpoint_uid}",
                 *args.overrides,
             ],
@@ -312,23 +395,35 @@ def main() -> None:
           f"{cfg.system.search_depth}  periodo "
           f"{cfg.system.resampling.period}  temperatura "
           f"{'adaptativa' if cfg.system.temperature.adaptive else cfg.system.temperature.fixed_temperature}")
-    print(f"   referencias exactas: azar {RANDOM_SCORE}  optimo {OPTIMAL_SCORE}")
+    print(f"   referencias exactas (1er / 2e / media) :"
+          f" azar {RANDOM_FIRST}/{RANDOM_SECOND}/{RANDOM_MEAN}"
+          f"   optimo {OPTIMAL_FIRST}/{OPTIMAL_SECOND}/{OPTIMAL_MEAN}")
     print()
 
-    eval_env, root_fn, search_apply_fn, params = build(cfg)
+    eval_env, root_fn, search_apply_fn, params = build(cfg, args.untrained)
 
-    # Primero la validacion del bucle: politica aleatoria -> 0.6484 exacto.
+    # Validacion del bucle. Se comprueban los DOS asientos por separado, no solo
+    # la media: intercambiarlos dejaria la media intacta invirtiendo las mitades,
+    # y ese fallo pasaria desapercibido.
     chk = play(cfg, eval_env, root_fn, search_apply_fn, params, args.num_envs,
                args.steps, False, args.seed, random_policy=True)
-    n = max(chk["games"], 1)
-    chk_score = (chk["x_wins"] + 0.5 * chk["draws"]) / n
     show("VALIDACION azar", chk)
-    if abs(chk_score - RANDOM_SCORE) > 0.02:
+    for k, esperado in (("1er", RANDOM_FIRST), ("2e", RANDOM_SECOND)):
+        m = chk[k]
+        nk = max(m["games"], 1)
+        sk = (m["x_wins"] + 0.5 * m["draws"]) / nk
+        if abs(sk - esperado) > 0.03:
+            raise SystemExit(
+                f"\n*** El bucle esta MAL en el asiento {k}: una politica aleatoria "
+                f"deberia dar {esperado} y da {sk:.4f}. No se escribe CSV. ***"
+            )
+    chk_moy, _ = score_moyen(chk)
+    if abs(chk_moy - RANDOM_MEAN) > 0.02:
         raise SystemExit(
-            f"\n*** El bucle de medida esta MAL: una politica aleatoria deberia "
-            f"dar {RANDOM_SCORE} y da {chk_score:.4f}. No se escribe CSV. ***"
+            f"\n*** El bucle esta MAL: la media de los dos asientos deberia dar "
+            f"{RANDOM_MEAN} y da {chk_moy:.4f}. No se escribe CSV. ***"
         )
-    print(f"   (bucle validado: {chk_score:.4f} vs {RANDOM_SCORE} exacto)\n")
+    print(f"   (bucle validado: media {chk_moy:.4f} vs {RANDOM_MEAN} exacto)\n")
 
     tag = args.tag if args.tag is not None else args.checkpoint_uid
     rows = []
@@ -336,20 +431,22 @@ def main() -> None:
         m = play(cfg, eval_env, root_fn, search_apply_fn, params,
                  args.num_envs, args.steps, greedy, args.seed)
         show(mode, m)
-        score, se = score_and_se(m)
+        score, se = score_moyen(m)
 
-        # GUARDA DEL TECHO. Contra un rival uniforme, el juego optimo puntua
-        # exactamente 0.9974 (recursion sobre todos los estados). Superarlo no es un
-        # buen resultado, es la prueba de que el agente tiene informacion que no
-        # deberia tener. Asi se descubrio la fuga de RNG: 0.9996, once sigmas por
-        # encima. Aborta en vez de escribir un numero imposible en el CSV.
-        if score > OPTIMAL_SCORE + 4.0 * se:
-            raise SystemExit(
-                f"\n*** `{mode}` puntua {score:.4f} +- {se:.4f}, por encima del techo "
-                f"exacto {OPTIMAL_SCORE} ({(score - OPTIMAL_SCORE) / max(se, 1e-12):.1f} "
-                f"sigma). Eso es IMPOSIBLE jugando limpio: hay una fuga de "
-                f"informacion. No se escribe CSV. ***"
-            )
+        # GUARDA DEL TECHO, POR ASIENTO. Superar el optimo exacto no es un buen
+        # resultado: es la prueba de que el agente ve algo que no deberia. Asi se
+        # descubrio la fuga de RNG (0.9996 contra 0.9974, once sigmas).
+        # Cada asiento tiene SU techo -- 0.9974 abriendo, 0.9624 respondiendo --
+        # y confundirlos dejaria pasar un imposible por el lado del segundo.
+        for k, techo in (("1er", OPTIMAL_FIRST), ("2e", OPTIMAL_SECOND)):
+            sk, sek = score_and_se(m[k])
+            if sk > techo + 4.0 * sek:
+                raise SystemExit(
+                    f"\n*** `{mode}` puntua {sk:.4f} +- {sek:.4f} en el asiento {k}, "
+                    f"por encima del techo exacto {techo} "
+                    f"({(sk - techo) / max(sek, 1e-12):.1f} sigma). Eso es IMPOSIBLE "
+                    f"jugando limpio: hay una fuga de informacion. No se escribe CSV. ***"
+                )
 
         # Control de la fuga de RNG, ya corregida en `make_root_fn` (`_rekey_particles`).
         # Se vuelve a medir con la comparticion de claves ROTA a mano: si el score
@@ -358,7 +455,7 @@ def main() -> None:
                   args.num_envs, args.steps, greedy, args.seed,
                   break_rng_sharing=True)
         show(mode + " (control sin fuga)", m2)
-        score2, se2 = score_and_se(m2)
+        score2, se2 = score_moyen(m2)
         se_diff = (se * se + se2 * se2) ** 0.5
         sigmas = abs(score - score2) / max(se_diff, 1e-12)
         if sigmas > 4.0:
@@ -369,7 +466,9 @@ def main() -> None:
             )
         print(f"   (control: {score:.4f} vs {score2:.4f}, {sigmas:.1f} sigma "
               f"-> no hay fuga)")
-        rows.append(row(f"{mode}_{tag}", m))
+        # Una fila por asiento. La media se calcula al analizar, no al medir.
+        rows.append(row(f"{mode}_{tag}_1er", m["1er"]))
+        rows.append(row(f"{mode}_{tag}_2e", m["2e"]))
 
     # ACUMULA. El CSV comun del Milestone 4 tiene que sostener las tres patas y
     # varias configuraciones a la vez, asi que se anade al final y la cabecera solo

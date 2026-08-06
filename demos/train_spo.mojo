@@ -35,8 +35,8 @@ from ops.common import dtype, idx_dtype
 from ops.copy import copy_kernel
 from ops.rng import fill_uniform
 from ops.softmax import log_softmax_rows
-from envs.tictactoe import (TicTacToe, ttt_reset_kernel, ttt_env_step_kernel,
-                            ttt_auto_reset_kernel, ttt_encode_obs_kernel,
+from envs.tictactoe import (TicTacToe, ttt_reset_alt_kernel, ttt_env_step_kernel,
+                            ttt_auto_reset_alt_kernel, ttt_encode_obs_kernel,
                             ttt_legal_mask_from_obs_kernel, NUM_ACTIONS,
                             NUM_CELLS, STATE_DIM, OBS_DIM, TPB_TTT)
 from envs.tictactoe_actor import TicTacToeActor
@@ -81,7 +81,11 @@ comptime LOSS_PENALTY = Scalar[dtype](1.0)
 
 # Stream propio para el sorteo de la accion en el readout. RNG_POLICY (20000) y
 # RNG_RIVAL (30000) ya estan tomados; 40000 no colisiona con ninguno.
-comptime RNG_READOUT = UInt32(40000)
+comptime RNG_READOUT = UInt32(3_000_000)
+# Ouverture de l'adversaire quand c'est lui qui commence. Flux separe : il ne doit
+# correler ni avec la politique, ni avec les reponses de l'adversaire en cours de
+# partie, sinon le siege et le jeu seraient lies.
+comptime RNG_OPEN = UInt32(5_000_000)
 
 comptime TRAIN_ROUNDS = 30
 comptime UPDATES_PER_ROUND = 80
@@ -156,7 +160,7 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             q_buf: DeviceBuffer[dtype], logits_buf: DeviceBuffer[dtype],
             reward: DeviceBuffer[dtype], done: DeviceBuffer[idx_dtype],
             u_rival: DeviceBuffer[dtype], u_readout: DeviceBuffer[dtype],
-            seed: UInt32,
+            u_open: DeviceBuffer[dtype], seed: UInt32,
             round_idx: Int) raises -> Scalar[dtype]:
     """Juega ROLLOUT turnos y guarda observaciones, recompensas Y la q.
 
@@ -252,8 +256,11 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
                 finished += 1
                 score_sum += rew_now[e]
 
-        ctx.enqueue_function[ttt_auto_reset_kernel, ttt_auto_reset_kernel](
-            state.unsafe_ptr(), done.unsafe_ptr(), NUM_ENVS,
+        ctx.enqueue_function[fill_uniform, fill_uniform](
+            u_open.unsafe_ptr(), seed, RNG_OPEN + stream, NUM_ENVS,
+            grid_dim=blocks, block_dim=TPB_TTT)
+        ctx.enqueue_function[ttt_auto_reset_alt_kernel, ttt_auto_reset_alt_kernel](
+            state.unsafe_ptr(), done.unsafe_ptr(), u_open.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
 
     # Una secuencia por env.
@@ -587,7 +594,8 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
               depth_disc: Bool = False,
               dirichlet: Scalar[dtype] = 0,
               temp: Scalar[dtype] = TEMPERATURE,
-              rounds: Int = TRAIN_ROUNDS) raises -> TrainOutcome:
+              rounds: Int = TRAIN_ROUNDS,
+              seed: UInt32 = SEED) raises -> TrainOutcome:
     """Un brazo completo: entrena actor y critico, con o sin prior aprendido.
 
     Los dos brazos comparten semilla, config y numero de pasos. Lo unico que
@@ -599,6 +607,12 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
     porque la comparacion del Milestone 4 necesita igualar este presupuesto con el
     de SPO-Stoix, y el defecto tiene que seguir siendo el de siempre para no mover
     en silencio lo que miden los demas experimentos.
+
+    `seed` gobierna TODO el azar del entrenamiento: inicializacion de las dos redes,
+    rollouts, sorteo del readout y muestreo del buffer. Es parametro para poder medir
+    la variabilidad ENTRE SEMILLAS, que es una incertidumbre distinta de la del
+    numero de partidas jugadas: el intervalo de Wilson dice cuantas partidas se
+    jugaron, no cuanto depende el resultado del azar del entrenamiento.
     """
     cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=particles,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
@@ -611,9 +625,9 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
 
     n_rows = BATCH * ROLLOUT
     critic = Critic(ctx, n_rows)
-    init_critic_weights(ctx, critic, SEED)
+    init_critic_weights(ctx, critic, seed)
     actor = ActorLearner(ctx, n_rows)
-    init_actor_weights(ctx, actor, SEED)
+    init_actor_weights(ctx, actor, seed)
     amodel = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN,
                             gamma_r, penalty, use_critic, depth_disc)
     amodel.sync_from(ctx, actor.net.params)
@@ -630,8 +644,17 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
     done = zero_buffer[idx_dtype](ctx, NUM_ENVS)
     u_rival = zero_buffer[dtype](ctx, NUM_ENVS)
     u_readout = zero_buffer[dtype](ctx, NUM_ENVS)
-    ctx.enqueue_function[ttt_reset_kernel, ttt_reset_kernel](
-        state.unsafe_ptr(), NUM_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
+    u_open = zero_buffer[dtype](ctx, NUM_ENVS)
+    # L'agent ouvre dans les environnements d'indice pair, repond dans les impairs.
+    # Il apprend donc les deux sieges, ce qui est indispensable : les mesures
+    # finales l'evaluent dans les deux, et un agent entraine d'un seul cote y
+    # serait juge sur une situation qu'il n'a jamais vue.
+    ctx.enqueue_function[fill_uniform, fill_uniform](
+        u_open.unsafe_ptr(), seed, RNG_OPEN, NUM_ENVS,
+        grid_dim=blocks, block_dim=TPB_TTT)
+    ctx.enqueue_function[ttt_reset_alt_kernel, ttt_reset_alt_kernel](
+        state.unsafe_ptr(), u_open.unsafe_ptr(), NUM_ENVS,
+        grid_dim=blocks, block_dim=TPB_TTT)
 
     print("--- brazo:", name, "---")
     print("  ronda   score    critico      H(q)       KL      |g_actor|")
@@ -643,11 +666,11 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
         score = collect(ctx, buf, cfg, model, amodel, use_actor, spo_readout,
                         ws, state,
                         obs_buf, next_obs_buf, q_buf, logits_buf, reward, done,
-                        u_rival, u_readout, SEED, round_idx)
+                        u_rival, u_readout, u_open, seed, round_idx)
         last_score = score
         for e in range(UPDATES_PER_ROUND):
             step += 1
-            r = update(ctx, critic, actor, buf, step, SEED)
+            r = update(ctx, critic, actor, buf, step, seed)
             if round_idx == 0 and e == 0:
                 first = r.copy()
             last = r.copy()
@@ -666,11 +689,11 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
             print("   ", round_idx, "  ", score, "  ", last.critic_loss,
                   "  ", last.entropy_q, "  ", last.kl, "  ", last.actor_gnorm)
 
-    st_vals = states_from_buffer(buf, NUM_ENVS, SEED, UInt32(999))
+    st_vals = states_from_buffer(buf, NUM_ENVS, seed, UInt32(999))
     write_into[dtype](state, st_vals)
     ctx.synchronize()
     floor = measure_q_noise(ctx, cfg, model, amodel, use_actor, ws, state,
-                            q_buf, logits_buf, u_readout, 48, SEED)
+                            q_buf, logits_buf, u_readout, 48, seed)
     print()
     res = ArmResult(name, first.kl, last.kl, floor, first.critic_loss,
                     last.critic_loss, last_score, first.entropy_q,
