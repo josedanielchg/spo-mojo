@@ -1,30 +1,30 @@
-"""La perdida del M-step: entropia cruzada ponderada (ecuacion 11 del paper).
+"""The M-step loss: weighted cross entropy (equation 11 of the paper).
 
     max_theta  E_{s~mu} [ E_{a~q(.|s)} [ log pi(a|s,theta) ] ]
 
-o sea, minimizar  -SUM_a q(a) log pi(a)  promediado sobre los estados. El paper la
-describe como "projecting the non-parametric policy q back to the space of
-parametrisable policies", igual que hace AlphaZero: la busqueda produce una politica
-mejorada y la red aprende a imitarla.
+that is, minimise  -SUM_a q(a) log pi(a)  averaged over the states. The paper
+describes it as "projecting the non-parametric policy q back to the space of
+parametrisable policies", just as AlphaZero does: the search produces an improved
+policy and the network learns to imitate it.
 
-**Forma densa y forma de particulas son la misma cantidad.** Stoix la implementa
-como estimador Monte Carlo sobre las N particulas,
+**Dense form and particle form are the same quantity.** Stoix implements it as a
+Monte Carlo estimator over the N particles,
 
     loss = -SUM_n w_n log pi(a_n)            (compute_cross_entropy_loss)
 
-y como las acciones raiz se repiten entre particulas, agrupando por accion
+and since the root actions repeat across particles, grouping by action
 
     SUM_n w_n log pi(a_n) = SUM_a ( SUM_{n: a_n=a} w_n ) log pi(a) = SUM_a q(a) log pi(a)
 
-No es una aproximacion: es la misma suma reagrupada. El golden lo demuestra
-llamando a la funcion de Stoix de verdad y comparando (diff ~1e-8).
+This is not an approximation: it is the same sum regrouped. The golden proves it
+by calling Stoix's actual function and comparing (diff ~1e-8).
 
-Aqui se usa la densa por dos razones. Nuestro readout ya produce q como vector
-[B, 9], asi que sumar sobre 9 acciones sale mas barato que recolectar log-probs de
-512 particulas con repeticiones; y al no muestrear, no arrastra varianza de
-muestreo. En tres en raya el espacio de acciones es diminuto, asi que la densa es
-siempre viable -- en un entorno con miles de acciones habria que volver a la de
-particulas, y por eso el golden guarda las dos.
+The dense form is used here for two reasons. Our readout already produces q as a
+vector [B, 9], so summing over 9 actions is cheaper than gathering log-probs from
+512 particles with repetitions; and by not sampling, it carries no sampling
+variance. In tic-tac-toe the action space is tiny, so the dense form is always
+viable -- in an environment with thousands of actions one would have to go back to
+the particle form, and that is why the golden keeps both.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -40,18 +40,18 @@ from systems.spo.launch import TPB, blocks_for
 def cross_entropy_rows_kernel(loss_out: GlobalF32, q: GlobalF32,
                               log_pi: GlobalF32, n_rows: Int,
                               num_actions: Int):
-    """loss[fila] = -SUM_a q[a] * log_pi[a]. Un hilo por estado.
+    """loss[row] = -SUM_a q[a] * log_pi[a]. One thread per state.
 
-    Un hilo por fila y no por (fila, accion) porque num_actions es 9: repartirlo
-    costaria mas en reduccion que en aritmetica.
+    One thread per row and not per (row, action) because num_actions is 9:
+    splitting it up would cost more in reduction than in arithmetic.
 
-    **El `if w != 0` no es una optimizacion, es correccion.** En una casilla
-    ilegal q vale 0 y log_pi vale menos infinito (o el finito mas negativo, segun
-    como se haya enmascarado). El producto 0 * (-inf) es NaN en IEEE, y un NaN
-    aqui se propagaria callado a la perdida, al gradiente y a los pesos, sin que
-    nada falle ruidosamente. Saltarse el termino da el valor correcto -- que es 0,
-    porque una accion con probabilidad objetivo nula no contribuye -- sea cual sea
-    la representacion del enmascarado.
+    **The `if w != 0` is not an optimisation, it is correctness.** On an illegal
+    cell q is 0 and log_pi is minus infinity (or the most negative finite value,
+    depending on how the masking was done). The product 0 * (-inf) is NaN in IEEE,
+    and a NaN here would propagate silently into the loss, the gradient and the
+    weights, with nothing failing loudly. Skipping the term gives the correct
+    value -- which is 0, because an action with zero target probability
+    contributes nothing -- whatever the representation of the masking.
     """
     row = Int(block_dim.x * block_idx.x + thread_idx.x)
     if row >= n_rows:
@@ -68,11 +68,11 @@ def cross_entropy_rows_kernel(loss_out: GlobalF32, q: GlobalF32,
 def cross_entropy_rows(ctx: DeviceContext, loss_out: DeviceBuffer[dtype],
                        q: DeviceBuffer[dtype], log_pi: DeviceBuffer[dtype],
                        n_rows: Int, num_actions: Int) raises:
-    """La perdida de cada estado, sin promediar.
+    """Each state's loss, unaveraged.
 
-    Se deja sin promediar a proposito: el promedio es una reduccion que el bucle
-    de entrenamiento ya hace en host para reportar (igual que el critico en
-    E1.10), y el gradiente necesita el factor 1/n plegado en otro sitio.
+    It is left unaveraged on purpose: the average is a reduction the training loop
+    already does on the host for reporting (just like the critic in E1.10), and the
+    gradient needs the 1/n factor folded in somewhere else.
     """
     ctx.enqueue_function[cross_entropy_rows_kernel, cross_entropy_rows_kernel](
         loss_out.unsafe_ptr(), q.unsafe_ptr(), log_pi.unsafe_ptr(), n_rows,
@@ -80,35 +80,35 @@ def cross_entropy_rows(ctx: DeviceContext, loss_out: DeviceBuffer[dtype],
 
 
 # ---------------------------------------------------------------------------
-# El diagnostico: separar el suelo de lo que de verdad aprende la red.
+# The diagnostic: separating the floor from what the network actually learns.
 #
-# La entropia cruzada se descompone exactamente en
+# The cross entropy decomposes exactly into
 #
 #     H(q, pi)  =  H(q)  +  KL(q || pi)
 #
-# y H(q) NO depende de pi. Es el suelo: cuando el actor llega a q, la KL vale 0 y
-# la perdida se queda en H(q), que puede ser cualquier cosa.
+# and H(q) does NOT depend on pi. It is the floor: when the actor reaches q, the
+# KL is 0 and the loss stays at H(q), which can be anything at all.
 #
-# Por que importa reportar la KL y no la perdida cruda. En el bucle real q la
-# produce la busqueda y CAMBIA entre iteraciones, asi que el suelo se mueve: la
-# perdida puede subir con el actor aprendiendo mejor, solo porque q se volvio mas
-# dispersa. Y al comparar dos readouts es peor todavia -- medimos H(q) = 1.178 con
-# el readout de SPO y ~0 con la variante (su q es casi one-hot), o sea 1.18 nats
-# de diferencia solo en el suelo. Las perdidas crudas de los dos brazos no serian
-# comparables.
+# Why it matters to report the KL and not the raw loss. In the real loop q is
+# produced by the search and CHANGES between iterations, so the floor moves: the
+# loss can go up while the actor is learning better, purely because q became more
+# spread out. And when comparing two readouts it is worse still -- we measured
+# H(q) = 1.178 with SPO's readout and ~0 with the variant (its q is nearly
+# one-hot), that is, 1.18 nats of difference in the floor alone. The raw losses of
+# the two arms would not be comparable.
 #
-# La KL si: su cero significa "el actor reproduce exactamente lo que dice la
-# busqueda", y ese cero es el mismo en todas las configuraciones.
+# The KL is: its zero means "the actor reproduces exactly what the search says",
+# and that zero is the same across every configuration.
 # ---------------------------------------------------------------------------
 
 
 def entropy_rows_kernel(h_out: GlobalF32, q: GlobalF32, n_rows: Int,
                         num_actions: Int):
-    """H(q)[fila] = -SUM_a q[a] log q[a]. Un hilo por estado.
+    """H(q)[row] = -SUM_a q[a] log q[a]. One thread per state.
 
-    El `if w > 0` es el convenio 0*log(0) = 0, y ademas evita el NaN: log(0) es
-    -inf y 0 * (-inf) da NaN. Con acciones ilegales q vale 0 exacto, asi que este
-    caso ocurre SIEMPRE, no es defensivo.
+    The `if w > 0` is the 0*log(0) = 0 convention, and it also avoids the NaN:
+    log(0) is -inf and 0 * (-inf) gives NaN. With illegal actions q is exactly 0,
+    so this case ALWAYS happens, it is not defensive.
     """
     row = Int(block_dim.x * block_idx.x + thread_idx.x)
     if row >= n_rows:
@@ -124,7 +124,7 @@ def entropy_rows_kernel(h_out: GlobalF32, q: GlobalF32, n_rows: Int,
 
 def kl_rows_kernel(kl_out: GlobalF32, cross_entropy: GlobalF32,
                    entropy: GlobalF32, n_rows: Int):
-    """KL(q||pi) = H(q,pi) - H(q). Un hilo por estado."""
+    """KL(q||pi) = H(q,pi) - H(q). One thread per state."""
     row = Int(block_dim.x * block_idx.x + thread_idx.x)
     if row < n_rows:
         kl_out[row] = cross_entropy[row] - entropy[row]
@@ -133,7 +133,7 @@ def kl_rows_kernel(kl_out: GlobalF32, cross_entropy: GlobalF32,
 def entropy_rows(ctx: DeviceContext, h_out: DeviceBuffer[dtype],
                  q: DeviceBuffer[dtype], n_rows: Int,
                  num_actions: Int) raises:
-    """H(q) de cada estado: el suelo que la perdida no puede bajar."""
+    """H(q) of each state: the floor the loss cannot go below."""
     ctx.enqueue_function[entropy_rows_kernel, entropy_rows_kernel](
         h_out.unsafe_ptr(), q.unsafe_ptr(), n_rows, num_actions,
         grid_dim=blocks_for(n_rows), block_dim=TPB)
@@ -142,44 +142,45 @@ def entropy_rows(ctx: DeviceContext, h_out: DeviceBuffer[dtype],
 def kl_rows(ctx: DeviceContext, kl_out: DeviceBuffer[dtype],
             cross_entropy: DeviceBuffer[dtype], entropy: DeviceBuffer[dtype],
             n_rows: Int) raises:
-    """La KL a partir de la entropia cruzada y la entropia, ya calculadas."""
+    """The KL from the cross entropy and the entropy, both already computed."""
     ctx.enqueue_function[kl_rows_kernel, kl_rows_kernel](
         kl_out.unsafe_ptr(), cross_entropy.unsafe_ptr(), entropy.unsafe_ptr(),
         n_rows, grid_dim=blocks_for(n_rows), block_dim=TPB)
 
 
 # ---------------------------------------------------------------------------
-# El backward. El gradiente de la ecuacion 11 respecto a los LOGITS sale limpio:
+# The backward. The gradient of equation 11 with respect to the LOGITS comes out
+# clean:
 #
 #     L = -SUM_a q(a) log pi(a),     pi = softmax(z)
 #     d log pi(a) / d z_j = delta_aj - pi(j)
 #     dL/dz_j = -SUM_a q(a) (delta_aj - pi(j)) = pi(j) - q(j)
 #
-# (usando SUM_a q(a) = 1). Es el mismo resultado que la forma de particulas del
-# plan, SUM_n w_n (softmax - onehot(a_n)), porque SUM_n w_n onehot(a_n) = q.
+# (using SUM_a q(a) = 1). It is the same result as the plan's particle form,
+# SUM_n w_n (softmax - onehot(a_n)), because SUM_n w_n onehot(a_n) = q.
 #
-# Interpretacion util: el gradiente es "lo que la red dice MENOS lo que la
-# busqueda dice". Empuja pi hacia q y se anula cuando coinciden, que es justo lo
-# que la ecuacion 11 pide.
+# Useful reading: the gradient is "what the network says MINUS what the search
+# says". It pushes pi towards q and vanishes when they coincide, which is exactly
+# what equation 11 asks for.
 # ---------------------------------------------------------------------------
 
 
 def logits_grad_kernel(dz: GlobalF32, pi: GlobalF32, q: GlobalF32,
                        mask: GlobalF32, n: Int, scale: Scalar[dtype]):
-    """dL/dz = (pi - q) * scale, y CERO donde la accion es ilegal.
+    """dL/dz = (pi - q) * scale, and ZERO where the action is illegal.
 
-    `scale` es normalmente 1/n_rows, para que el gradiente corresponda a la MEDIA
-    sobre el batch y no a la suma. Se pasa desde fuera igual que en
+    `scale` is normally 1/n_rows, so that the gradient corresponds to the MEAN
+    over the batch and not to the sum. It is passed from outside just as in
     `value_loss_grad_kernel`.
 
-    Lo de la mascara merece explicacion, porque ahi el gradiente ya saldria 0 solo:
-    en una casilla ilegal pi vale 0 exacto (exp(NEG_INF - max) desborda a cero) y q
-    tambien, asi que pi - q = 0. Se fuerza igualmente por dos razones. Una, que
-    depender de que un desbordamiento de cero para que un gradiente sea correcto es
-    fragil: basta cambiar el enmascarado para que deje de cumplirse. Y dos, que ese
-    logit **no es un parametro**: el forward lo pisa con NEG_INF, asi que la red no
-    influye en el y su derivada tiene que ser 0 por construccion, no por
-    casualidad numerica.
+    The mask deserves an explanation, because the gradient would already come out
+    0 on its own there: on an illegal cell pi is exactly 0 (exp(NEG_INF - max)
+    underflows to zero) and so is q, so pi - q = 0. It is forced all the same for
+    two reasons. One, that relying on an underflow to zero for a gradient to be
+    correct is fragile: change the masking and it stops holding. And two, that
+    logit **is not a parameter**: the forward overwrites it with NEG_INF, so the
+    network does not influence it and its derivative has to be 0 by construction,
+    not by numerical accident.
     """
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i >= n:
@@ -195,15 +196,15 @@ def actor_backward(ctx: DeviceContext, params: CriticParams,
                    scratch: CriticScratch, x: DeviceBuffer[dtype],
                    pi: DeviceBuffer[dtype], q: DeviceBuffer[dtype],
                    mask: DeviceBuffer[dtype], m: Int) raises:
-    """Gradientes de los 6 tensores del actor para la perdida de la ecuacion 11.
+    """Gradients of the actor's 6 tensors for the equation-11 loss.
 
-    `pi` tiene que venir de un forward con la MISMA x y los mismos pesos que
-    dejaron `cache`; si no, los gradientes salen mal sin que nada falle. Es la
-    misma precondicion que `critic_backward`.
+    `pi` has to come from a forward with the SAME x and the same weights that
+    produced `cache`; otherwise the gradients come out wrong without anything
+    failing. It is the same precondition as `critic_backward`.
 
-    El camino hacia atras a partir de los logits es identico al del critico -- la
-    red es la misma -- asi que se reutiliza `backward_from_dvalue`, que ya esta
-    verificado contra el autodiff de JAX desde E1.5.
+    The backward path from the logits onwards is identical to the critic's -- the
+    network is the same -- so `backward_from_dvalue` is reused, and it has been
+    verified against JAX's autodiff since E1.5.
     """
     n_out = m * params.out_dim
     ctx.enqueue_function[logits_grad_kernel, logits_grad_kernel](

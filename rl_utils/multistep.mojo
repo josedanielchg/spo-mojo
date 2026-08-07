@@ -1,32 +1,32 @@
-"""La GAE truncada: los objetivos que aprende el critico.
+"""Truncated GAE: the targets the critic learns.
 
-Port de `batch_truncated_generalized_advantage_estimation` de
-`stoix/utils/multistep.py`. Es el UNICO sitio donde se usa la GAE de libreria; no
-confundirla con la `calculate_gae` de dentro de la busqueda, que es otra cosa
-(esa va hacia ADELANTE y alimenta el dual de temperatura).
+A port of `batch_truncated_generalized_advantage_estimation` from
+`stoix/utils/multistep.py`. It is the ONLY place where the library GAE is used; do
+not confuse it with the `calculate_gae` inside the search, which is a different
+thing (that one runs FORWARDS and feeds the temperature dual).
 
-El problema que resuelve: ¿a que numero deberia apuntar el critico en cada
-posicion? La respuesta ingenua ("la recompensa que llego al final") tiene mucha
-varianza; la otra ingenua ("lo que ya predice el critico") no aporta informacion.
-La GAE mezcla las dos con un parametro lambda, y lo hace acumulando hacia atras:
+The problem it solves: what number should the critic aim at in each position? The
+naive answer ("the reward that arrived at the end") has a lot of variance; the
+other naive one ("what the critic already predicts") adds no information. The GAE
+mixes the two with a lambda parameter, and does it by accumulating backwards:
 
-    delta_t = r + gamma*v_t - v_tm1                 el error de un paso
-    acc     = delta + gamma*lambda*acc*(1 - trunc)  acumulado hacia ATRAS
-    target  = v_tm1 + acc                           lo que aprendera el critico
+    delta_t = r + gamma*v_t - v_tm1                 the one-step error
+    acc     = delta + gamma*lambda*acc*(1 - trunc)  accumulated BACKWARDS
+    target  = v_tm1 + acc                           what the critic will learn
 
-`discount` ya viene con el done plegado: en Stoix se calcula como
-`(1 - done) * gamma`, asi que en el ultimo paso de un episodio vale 0 y corta el
-bootstrap solo.
+`discount` already arrives with done folded in: in Stoix it is computed as
+`(1 - done) * gamma`, so on an episode's last step it is 0 and cuts the bootstrap
+by itself.
 
-**El detalle que hay que respetar**, y esta comentado igual en Stoix: en un paso
-truncado el acumulador se resetea (`* (1 - truncation)`) PERO el delta de ese
-mismo paso si se usa. Truncar no borra la informacion del paso, corta la
-propagacion hacia atras. Confundirlo es el bug silencioso clasico de RL: el
-entrenamiento sigue corriendo, solo aprende objetivos mal calculados.
+**The detail that has to be respected**, and it is commented the same way in
+Stoix: on a truncated step the accumulator is reset (`* (1 - truncation)`) BUT
+that same step's delta is still used. Truncating does not erase the step's
+information, it cuts the backwards propagation. Confusing the two is RL's classic
+silent bug: training keeps running, it just learns badly computed targets.
 
-En tres en raya la truncacion nunca se dispara (las partidas acaban solas en 5
-jugadas como mucho, no hay limite de tiempo), pero se implementa igual: es parte
-de la funcion de referencia y el test la ejercita.
+In tic-tac-toe truncation never fires (games end on their own in five moves at
+most, there is no time limit), but it is implemented all the same: it is part of
+the reference function and the test exercises it.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -41,13 +41,13 @@ def gae_kernel(adv_out: GlobalF32, target_out: GlobalF32, reward: GlobalF32,
                discount: GlobalF32, v_tm1: GlobalF32, v_t: GlobalF32,
                truncation: GlobalF32, batch: Int, t_len: Int,
                lambda_: Scalar[dtype]):
-    """Una secuencia por hilo, recorrida hacia atras en el tiempo.
+    """One sequence per thread, walked backwards in time.
 
-    El paralelismo esta en el BATCH y no en el tiempo, porque la recurrencia es
-    secuencial por naturaleza (cada paso necesita el acumulado del siguiente).
-    Con T = 32 el bucle es corto y no compensa complicarlo con un scan paralelo.
+    The parallelism is in the BATCH and not in time, because the recurrence is
+    sequential by nature (each step needs the next one's accumulator). With T = 32
+    the loop is short and it does not pay to complicate it with a parallel scan.
 
-    Layout batch-major [B, T], que es el que usa Stoix por defecto
+    Batch-major layout [B, T], which is the one Stoix uses by default
     (`time_major=False`).
     """
     b = Int(block_dim.x * block_idx.x + thread_idx.x)
@@ -56,12 +56,12 @@ def gae_kernel(adv_out: GlobalF32, target_out: GlobalF32, reward: GlobalF32,
 
     acc = Scalar[dtype](0)
     for i in range(t_len):
-        t = t_len - 1 - i               # hacia atras
+        t = t_len - 1 - i               # backwards
         idx = b * t_len + t
 
         delta = reward[idx] + discount[idx] * v_t[idx] - v_tm1[idx]
-        # El delta SI entra aunque el paso este truncado; lo que se corta es el
-        # acumulado que venia de mas adelante.
+        # The delta DOES go in even if the step is truncated; what gets cut is the
+        # accumulator coming from further ahead.
         acc = delta + discount[idx] * lambda_ * acc \
               * (Scalar[dtype](1) - truncation[idx])
 
@@ -74,7 +74,7 @@ def truncated_gae(ctx: DeviceContext, adv: DeviceBuffer[dtype],
                   discount: DeviceBuffer[dtype], v_tm1: DeviceBuffer[dtype],
                   v_t: DeviceBuffer[dtype], truncation: DeviceBuffer[dtype],
                   batch: Int, t_len: Int, lambda_: Scalar[dtype]) raises:
-    """Ventajas y objetivos del critico para un batch de secuencias [B, T]."""
+    """Advantages and critic targets for a batch of sequences [B, T]."""
     ctx.enqueue_function[gae_kernel, gae_kernel](
         adv.unsafe_ptr(), targets.unsafe_ptr(), reward.unsafe_ptr(),
         discount.unsafe_ptr(), v_tm1.unsafe_ptr(), v_t.unsafe_ptr(),

@@ -1,22 +1,23 @@
-"""El MLP del critico: una pila de capas lineales con ReLU en medio.
+"""The critic's MLP: a stack of linear layers with ReLU in between.
 
     x  [M, in_dim]  ──linear──►  ──relu──►  ──linear──►  ──relu──►  ──linear──►  V  [M, out_dim]
-                        h1                      h2                     (sin relu:
-                                                                        V puede ser
-                                                                        negativo)
+                        h1                      h2                     (no relu:
+                                                                        V may be
+                                                                        negative)
 
-Es generico en las dimensiones a proposito: `networks/` no importa nada de `envs/`,
-igual que la busqueda no importa el entorno. Quien lo construya (el learner) decide
-que tamano tiene; para tres en raya seran 18 -> 64 -> 64 -> 1.
+It is generic in the dimensions on purpose: `networks/` imports nothing from
+`envs/`, just as the search does not import the environment. Whoever builds it
+(the learner) decides what size it has; for tic-tac-toe it will be
+18 -> 64 -> 64 -> 1.
 
-Las activaciones se guardan en un `CriticCache` en vez de tirarlas. Todavia no hace
-falta para el forward, pero el backward manual las necesita (la tecnica del Puzzle
-22: cachear el forward para no recomputarlo al derivar), y reservarlas aqui evita
-tener que cambiar la firma despues.
+The activations are stored in a `CriticCache` instead of being thrown away. It is
+not needed for the forward yet, but the manual backward needs them (Puzzle 22's
+technique: cache the forward so as not to recompute it when differentiating), and
+allocating them here avoids having to change the signature later.
 
-Un detalle que ahorra un buffer: la mascara del ReLU se puede derivar de la
-activacion YA aplicada (post-relu > 0 si y solo si pre-relu > 0), asi que el relu
-se hace in-place y no hace falta guardar el valor previo.
+A detail that saves a buffer: the ReLU's mask can be derived from the ALREADY
+applied activation (post-relu > 0 if and only if pre-relu > 0), so the relu is
+done in place and the previous value need not be stored.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -27,11 +28,11 @@ from ops.common import dtype, GlobalF32
 from networks.linear import linear_forward, linear_backward
 
 comptime TPB_NET = 256
-"""Hilos por bloque para los kernels elementwise de las redes."""
+"""Threads per block for the networks' elementwise kernels."""
 
 
 def relu_kernel(a: GlobalF32, n: Int):
-    """ReLU in-place: a[i] = max(a[i], 0). Un hilo por elemento."""
+    """In-place ReLU: a[i] = max(a[i], 0). One thread per element."""
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n:
         if a[i] < Scalar[dtype](0):
@@ -39,7 +40,7 @@ def relu_kernel(a: GlobalF32, n: Int):
 
 
 def relu(ctx: DeviceContext, a: DeviceBuffer[dtype], n: Int) raises:
-    """Encola el ReLU sobre los n primeros elementos del buffer."""
+    """Enqueues the ReLU over the buffer's first n elements."""
     ctx.enqueue_function[relu_kernel, relu_kernel](
         a.unsafe_ptr(), n,
         grid_dim=(n + TPB_NET - 1) // TPB_NET, block_dim=TPB_NET)
@@ -47,7 +48,7 @@ def relu(ctx: DeviceContext, a: DeviceBuffer[dtype], n: Int) raises:
 
 @fieldwise_init
 struct CriticParams(Movable):
-    """Los pesos del critico. El struct vive en el host; los buffers, en la GPU."""
+    """The critic's weights. The struct lives on the host; the buffers, on the GPU."""
 
     var w1: DeviceBuffer[dtype]
     """[in_dim, hidden]"""
@@ -69,7 +70,7 @@ struct CriticParams(Movable):
 
 def zero_critic_params(ctx: DeviceContext, in_dim: Int, hidden: Int,
                        out_dim: Int) raises -> CriticParams:
-    """Pesos a cero, para rellenarlos despues (desde un golden o desde un init)."""
+    """Weights at zero, to be filled in later (from a golden or from an init)."""
     return CriticParams(
         w1=zero_buffer[dtype](ctx, in_dim * hidden),
         b1=zero_buffer[dtype](ctx, hidden),
@@ -81,18 +82,18 @@ def zero_critic_params(ctx: DeviceContext, in_dim: Int, hidden: Int,
 
 
 struct CriticCache(Movable):
-    """Las activaciones de un forward, que el backward volvera a leer.
+    """One forward's activations, which the backward will read again.
 
-    Se reservan para el batch mas grande que se vaya a usar; un forward con menos
-    filas simplemente usa el principio de cada buffer.
+    They are allocated for the largest batch that will be used; a forward with
+    fewer rows simply uses the beginning of each buffer.
     """
 
     var a1: DeviceBuffer[dtype]
-    """[M, hidden] despues del ReLU de la primera capa."""
+    """[M, hidden] after the first layer's ReLU."""
     var a2: DeviceBuffer[dtype]
-    """[M, hidden] despues del ReLU de la segunda."""
+    """[M, hidden] after the second one's ReLU."""
     var value: DeviceBuffer[dtype]
-    """[M, out_dim] la salida, sin ReLU."""
+    """[M, out_dim] the output, with no ReLU."""
 
     def __init__(out self, ctx: DeviceContext, max_batch: Int, hidden: Int,
                  out_dim: Int) raises:
@@ -103,10 +104,10 @@ struct CriticCache(Movable):
 
 def critic_forward(ctx: DeviceContext, params: CriticParams,
                    cache: CriticCache, x: DeviceBuffer[dtype], m: Int) raises:
-    """V(s) para m entradas. Deja las activaciones en `cache`.
+    """V(s) for m inputs. Leaves the activations in `cache`.
 
-    Tres capas encoladas en el mismo stream, asi que se ejecutan en orden sin
-    necesidad de sincronizar entre ellas (la leccion del Puzzle 14).
+    Three layers enqueued on the same stream, so they execute in order without
+    needing to synchronise between them (Puzzle 14's lesson).
     """
     linear_forward(ctx, cache.a1, x, params.w1, params.b1,
                    m, params.in_dim, params.hidden)
@@ -116,34 +117,35 @@ def critic_forward(ctx: DeviceContext, params: CriticParams,
                    m, params.hidden, params.hidden)
     relu(ctx, cache.a2, m * params.hidden)
 
-    # La ultima capa NO lleva ReLU: V es un valor con signo, y recortarlo a 0
-    # impediria representar posiciones malas.
+    # The last layer has NO ReLU: V is a signed value, and clipping it to 0 would
+    # make bad positions unrepresentable.
     linear_forward(ctx, cache.value, cache.a2, params.w3, params.b3,
                    m, params.hidden, params.out_dim)
 
 
 # ---------------------------------------------------------------------------
-# El backward del critico. Encadena el de la capa lineal (que ya esta verificado
-# contra autodiff) a traves de las dos mascaras de ReLU:
+# The critic's backward. It chains the linear layer's (which is already verified
+# against autodiff) through the two ReLU masks:
 #
-#     L  ──►  dV  ──►  capa3  ──►  da2  ──►  relu'  ──►  capa2  ──►  da1
-#                                                            ──►  relu'  ──►  capa1
+#     L  ──►  dV  ──►  layer3  ──►  da2  ──►  relu'  ──►  layer2  ──►  da1
+#                                                             ──►  relu'  ──►  layer1
 #
-# El gradiente del ReLU es lo unico nuevo aqui, y es facil: la derivada de
-# max(x,0) vale 1 donde x era positivo y 0 donde no. Como el ReLU se aplico
-# in-place en el forward, se usa la activacion GUARDADA para saberlo
-# (post-relu > 0 si y solo si pre-relu > 0), sin necesidad de haber guardado el
-# valor previo.
+# The ReLU's gradient is the only new thing here, and it is easy: the derivative
+# of max(x,0) is 1 where x was positive and 0 where it was not. Since the ReLU was
+# applied in place in the forward, the STORED activation is used to tell
+# (post-relu > 0 if and only if pre-relu > 0), without having had to store the
+# previous value.
 # ---------------------------------------------------------------------------
 
 
 def value_loss_grad_kernel(dv: GlobalF32, value: GlobalF32, target: GlobalF32,
                            n: Int, scale: Scalar[dtype]):
-    """dL/dV para L = media de 0.5*(V - target)^2, o sea (V - target)/n.
+    """dL/dV for L = mean of 0.5*(V - target)^2, that is (V - target)/n.
 
-    Es la misma perdida que usa Stoix para el critico (`rlax.l2_loss` seguido de
-    `.mean()`); el 0.5 esta para que la derivada salga limpia, sin un 2 delante.
-    `scale` es 1/n, calculado en el host para no dividir en cada hilo.
+    It is the same loss Stoix uses for the critic (`rlax.l2_loss` followed by
+    `.mean()`); the 0.5 is there so that the derivative comes out clean, with no 2
+    in front. `scale` is 1/n, computed on the host so as not to divide in every
+    thread.
     """
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n:
@@ -151,11 +153,12 @@ def value_loss_grad_kernel(dv: GlobalF32, value: GlobalF32, target: GlobalF32,
 
 
 def relu_backward_kernel(grad: GlobalF32, activation: GlobalF32, n: Int):
-    """Pasa el gradiente por el ReLU, in-place: grad *= (activacion > 0).
+    """Passes the gradient through the ReLU, in place: grad *= (activation > 0).
 
-    Donde el ReLU recorto, la salida no dependia de la entrada, asi que por ahi no
-    pasa gradiente. Ojo con el borde: en exactamente 0 la derivada no existe y se
-    toma 0, que es la convencion habitual (y coincide con el `<` del forward).
+    Where the ReLU clipped, the output did not depend on the input, so no gradient
+    passes through there. Mind the edge: at exactly 0 the derivative does not
+    exist and 0 is taken, which is the usual convention (and matches the forward's
+    `<`).
     """
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n:
@@ -164,7 +167,7 @@ def relu_backward_kernel(grad: GlobalF32, activation: GlobalF32, n: Int):
 
 
 struct CriticGrads(Movable):
-    """Los gradientes de los pesos, con la misma forma que `CriticParams`."""
+    """The weights' gradients, with the same shape as `CriticParams`."""
 
     var dw1: DeviceBuffer[dtype]
     var db1: DeviceBuffer[dtype]
@@ -184,12 +187,13 @@ struct CriticGrads(Movable):
 
 
 struct CriticScratch(Movable):
-    """Los gradientes intermedios que viajan hacia atras entre capas.
+    """The intermediate gradients that travel backwards between layers.
 
-    Son buffers de trabajo, no resultados: `dvalue` es lo que entra por arriba y
-    `da2`/`da1` lo que va bajando. `dx` se calcula pero nadie lo usa (la entrada
-    no es un parametro entrenable); se reserva porque el backward de la capa
-    siempre lo produce y tener dos caminos distintos costaria mas que un buffer.
+    They are working buffers, not results: `dvalue` is what comes in from above
+    and `da2`/`da1` what goes down. `dx` is computed but nobody uses it (the input
+    is not a trainable parameter); it is allocated because the layer's backward
+    always produces it and having two different paths would cost more than a
+    buffer.
     """
 
     var dvalue: DeviceBuffer[dtype]
@@ -209,22 +213,23 @@ def critic_backward(ctx: DeviceContext, params: CriticParams,
                     cache: CriticCache, grads: CriticGrads,
                     scratch: CriticScratch, x: DeviceBuffer[dtype],
                     target: DeviceBuffer[dtype], m: Int) raises:
-    """Gradientes de los 6 tensores de pesos para la perdida L2 contra `target`.
+    """Gradients of the 6 weight tensors for the L2 loss against `target`.
 
-    Da por hecho que `cache` viene de un `critic_forward` con la MISMA `x` y los
-    mismos pesos: el backward reutiliza esas activaciones en vez de recomputarlas
-    (Puzzle 22). Si se llamara con un cache viejo, los gradientes saldrian mal sin
-    que nada fallara.
+    It assumes `cache` comes from a `critic_forward` with the SAME `x` and the
+    same weights: the backward reuses those activations instead of recomputing
+    them (Puzzle 22). If it were called with a stale cache, the gradients would
+    come out wrong without anything failing.
     """
     n_out = m * params.out_dim
 
-    # 1. Por donde entra todo: la derivada de la perdida respecto a V.
+    # 1. Where everything comes in: the derivative of the loss with respect to V.
     ctx.enqueue_function[value_loss_grad_kernel, value_loss_grad_kernel](
         scratch.dvalue.unsafe_ptr(), cache.value.unsafe_ptr(),
         target.unsafe_ptr(), n_out, Scalar[dtype](1) / Scalar[dtype](n_out),
         grid_dim=(n_out + TPB_NET - 1) // TPB_NET, block_dim=TPB_NET)
 
-    # 2..6: el resto no depende de QUE perdida sea, solo del gradiente que baja.
+    # 2..6: the rest does not depend on WHICH loss it is, only on the gradient
+    # coming down.
     backward_from_dvalue(ctx, params, cache, grads, scratch, x, m)
 
 
@@ -232,39 +237,39 @@ def backward_from_dvalue(ctx: DeviceContext, params: CriticParams,
                          cache: CriticCache, grads: CriticGrads,
                          scratch: CriticScratch, x: DeviceBuffer[dtype],
                          m: Int) raises:
-    """El backward de la red a partir de `scratch.dvalue`, ya calculado.
+    """The network's backward starting from `scratch.dvalue`, already computed.
 
-    Se separo de `critic_backward` cuando llego el actor: la red es la misma y el
-    camino hacia atras tambien, lo unico que cambia es POR DONDE ENTRA el
-    gradiente. El critico entra con d(L2)/dV = (V - target)/n y el actor con
-    dL/dlogits = (pi - q)/n. Todo lo de aqui abajo es identico.
+    It was split off from `critic_backward` when the actor arrived: the network is
+    the same and so is the backward path, the only thing that changes is WHERE the
+    gradient comes in. The critic comes in with d(L2)/dV = (V - target)/n and the
+    actor with dL/dlogits = (pi - q)/n. Everything from here down is identical.
 
-    Sigue dando por hecho que `cache` viene de un forward con la MISMA x y los
-    mismos pesos.
+    It still assumes `cache` comes from a forward with the SAME x and the same
+    weights.
     """
     n_hidden = m * params.hidden
 
-    # 2. Tercera capa: su entrada fue a2.
+    # 2. Third layer: its input was a2.
     linear_backward(ctx, grads.dw3, grads.db3, scratch.da2,
                     cache.a2, params.w3, scratch.dvalue,
                     m, params.hidden, params.out_dim)
 
-    # 3. El ReLU de la segunda capa, sobre el gradiente que acaba de bajar.
+    # 3. The second layer's ReLU, on the gradient that has just come down.
     ctx.enqueue_function[relu_backward_kernel, relu_backward_kernel](
         scratch.da2.unsafe_ptr(), cache.a2.unsafe_ptr(), n_hidden,
         grid_dim=(n_hidden + TPB_NET - 1) // TPB_NET, block_dim=TPB_NET)
 
-    # 4. Segunda capa: su entrada fue a1.
+    # 4. Second layer: its input was a1.
     linear_backward(ctx, grads.dw2, grads.db2, scratch.da1,
                     cache.a1, params.w2, scratch.da2,
                     m, params.hidden, params.hidden)
 
-    # 5. El ReLU de la primera.
+    # 5. The first one's ReLU.
     ctx.enqueue_function[relu_backward_kernel, relu_backward_kernel](
         scratch.da1.unsafe_ptr(), cache.a1.unsafe_ptr(), n_hidden,
         grid_dim=(n_hidden + TPB_NET - 1) // TPB_NET, block_dim=TPB_NET)
 
-    # 6. Primera capa: su entrada fue la observacion.
+    # 6. First layer: its input was the observation.
     linear_backward(ctx, grads.dw1, grads.db1, scratch.dx,
                     x, params.w1, scratch.da1,
                     m, params.in_dim, params.hidden)

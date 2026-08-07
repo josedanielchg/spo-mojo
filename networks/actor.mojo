@@ -1,25 +1,25 @@
-"""El actor: la red que elige jugada. 18 -> H -> H -> 9, con enmascarado.
+"""The actor: the network that picks the move. 18 -> H -> H -> 9, with masking.
 
-Es la pieza que le faltaba al sistema. Hasta ahora la busqueda partia de un prior
-UNIFORME sobre las casillas legales; el actor lo sustituye por una distribucion
-aprendida, y eso cierra el bucle EM del paper:
+It is the piece the system was missing. Until now the search started from a
+UNIFORM prior over the legal cells; the actor replaces it with a learned
+distribution, and that closes the paper's EM loop:
 
-    E-step   la busqueda planifica y produce q, la politica mejorada
-    M-step   el actor aprende a imitar q
-    y en la vuelta siguiente la busqueda arranca del actor, no de uniforme
+    E-step   the search plans and produces q, the improved policy
+    M-step   the actor learns to imitate q
+    and on the next round the search starts from the actor, not from uniform
 
-La RED es exactamente la misma que la del critico salvo en la salida: 9 logits en
-vez de 1 valor. Por eso aqui no se reimplementa el MLP — `critic_forward` ya es
-generico en `out_dim` y esta verificado contra goldens y contra autodiff desde
-E1.3/E1.5. Reutilizarlo no es pereza: es no volver a arriesgar codigo que ya pasa
-por tres verificaciones independientes.
+The NETWORK is exactly the same as the critic's except for the output: 9 logits
+instead of 1 value. That is why the MLP is not reimplemented here --
+`critic_forward` is already generic in `out_dim` and has been verified against
+goldens and against autodiff since E1.3/E1.5. Reusing it is not laziness: it is
+not re-risking code that already passes three independent checks.
 
-Lo genuinamente nuevo esta abajo, y es el **enmascarado**. En tres en raya no todas
-las acciones son legales, y una red no tiene forma de saberlo sola: si no se le
-tapa, aprendera a poner probabilidad sobre casillas ocupadas y la busqueda gastara
-particulas en jugadas imposibles. Stoix no trae nada de esto -- sus entornos no
-tienen acciones ilegales -- asi que es una de las piezas que hay que anadir para
-llevar SPO a un juego de tablero.
+What is genuinely new lives below, and it is the **masking**. In tic-tac-toe not
+every action is legal, and a network has no way of knowing that on its own: if it
+is not masked, it will learn to put probability on occupied cells and the search
+will spend particles on impossible moves. Stoix brings none of this -- its
+environments have no illegal actions -- so it is one of the pieces that have to be
+added to take SPO to a board game.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -33,9 +33,9 @@ from networks.mlp import (CriticParams, CriticCache, critic_forward,
                           zero_critic_params)
 from systems.spo.launch import TPB, blocks_for
 
-# Los pesos y las activaciones son los mismos tipos que los del critico: mismo
-# MLP, distinta salida. Los alias existen para que el codigo del M-step se lea
-# como lo que es ("los pesos del actor") sin duplicar structs.
+# The weights and activations are the same types as the critic's: same MLP,
+# different output. The aliases exist so that the M-step's code reads as what it
+# is ("the actor's weights") without duplicating structs.
 comptime ActorParams = CriticParams
 comptime ActorCache = CriticCache
 
@@ -43,25 +43,26 @@ comptime TPB_ACTOR = 32
 
 
 def zero_actor_params(ctx: DeviceContext, hidden: Int) raises -> ActorParams:
-    """Pesos del actor a cero: OBS_DIM -> hidden -> hidden -> NUM_ACTIONS."""
+    """Actor weights at zero: OBS_DIM -> hidden -> hidden -> NUM_ACTIONS."""
     return zero_critic_params(ctx, OBS_DIM, hidden, NUM_ACTIONS)
 
 
 def mask_logits_kernel(logits: GlobalF32, mask: GlobalF32, n: Int,
                        num_actions: Int):
-    """Tapa in-place los logits de las acciones ilegales. Un hilo por (fila, accion).
+    """Masks the illegal actions' logits in place. One thread per (row, action).
 
-    `mask` vale 1.0 en las legales y 0.0 en las ocupadas, que es lo que produce
-    `ttt_legal_mask_kernel`.
+    `mask` is 1.0 on the legal ones and 0.0 on the occupied ones, which is what
+    `ttt_legal_mask_kernel` produces.
 
-    Se usa NEG_INF (el float32 finito mas negativo) y no -inf de verdad, por la
-    misma razon que `ttt_prior_logits_kernel`: si una fila entera estuviera tapada
-    (tablero lleno), con -inf el softmax daria nan y el nan se propagaria a todo lo
-    que toque despues, callado. Con MIN_FINITE la fila degenera a uniforme, que en
-    una posicion terminal da igual porque nadie va a jugar esa accion.
+    NEG_INF (the most negative finite float32) is used and not a true -inf, for
+    the same reason as `ttt_prior_logits_kernel`: if a whole row were masked (full
+    board), with -inf the softmax would give nan and the nan would propagate
+    silently to everything it touches afterwards. With MIN_FINITE the row
+    degenerates to uniform, which in a terminal position makes no difference
+    because nobody is going to play that action.
 
-    In-place a proposito: el buffer de logits que sale del MLP ya tiene el tamano
-    justo y no hace falta otro.
+    In place on purpose: the logits buffer coming out of the MLP is already
+    exactly the right size and no other one is needed.
     """
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i >= n * num_actions:
@@ -73,11 +74,11 @@ def mask_logits_kernel(logits: GlobalF32, mask: GlobalF32, n: Int,
 def actor_logits(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
                  obs: DeviceBuffer[dtype], mask: DeviceBuffer[dtype],
                  m: Int) raises:
-    """Logits enmascarados de m tableros. Quedan en `cache.value` [m, NUM_ACTIONS].
+    """Masked logits of m boards. They end up in `cache.value` [m, NUM_ACTIONS].
 
-    Dos pasos: el MLP (ya verificado) y el tapado. No hace softmax -- quien lo
-    necesite lo pide aparte, porque el M-step trabaja en log-espacio y aplicarlo
-    aqui obligaria a deshacerlo.
+    Two steps: the MLP (already verified) and the masking. It does no softmax --
+    whoever needs it asks for it separately, because the M-step works in log space
+    and applying it here would force undoing it.
     """
     critic_forward(ctx, params, cache, obs, m)
     n_cells = m * params.out_dim
@@ -89,12 +90,12 @@ def actor_logits(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
 def actor_probs(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
                 obs: DeviceBuffer[dtype], mask: DeviceBuffer[dtype],
                 probs_out: DeviceBuffer[dtype], m: Int) raises:
-    """La politica del actor: pi(a|s) para m tableros, ya enmascarada.
+    """The actor's policy: pi(a|s) for m boards, already masked.
 
-    Las casillas ocupadas salen con probabilidad exactamente 0, porque
-    exp(NEG_INF - max) desborda a 0 en float32. No es una aproximacion que dependa
-    de la escala: NEG_INF esta a ~1e38 del maximo tipico de un logit, y exp de eso
-    es cero exacto.
+    The occupied cells come out with probability exactly 0, because
+    exp(NEG_INF - max) underflows to 0 in float32. It is not an approximation that
+    depends on the scale: NEG_INF is ~1e38 away from a logit's typical maximum,
+    and exp of that is exactly zero.
     """
     actor_logits(ctx, params, cache, obs, mask, m)
     ctx.enqueue_function[softmax_rows[TPB_ACTOR], softmax_rows[TPB_ACTOR]](
@@ -105,15 +106,15 @@ def actor_probs(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
 def actor_log_probs(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
                     obs: DeviceBuffer[dtype], mask: DeviceBuffer[dtype],
                     log_probs_out: DeviceBuffer[dtype], m: Int) raises:
-    """log pi(a|s) para m tableros. Es lo que come la perdida del M-step.
+    """log pi(a|s) for m boards. It is what the M-step's loss eats.
 
-    No se calcula como log(actor_probs): un logit muy bajo desborda el softmax a 0
-    y su log seria -inf aunque el valor exacto fuera representable. La entropia
-    cruzada pesa justo los terminos pequenos, asi que se calcula el log-softmax
-    directo (ver `log_softmax_rows`).
+    It is not computed as log(actor_probs): a very low logit underflows the
+    softmax to 0 and its log would be -inf even though the exact value was
+    representable. The cross entropy weights precisely the small terms, so the
+    log-softmax is computed directly (see `log_softmax_rows`).
 
-    En las casillas ilegales sale un finito muy negativo (NEG_INF sin mover). El
-    kernel de la perdida se salta esos terminos porque su q vale 0.
+    On the illegal cells a very negative finite value comes out (NEG_INF
+    unchanged). The loss kernel skips those terms because their q is 0.
     """
     actor_logits(ctx, params, cache, obs, mask, m)
     ctx.enqueue_function[log_softmax_rows[TPB_ACTOR], log_softmax_rows[TPB_ACTOR]](
@@ -122,25 +123,25 @@ def actor_log_probs(ctx: DeviceContext, params: ActorParams, cache: ActorCache,
 
 
 struct Actor(Movable):
-    """El actor con sus buffers, listo para usarse desde la busqueda o el learner.
+    """The actor with its buffers, ready to be used from the search or the learner.
 
-    Se queda con la mascara y las probabilidades reservadas para `max_batch`
-    tableros, que es lo que hace falta tanto en la raiz (num_envs) como durante el
-    entrenamiento (batch * rollout).
+    It keeps the mask and the probabilities allocated for `max_batch` boards,
+    which is what is needed both at the root (num_envs) and during training
+    (batch * rollout).
     """
 
     var params: ActorParams
     var cache: ActorCache
     var mask: DeviceBuffer[dtype]
-    """[max_batch, NUM_ACTIONS] 1 legal, 0 ocupada."""
+    """[max_batch, NUM_ACTIONS] 1 legal, 0 occupied."""
     var probs: DeviceBuffer[dtype]
-    """[max_batch, NUM_ACTIONS] la politica, tras el softmax enmascarado."""
+    """[max_batch, NUM_ACTIONS] the policy, after the masked softmax."""
     var log_probs: DeviceBuffer[dtype]
-    """[max_batch, NUM_ACTIONS] log pi, para la perdida del M-step."""
+    """[max_batch, NUM_ACTIONS] log pi, for the M-step's loss."""
     var hidden: Int
     var max_batch: Int
-    """Cuantos tableros caben. Pedir mas escribiria fuera de los buffers, asi que
-    los metodos lo comprueban en vez de corromper memoria en silencio."""
+    """How many boards fit. Asking for more would write outside the buffers, so
+    the methods check it instead of corrupting memory silently."""
 
     def __init__(out self, ctx: DeviceContext, max_batch: Int,
                  hidden: Int) raises:
@@ -153,11 +154,11 @@ struct Actor(Movable):
         self.max_batch = max_batch
 
     def _check(self, m: Int) raises:
-        """Un error ruidoso en vez de una escritura fuera de rango.
+        """A loud error instead of an out-of-range write.
 
-        Sin esto, pedir mas tableros de los reservados pisaria memoria ajena y el
-        sintoma aparecerian mucho despues, en otro buffer. Cuesta una comparacion
-        en host por llamada.
+        Without this, asking for more boards than were allocated would overwrite
+        someone else's memory and the symptom would show up much later, in another
+        buffer. It costs one host-side comparison per call.
         """
         if m > self.max_batch:
             raise Error("el actor se reservo para ", self.max_batch,
@@ -165,8 +166,8 @@ struct Actor(Movable):
 
     def mask_from_state(self, ctx: DeviceContext, state: DeviceBuffer[dtype],
                         m: Int) raises:
-        """Rellena la mascara leyendo el tablero. La legalidad NO se pasa por
-        fuera: se deriva del estado, que es la unica fuente de verdad."""
+        """Fills the mask by reading the board. Legality is NOT passed in from
+        outside: it is derived from the state, which is the only source of truth."""
         self._check(m)
         ctx.enqueue_function[ttt_legal_mask_kernel, ttt_legal_mask_kernel](
             self.mask.unsafe_ptr(), state.unsafe_ptr(), m,
@@ -174,11 +175,11 @@ struct Actor(Movable):
 
     def forward(self, ctx: DeviceContext, state: DeviceBuffer[dtype],
                 obs: DeviceBuffer[dtype], m: Int) raises:
-        """Del tablero a la politica: mascara, MLP, tapado y softmax.
+        """From the board to the policy: mask, MLP, masking and softmax.
 
-        `obs` tiene que traer ya la observacion de dos planos (la produce
-        `ttt_encode_obs_kernel`); el actor no la calcula para no duplicar esa
-        conversion, que ya vive en el entorno.
+        `obs` has to arrive with the two-plane observation already computed (it is
+        produced by `ttt_encode_obs_kernel`); the actor does not compute it so as
+        not to duplicate that conversion, which already lives in the environment.
         """
         self._check(m)
         self.mask_from_state(ctx, state, m)
@@ -186,7 +187,7 @@ struct Actor(Movable):
 
     def forward_log(self, ctx: DeviceContext, state: DeviceBuffer[dtype],
                     obs: DeviceBuffer[dtype], m: Int) raises:
-        """Del tablero a log pi, que es lo que necesita el M-step."""
+        """From the board to log pi, which is what the M-step needs."""
         self._check(m)
         self.mask_from_state(ctx, state, m)
         actor_log_probs(ctx, self.params, self.cache, obs, self.mask,

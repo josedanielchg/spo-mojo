@@ -1,33 +1,32 @@
-"""El replay buffer de trayectorias. Donde se guardan las partidas jugadas.
+"""The trajectory replay buffer. Where the games played get stored.
 
-SPO es off-policy: la busqueda de hace unos cuantos updates sigue siendo un
-objetivo valido, asi que las transiciones se guardan y se reutilizan varias veces
-(Stoix hace `epochs = 128` pasadas por cada tanda recogida). Sin buffer, cada dato
-se usaria una vez y se tiraria.
+SPO is off-policy: the search from a few updates ago is still a valid target, so
+the transitions are stored and reused several times (Stoix does `epochs = 128`
+passes over each batch collected). Without a buffer, each datum would be used once
+and thrown away.
 
-Vive en el HOST, con arrays planos, tal como decidio el plan: el batch muestreado
-se sube a la GPU en cada update. Es trafico host<->device consciente — el tema 2 de
-STUDY.md avisa de que el movimiento de datos domina — pero el update ocurre una vez
-por epoch, no por paso, asi que aqui prima la claridad. Moverlo a device queda
-apuntado como mejora.
+It lives on the HOST, with flat arrays, exactly as the plan decided: the sampled
+batch is uploaded to the GPU on every update. It is deliberate host<->device
+traffic -- STUDY.md's topic 2 warns that data movement dominates -- but the update
+happens once per epoch, not per step, so clarity wins here. Moving it to device is
+noted as an improvement.
 
-**Simplificacion honesta frente a flashbax:** se guardan SECUENCIAS COMPLETAS de
-longitud fija T y se muestrean enteras. Flashbax permite empezar en cualquier
-posicion, tambien a caballo del puntero de escritura, lo que obliga a llevar
-cuidado con las secuencias medio pisadas. Aqui una secuencia esta entera o no
-esta. En tres en raya cada secuencia de T=32 cubre unas 8 partidas completas, asi
-que no se pierde variedad.
+**An honest simplification with respect to flashbax:** COMPLETE sequences of fixed
+length T are stored and sampled whole. Flashbax allows starting at any position,
+including straddling the write pointer, which forces care with half-overwritten
+sequences. Here a sequence is either whole or absent. In tic-tac-toe each sequence
+of T=32 covers about 8 complete games, so no variety is lost.
 
-Lo que se guarda es lo que necesita el CRITICO (etapa 1):
+What is stored is what the CRITIC needs (stage 1):
 
-    obs            [T, obs_dim]   el tablero en cada paso
+    obs            [T, obs_dim]   the board at each step
     reward         [T]
     done           [T]
     truncated      [T]
-    bootstrap_obs  [T, obs_dim]   la observacion siguiente, para el bootstrap
+    bootstrap_obs  [T, obs_dim]   the next observation, for the bootstrap
 
-La etapa 2 (el actor) tendra que anadir `sampled_actions` y sus pesos, que es lo
-que Stoix llama una transicion "gorda". Anadir un campo aqui es mecanico.
+Stage 2 (the actor) will have to add `sampled_actions` and their weights, which is
+what Stoix calls a "fat" transition. Adding a field here is mechanical.
 """
 
 from ops.common import dtype
@@ -35,28 +34,29 @@ from ops.rng import rand_bits
 
 
 struct TrajectoryBuffer(Movable):
-    """Ring buffer de secuencias de longitud fija, en memoria de host."""
+    """Ring buffer of fixed-length sequences, in host memory."""
 
     var obs: List[Scalar[dtype]]
-    """[capacity, t_len, obs_dim] aplanado."""
+    """[capacity, t_len, obs_dim] flattened."""
     var reward: List[Scalar[dtype]]
     """[capacity, t_len]"""
     var done: List[Scalar[dtype]]
     var truncated: List[Scalar[dtype]]
     var bootstrap_obs: List[Scalar[dtype]]
     var q: List[Scalar[dtype]]
-    """[capacity, t_len, num_actions] la politica mejorada que produjo la busqueda
-    en cada paso. Es el objetivo del actor (ecuacion 11). Con num_actions = 0 no se
-    reserva nada: asi el bucle que solo entrena al critico no paga por esto."""
+    """[capacity, t_len, num_actions] the improved policy the search produced at
+    each step. It is the actor's target (equation 11). With num_actions = 0
+    nothing is allocated: that way the loop that only trains the critic does not
+    pay for this."""
 
     var capacity: Int
     var t_len: Int
     var obs_dim: Int
     var num_actions: Int
     var write: Int
-    """Donde va la proxima secuencia. Da la vuelta al llegar al final."""
+    """Where the next sequence goes. It wraps around on reaching the end."""
     var count: Int
-    """Cuantas secuencias validas hay (se queda en capacity al llenarse)."""
+    """How many valid sequences there are (it stays at capacity once full)."""
 
     def __init__(out self, capacity: Int, t_len: Int, obs_dim: Int,
                  num_actions: Int = 0):
@@ -95,12 +95,12 @@ struct TrajectoryBuffer(Movable):
             done: List[Scalar[dtype]], truncated: List[Scalar[dtype]],
             bootstrap_obs: List[Scalar[dtype]],
             q: List[Scalar[dtype]] = List[Scalar[dtype]]()) raises:
-        """Guarda UNA secuencia de t_len pasos. Al llenarse pisa la mas vieja.
+        """Stores ONE sequence of t_len steps. Once full it overwrites the oldest.
 
-        `q` solo hace falta si el buffer se creo con num_actions > 0 (o sea, si se
-        va a entrenar al actor). Se valida el tamano en vez de confiar: meter una q
-        corta escribiria basura en los pasos que faltan y el actor aprenderia de
-        ella sin que nada fallara."""
+        `q` is only needed if the buffer was created with num_actions > 0 (that
+        is, if the actor is going to be trained). The size is validated rather
+        than trusted: passing a short q would write garbage into the missing steps
+        and the actor would learn from it without anything failing."""
         if len(reward) != self.t_len or len(done) != self.t_len \
                 or len(truncated) != self.t_len:
             raise Error("la secuencia deberia tener ", self.t_len, " pasos")
@@ -132,11 +132,11 @@ struct TrajectoryBuffer(Movable):
 
     def sample_indices(self, n: Int, seed: UInt32,
                        stream: UInt32) raises -> List[Int]:
-        """`n` indices de secuencias validas, con reemplazo.
+        """`n` indices of valid sequences, with replacement.
 
-        Usa el mismo RNG contador que el resto del proyecto (`rand_bits`), asi que
-        con la misma semilla salen los mismos indices: los tests de entrenamiento
-        pueden ser deterministas de punta a punta.
+        It uses the same counter-based RNG as the rest of the project
+        (`rand_bits`), so with the same seed the same indices come out: the
+        training tests can be deterministic end to end.
         """
         if self.count == 0:
             raise Error("el buffer esta vacio: no hay nada que muestrear")
@@ -147,10 +147,10 @@ struct TrajectoryBuffer(Movable):
         return out^
 
     def gather(self, indices: List[Int]) raises -> List[Scalar[dtype]]:
-        """Las observaciones de esas secuencias, listas para subir a la GPU.
+        """Those sequences' observations, ready to be uploaded to the GPU.
 
-        Salida [len(indices), t_len, obs_dim] aplanada, en el mismo orden en que
-        vienen los indices.
+        Output [len(indices), t_len, obs_dim] flattened, in the same order the
+        indices arrive in.
         """
         out = List[Scalar[dtype]]()
         span = self.t_len * self.obs_dim
@@ -164,10 +164,10 @@ struct TrajectoryBuffer(Movable):
         return out^
 
     def gather_steps(self, indices: List[Int], which: Int) raises -> List[Scalar[dtype]]:
-        """Un campo por paso de esas secuencias: 0=reward, 1=done, 2=truncated.
+        """One per-step field of those sequences: 0=reward, 1=done, 2=truncated.
 
-        Salida [len(indices), t_len] aplanada, que es justo la forma que espera la
-        GAE truncada.
+        Output [len(indices), t_len] flattened, which is exactly the shape the
+        truncated GAE expects.
         """
         out = List[Scalar[dtype]]()
         for k in range(len(indices)):
@@ -185,7 +185,7 @@ struct TrajectoryBuffer(Movable):
         return out^
 
     def gather_bootstrap(self, indices: List[Int]) raises -> List[Scalar[dtype]]:
-        """Las bootstrap_obs de esas secuencias, misma forma que `gather`."""
+        """Those sequences' bootstrap_obs, same shape as `gather`."""
         out = List[Scalar[dtype]]()
         span = self.t_len * self.obs_dim
         for k in range(len(indices)):
@@ -196,7 +196,7 @@ struct TrajectoryBuffer(Movable):
         return out^
 
     def gather_q(self, indices: List[Int]) raises -> List[Scalar[dtype]]:
-        """Las q de las secuencias pedidas, en el orden pedido."""
+        """The q of the requested sequences, in the requested order."""
         if self.num_actions == 0:
             raise Error("este buffer se creo sin q (num_actions = 0)")
         span = self.t_len * self.num_actions
