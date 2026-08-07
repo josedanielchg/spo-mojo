@@ -1,45 +1,45 @@
-"""Como se lanzan los kernels de la busqueda: tamanos de bloque y comprobaciones.
+"""How the search's kernels get launched: block sizes and checks.
 
-Esta aparte porque lo usan todos los ficheros del E-step, y porque los dos
-tamanos de bloque no son intercambiables: elegir el que no toca es un bug
-silencioso, no un error de compilacion.
+This lives apart because every file of the E-step uses it, and because the two
+block sizes are not interchangeable: picking the wrong one is a silent bug, not a
+compile error.
 """
 
 from systems.spo.spo_types import SPOConfig
 
 comptime TPB = 32
-"""Bloque de los kernels que son un map plano: un hilo por particula.
+"""Block size for the kernels that are a flat map: one thread per particle.
 
-Aqui la fila no significa nada; solo importa cubrir P elementos, asi que el
-tamano del bloque es libre y 32 (un warp) va bien."""
+Here the row means nothing; all that matters is covering P elements, so the block
+size is free and 32 (one warp) works fine."""
 
 comptime TPB_PARTICLES = 512
-"""Bloque de los kernels cuya FILA es la dimension de particulas (resampling,
-ESS, softmax del readout). Ahi el bloque entero trabaja sobre las N particulas de
-un env, asi que N tiene que caber dentro.
+"""Block size for the kernels whose ROW is the particle dimension (resampling,
+ESS, the readout's softmax). There the whole block works over one env's N
+particles, so N has to fit inside.
 
-Es 128 y no 32 para que la demo pueda barrer N = 64. Los hilos de mas no cuestan
-nada: los guards los desactivan y la GPU no lanza warps enteros ociosos.
-Con N = 16 (lo del paper) sobra de largo."""
+It is 128 and not 32 so that the demo can sweep N = 64. The extra threads cost
+nothing: the guards switch them off and the GPU does not launch whole idle warps.
+With N = 16 (the paper's) it is far more than enough."""
 
 
 def blocks_for(n: Int) -> Int:
-    """Cuantos bloques de TPB hilos hacen falta para cubrir n elementos.
+    """How many blocks of TPB threads are needed to cover n elements.
 
-    Es `(n + TPB - 1) // TPB`, que estaba escrito a mano unas quince veces. El
-    redondeo hacia arriba es la razon de que TODO kernel de map necesite su guard
-    `if i < n`: casi siempre se lanzan mas hilos que datos.
+    It is `(n + TPB - 1) // TPB`, which was written out by hand some fifteen
+    times. The rounding up is the reason EVERY map kernel needs its `if i < n`
+    guard: almost always more threads are launched than there is data.
     """
     return (n + TPB - 1) // TPB
 
 
 def check_search_config(cfg: SPOConfig) raises:
-    """Comprueba en HOST lo que los kernels no pueden comprobar solos.
+    """Checks on the HOST what the kernels cannot check for themselves.
 
-    Existe porque este error ya me mordio: con N = 64 y bloques de 32 la busqueda
-    devolvia una politica PEOR que con N = 16, sin avisar de nada. El
-    debug_assert del kernel lo caza, pero solo si alguien corre con -D ASSERT=all;
-    esta comprobacion salta siempre y dice exactamente que hacer."""
+    It exists because this error has already bitten me: with N = 64 and blocks of
+    32 the search returned a WORSE policy than with N = 16, without warning about
+    anything. The kernel's debug_assert catches it, but only if somebody runs with
+    -D ASSERT=all; this check always fires and says exactly what to do."""
     if cfg.num_particles > TPB_PARTICLES:
         raise Error("num_particles=", cfg.num_particles, " no cabe en un bloque de ",
                     TPB_PARTICLES, ". Sube TPB_PARTICLES (potencia de dos) o baja N.")

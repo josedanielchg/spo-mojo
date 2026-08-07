@@ -1,18 +1,17 @@
-"""Los contenedores de la busqueda: el enjambre, el paso, el scratch y la salida.
+"""The search's containers: the swarm, the step, the scratch and the output.
 
-Todos siguen el mismo patron: struct-of-arrays con `DeviceBuffer` planos de P =
-envs*particulas elementos, indexados por `p = env * num_particles + n`. Stoix usa
-arrays [NumEnvs, NumParticles, ...] y deja que JAX haga el tree_map; aqui el
-indice plano hace que la mayoria de kernels sean un map de un hilo por particula.
+They all follow the same pattern: struct-of-arrays with flat `DeviceBuffer`s of
+P = envs*particles elements, indexed by `p = env * num_particles + n`. Stoix uses
+[NumEnvs, NumParticles, ...] arrays and lets JAX do the tree_map; here the flat
+index makes most kernels a map of one thread per particle.
 
-Cuatro contenedores y un bundle:
+Four containers and one bundle:
 
-    Particles       el estado del enjambre, lo que sobrevive de una profundidad
-                    a la siguiente
-    StepOutputs     lo que produce UN paso del modelo, se reescribe cada vez
-    SearchScratch   buffers intermedios del resampling
-    SPOOutput       el resultado publico de la busqueda
-    SearchWorkspace los cuatro anteriores mas los uniformes, reservado una vez
+    Particles       the swarm's state, what survives from one depth to the next
+    StepOutputs     what ONE model step produces, rewritten every time
+    SearchScratch   the resampling's intermediate buffers
+    SPOOutput       the search's public result
+    SearchWorkspace the previous four plus the uniforms, allocated once
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -23,35 +22,35 @@ from systems.spo.spo_types import SPOConfig
 
 
 struct Particles(Movable):
-    """Las P trayectorias hipoteticas: el estado del enjambre.
+    """The P hypothetical trajectories: the swarm's state.
 
-    Los nombres son los de Stoix a proposito (ver `Particles` en ff_spo.py).
+    The names are Stoix's on purpose (see `Particles` in ff_spo.py).
     """
 
     var state: DeviceBuffer[dtype]
-    """[P, state_dim] estado completo del simulador, no solo la observacion."""
+    """[P, state_dim] the simulator's full state, not just the observation."""
 
     var root_actions: DeviceBuffer[idx_dtype]
-    """[P] la accion de profundidad 0. Es lo unico que al final se ejecuta."""
+    """[P] the depth-0 action. It is the only thing that ends up being executed."""
 
     var resample_td_weights: DeviceBuffer[dtype]
-    """[P] suma de errores TD desde el ultimo resampling. Peso bajo trayectoria prometedora"""
+    """[P] sum of TD errors since the last resampling. Low weight, unpromising trajectory"""
 
     var prior_logits: DeviceBuffer[dtype]
-    """[P] Se guarda el logaritmo de la probabilidad de la acción elegida. log π(acción elegida | estado)
-    Servira para comparar posteriormente la politica original con la politica mejorada durante el M-step."""
+    """[P] The log-probability of the chosen action is stored. log pi(chosen action | state)
+    It will serve later to compare the original policy with the improved policy during the M-step."""
 
     var value: DeviceBuffer[dtype]
-    """[P] V(s) del estado actual de la particula."""
+    """[P] V(s) of the particle's current state."""
 
     var terminal: DeviceBuffer[idx_dtype]
-    """[P] 1 si la particula ya murio. Es pegajoso: una vez a 1 no vuelve a 0."""
+    """[P] 1 if the particle is already dead. It is sticky: once 1 it never goes back to 0."""
 
     var depth: DeviceBuffer[idx_dtype]
-    """[P] cuantos pasos ha avanzado."""
+    """[P] how many steps it has advanced."""
 
     var gae: DeviceBuffer[dtype]
-    """[P] ventaja acumulada hacia adelante. Alimenta el loss de la temperatura."""
+    """[P] advantage accumulated forwards. It feeds the temperature loss."""
 
     def __init__(out self, ctx: DeviceContext, config: SPOConfig) raises:
         p = config.num_search_particles()
@@ -66,34 +65,35 @@ struct Particles(Movable):
 
 
 struct StepOutputs(Movable):
-    """Lo que devuelve un paso del modelo: el `SPORecurrentFnOutput` de Stoix.
+    """What one model step returns: Stoix's `SPORecurrentFnOutput`.
 
-    Son buffers de trabajo que se reescriben en cada profundidad; estan fuera de
-    Particles porque no forman parte del estado de la particula, solo del paso.
+    They are working buffers rewritten at every depth; they sit outside Particles
+    because they are not part of the particle's state, only of the step.
     """
 
     var reward: DeviceBuffer[dtype]
-    """[P] recompensa del paso."""
+    """[P] the step's reward."""
 
     var discount: DeviceBuffer[dtype]
-    """[P] el rec_discount de Stoix: discount*(1-truncated). A 0 marca "esta
-    particula dejo de simular", tanto si murio de verdad como si la truncaron."""
+    """[P] Stoix's rec_discount: discount*(1-truncated). At 0 it marks "this
+    particle stopped simulating", whether it really died or was truncated."""
 
     var next_value: DeviceBuffer[dtype]
-    """[P] el bootstrap_value de Stoix: discount_real * search_gamma * V(s').
-    Cuidado con la diferencia respecto al campo de arriba: en una truncacion el
-    discount vale 0 pero esto no, porque el estado truncado si tiene futuro y hay
-    que arrastrar su valor."""
+    """[P] Stoix's bootstrap_value: discount_real * search_gamma * V(s').
+    Mind the difference with the field above: on a truncation the discount is 0
+    but this one is not, because the truncated state does have a future and its
+    value has to be carried along."""
 
     var next_action: DeviceBuffer[idx_dtype]
-    """[P] la accion que la particula ejecutara en la SIGUIENTE profundidad."""
+    """[P] the action the particle will execute at the NEXT depth."""
 
     var next_prior_logits: DeviceBuffer[dtype]
-    """[P] log-prob de esa accion bajo el prior."""
+    """[P] log-prob of that action under the prior."""
 
     var action_logits: DeviceBuffer[dtype]
-    """[P, num_actions] logits del prior en el nuevo estado. Es de donde se
-    muestrea next_action, y se guarda porque el muestreo va en otro kernel."""
+    """[P, num_actions] the prior's logits at the new state. It is where
+    next_action is sampled from, and it is stored because the sampling happens in
+    another kernel."""
 
     def __init__(out self, ctx: DeviceContext, config: SPOConfig) raises:
         p = config.num_search_particles()
@@ -106,16 +106,16 @@ struct StepOutputs(Movable):
 
 
 struct SearchScratch(Movable):
-    """Buffers auxiliares del resampling.
+    """The resampling's auxiliary buffers.
 
-    El resampling es un gather: la particula i pasa a ser una copia de la
-    particula idx[i]. Hacerlo in-place seria una carrera de libro, porque un hilo
-    puede escribir su destino antes de que otro haya leido ese mismo hueco, asi
-    que hace falta un buffer intermedio por campo.
+    Resampling is a gather: particle i becomes a copy of particle idx[i]. Doing it
+    in place would be a textbook race, because one thread can write its
+    destination before another has read that very slot, so an intermediate buffer
+    per field is needed.
 
-    Solo estan los seis campos que se copian. `resample_td_weights` no hace falta
-    porque se resetea a cero, y `gae` tampoco porque se preserva sin reordenar
-    (ver la nota en resampling.mojo).
+    Only the six fields that get copied are here. `resample_td_weights` is not
+    needed because it is reset to zero, and neither is `gae` because it is
+    preserved without reordering (see the note in resampling.mojo).
     """
 
     var state: DeviceBuffer[dtype]
@@ -126,10 +126,10 @@ struct SearchScratch(Movable):
     var depth: DeviceBuffer[idx_dtype]
 
     var indices: DeviceBuffer[idx_dtype]
-    """[P] a que particula copia cada hueco."""
+    """[P] which particle each slot copies."""
 
     var resample_logits: DeviceBuffer[dtype]
-    """[P] los pesos SMC divididos por la temperatura."""
+    """[P] the SMC weights divided by the temperature."""
 
     def __init__(out self, ctx: DeviceContext, config: SPOConfig) raises:
         p = config.num_search_particles()
@@ -144,33 +144,33 @@ struct SearchScratch(Movable):
 
 
 struct SPOOutput(Movable):
-    """El resultado publico de una busqueda. Espeja SPOOutput de spo_types.py."""
+    """The public result of one search. Mirrors SPOOutput from spo_types.py."""
 
     var action: DeviceBuffer[idx_dtype]
-    """[num_envs] la accion que se ejecuta de verdad en el entorno. Una sola por env"""
+    """[num_envs] the action actually executed in the environment. One per env only"""
 
     var sampled_actions: DeviceBuffer[idx_dtype]
-    """[P] las N acciones raiz que sobrevivieron. Su histograma es la politica
-    mejorada q, que es justo lo que el M-step intenta imitar."""
+    """[P] the N root actions that survived. Their histogram is the improved
+    policy q, which is exactly what the M-step tries to imitate."""
 
     var sampled_action_weights: DeviceBuffer[dtype]
-    """[P] el peso de cada una: softmax(w/temperatura) por env."""
+    """[P] the weight of each one: softmax(w/temperature) per env."""
 
     var value: DeviceBuffer[dtype]
-    """[num_envs] la media de V(s_raiz) sobre las particulas."""
+    """[num_envs] the mean of V(s_root) over the particles."""
 
     var sampled_advantages: DeviceBuffer[dtype]
-    """[P] la gae de cada particula. Alimenta el loss de la temperatura."""
+    """[P] each particle's gae. It feeds the temperature loss."""
 
     var root_values: DeviceBuffer[dtype]
-    """[P] copia de V(s_raiz) por particula, guardada antes de que el rollout
-    pise particles.value."""
+    """[P] copy of V(s_root) per particle, saved before the rollout overwrites
+    particles.value."""
 
     var ess: DeviceBuffer[dtype]
-    """[search_depth, num_envs] tamano de muestra efectivo en cada profundidad."""
+    """[search_depth, num_envs] effective sample size at each depth."""
 
     var entropy: DeviceBuffer[dtype]
-    """[search_depth, num_envs] entropia de los pesos en cada profundidad."""
+    """[search_depth, num_envs] entropy of the weights at each depth."""
 
     def __init__(out self, ctx: DeviceContext, config: SPOConfig) raises:
         p = config.num_search_particles()
@@ -186,13 +186,13 @@ struct SPOOutput(Movable):
 
 
 struct SearchWorkspace(Movable):
-    """Toda la memoria que una busqueda necesita, reservada UNA vez.
+    """All the memory one search needs, allocated ONCE.
 
-    Antes cada busqueda se reservaba sus propios buffers de uniformes y de raiz al
-    entrar y los soltaba al salir. En el juguete daba igual, pero en la fase 8 la
-    busqueda corre en cada paso de entorno, y reservar memoria de device miles de
-    veces es trabajo puro por nada. Aqui se construye el workspace una vez y se
-    reutiliza en todas las llamadas a `search`.
+    Each search used to allocate its own uniform and root buffers on entry and
+    release them on exit. On the toy problem it made no difference, but in phase 8
+    the search runs at every environment step, and allocating device memory
+    thousands of times is pure work for nothing. Here the workspace is built once
+    and reused across every call to `search`.
     """
 
     var particles: Particles
@@ -201,30 +201,30 @@ struct SearchWorkspace(Movable):
     var output: SPOOutput
 
     var root_logits: DeviceBuffer[dtype]
-    """[num_envs, num_actions] el prior evaluado en los estados raiz."""
+    """[num_envs, num_actions] the prior evaluated at the root states."""
 
     var root_value: DeviceBuffer[dtype]
-    """[num_envs] V(s_raiz)."""
+    """[num_envs] V(s_root)."""
 
     var u_action: DeviceBuffer[dtype]
-    """[P] uniformes para sortear acciones. Se rellena de nuevo en cada
-    profundidad; se puede reutilizar sin miedo porque el stream es unico y ejecuta
-    en orden: el relleno siguiente no puede adelantar al kernel que leyo el anterior."""
+    """[P] uniforms to draw actions with. It is refilled at every depth; it can be
+    reused without fear because the stream is unique and executes in order: the
+    next fill cannot overtake the kernel that read the previous one."""
 
     var u_step: DeviceBuffer[dtype]
-    """[P] uniformes para la transicion estocastica del modelo (p. ej. la jugada
-    del rival aleatorio en TTT). Uno por particula, se rellena de nuevo en cada
-    profundidad desde su propio stream. Un modelo determinista los ignora."""
+    """[P] uniforms for the model's stochastic transition (e.g. the random
+    rival's move in TTT). One per particle, refilled at every depth from its own
+    stream. A deterministic model ignores them."""
 
     var u_noise: DeviceBuffer[dtype]
-    """[num_envs, num_actions] uniformes del ruido de Dirichlet en la raiz. Va en
-    su propio buffer para que el ruido no comparta secuencia con el muestreo de
-    acciones: si la compartieran, la exploracion que el ruido intenta anadir
-    estaria correlacionada con lo que ya se muestreo."""
+    """[num_envs, num_actions] uniforms of the Dirichlet noise at the root. It
+    gets its own buffer so that the noise does not share a sequence with the
+    action sampling: if they shared one, the exploration the noise is trying to
+    add would be correlated with what was already sampled."""
 
     var u_resample: DeviceBuffer[dtype]
-    """[P] uniformes del resampling, en un buffer aparte para que el muestreo de
-    acciones y el de resampling no compartan secuencia."""
+    """[P] resampling uniforms, in a separate buffer so that action sampling and
+    resampling do not share a sequence."""
 
     def __init__(out self, ctx: DeviceContext, cfg: SPOConfig) raises:
         p = cfg.num_search_particles()

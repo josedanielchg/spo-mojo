@@ -1,58 +1,59 @@
-"""Los hiperparametros de la busqueda SPO.
+"""The SPO search's hyperparameters.
 
-Este fichero es solo la configuracion. Lo demas del vocabulario esta al lado:
+This file is only the configuration. The rest of the vocabulary sits next to it:
 
-    particles.mojo      los contenedores (Particles, StepOutputs, SPOOutput...)
-    search_model.mojo   el contrato que la busqueda le pide a un modelo
+    particles.mojo      the containers (Particles, StepOutputs, SPOOutput...)
+    search_model.mojo   the contract the search asks of a model
 
-Los nombres son los de Stoix a proposito (`stoix/configs/system/spo/ff_spo.yaml`)
-para poder poner los dos ficheros uno al lado del otro y comparar.
+The names are Stoix's on purpose (`stoix/configs/system/spo/ff_spo.yaml`) so that
+the two files can be put side by side and compared.
 """
 
 from ops.common import dtype
 
 
 struct SPOConfig(Copyable, Movable):
-    """Los hiperparametros de la busqueda. Valores por defecto = ff_spo.yaml."""
+    """The search's hyperparameters. Default values = ff_spo.yaml."""
 
     var num_envs: Int
     var num_particles: Int
     var num_actions: Int
 
     var state_dim: Int
-    """Es la cantidad de números necesarios para representar el estado de un entorno."""
+    """The number of values needed to represent one environment's state."""
 
     var search_depth: Int
 
     var resample_period: Int
-    """Cada cuantos pasos se hace resampling (modo 'period' de Stoix)."""
+    """How many steps between resamplings (Stoix's 'period' mode)."""
 
     var temperature: Scalar[dtype]
-    """Temperatura fija. Luego la haremos dinamica de acuerdo a lo aprendido por la politica."""
+    """Fixed temperature. Later we will make it dynamic according to what the
+    policy learns."""
 
     var search_gamma: Scalar[dtype]
-    """Indica cuánto importan las recompensas futuras:
-        gamma = 1.0 implica que futuro y presente pesan igual
-        gamma = 0.9 entonces cada paso futuro pesa un 90% del anterior
+    """How much future rewards matter:
+        gamma = 1.0 means future and present weigh the same
+        gamma = 0.9 means each future step weighs 90% of the previous one
     """
 
     var search_gae_lambda: Scalar[dtype]
-    """Controla cuánto se acumulan los errores TD de varios pasos para calcular la ventaja.
-            lambda bajo = ventaja más basada en pasos cercanos
-            lambda alto = considera más profundamente la trayectoria completa
+    """Controls how much the multi-step TD errors accumulate to compute the advantage.
+            low lambda  = advantage based more on nearby steps
+            high lambda = takes the whole trajectory more deeply into account
     """
 
     var dirichlet_alpha: Scalar[dtype]
-    """Concentracion del ruido de Dirichlet en la raiz. Stoix:
-    `root_exploration_dirichlet_alpha = 1.0`. Solo esta implementado alpha = 1
-    (Dirichlet simetrica con alpha=1 es la uniforme sobre el simplex, que se
-    muestrea normalizando exponenciales); otro valor pediria un muestreador Gamma.
-    Como el valor por defecto de Stoix ES 1.0, no hace falta mas."""
+    """Concentration of the Dirichlet noise at the root. Stoix:
+    `root_exploration_dirichlet_alpha = 1.0`. Only alpha = 1 is implemented (a
+    symmetric Dirichlet with alpha=1 is uniform over the simplex, which is sampled
+    by normalising exponentials); another value would call for a Gamma sampler.
+    Since Stoix's default IS 1.0, no more is needed."""
 
     var dirichlet_fraction: Scalar[dtype]
-    """Cuanto ruido se mezcla. Stoix:
-    `root_exploration_dirichlet_fraction = 0.0`, o sea APAGADO por defecto. Con 0
-    la busqueda es exactamente la de antes."""
+    """How much noise gets mixed in. Stoix:
+    `root_exploration_dirichlet_fraction = 0.0`, that is, OFF by default. With 0
+    the search is exactly the one from before."""
 
     def __init__(out self, num_envs: Int, num_particles: Int, num_actions: Int,
                  state_dim: Int, search_depth: Int, resample_period: Int,
@@ -60,9 +61,9 @@ struct SPOConfig(Copyable, Movable):
                  search_gae_lambda: Scalar[dtype],
                  dirichlet_alpha: Scalar[dtype] = 1.0,
                  dirichlet_fraction: Scalar[dtype] = 0.0):
-        # Init explicito y no `@fieldwise_init` para poder dar valores por defecto
-        # a los dos campos nuevos: asi las decenas de sitios que ya construyen
-        # SPOConfig siguen compilando sin tocarlos.
+        # Explicit init and not `@fieldwise_init` so that default values can be
+        # given to the two new fields: that way the dozens of places that already
+        # build an SPOConfig keep compiling untouched.
         self.num_envs = num_envs
         self.num_particles = num_particles
         self.num_actions = num_actions
@@ -76,15 +77,15 @@ struct SPOConfig(Copyable, Movable):
         self.dirichlet_fraction = dirichlet_fraction
 
     def num_search_particles(self) -> Int:
-        """P = envs * particulas. Es el tamano de casi todos los buffers."""
+        """P = envs * particles. It is the size of almost every buffer."""
         return self.num_envs * self.num_particles
 
 
 def default_config(num_envs: Int, state_dim: Int, num_actions: Int) -> SPOConfig:
-    """Los valores del paper / ff_spo.yaml para la busqueda.
+    """The paper's / ff_spo.yaml's values for the search.
 
-    La temperatura es fija (0.5, el `fixed_temperature` de Stoix) hasta que en la
-    fase 8 existan los duales y se pueda aprender.
+    The temperature is fixed (0.5, Stoix's `fixed_temperature`) until phase 8,
+    when the duals exist and it can be learned.
     """
     return SPOConfig(
         num_envs=num_envs,

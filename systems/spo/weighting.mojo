@@ -1,17 +1,19 @@
-"""Fase 2 de la busqueda: pesar. La ecuacion 10 del paper, en log-space.
+"""Phase 2 of the search: weighing. Equation 10 of the paper, in log-space.
 
-Es el corazon del SMC: despues de que el modelo avance las particulas, aqui se
-decide cuanta evidencia ha acumulado cada una a favor de su accion raiz.
+It is the heart of the SMC: after the model advances the particles, this is where
+it is decided how much evidence each one has accumulated in favour of its root
+action.
 
-    peso <- peso + (r + V' - V)      con mascara de particulas muertas
+    weight <- weight + (r + V' - V)      with a mask for dead particles
 
-El paper lo escribe como un producto, `w <- w * exp(A/eta)`. Guardar la SUMA de
-ventajas y diferir el `exp(.../eta)` al softmax del resampling es lo mismo
-matematicamente y mucho mas estable: sumar no desborda, exponenciar si.
+The paper writes it as a product, `w <- w * exp(A/eta)`. Storing the SUM of
+advantages and deferring the `exp(.../eta)` to the resampling's softmax is
+mathematically the same and far more stable: adding does not overflow,
+exponentiating does.
 
-Y de paso se acumula la GAE hacia adelante, que es una segunda cuenta con otro
-destino: los pesos deciden que particulas sobreviven, la GAE alimenta el loss de
-la temperatura del M-step. No confundirlas.
+And along the way the forward GAE is accumulated, which is a second tally with a
+different destination: the weights decide which particles survive, the GAE feeds
+the M-step's temperature loss. Do not confuse them.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -24,23 +26,24 @@ from systems.spo.spo_types import SPOConfig
 
 
 def update_particles_kernel(
-        # estado de la particula, se actualiza in-place
+        # particle state, updated in place
         weights: GlobalF32, gae: GlobalF32, value: GlobalF32,
         terminal: GlobalI32, depth: GlobalI32, prior_logits: GlobalF32,
-        # lo que produjo el paso del modelo
+        # what the model's step produced
         reward: GlobalF32, discount: GlobalF32, next_value: GlobalF32,
         next_prior_logits: GlobalF32,
         # config
         n_particles: Int, search_gamma: Scalar[dtype],
         search_gae_lambda: Scalar[dtype]):
-    """Cierra una profundidad: peso SMC, GAE, y el relevo de estado.
+    """Closes one depth: SMC weight, GAE, and the state handover.
 
-    Funde tres cosas que en Stoix son funciones separadas (`smc_weight_update_fn`,
-    `calculate_gae` y `update_particles`) porque con un hilo por particula las
-    tres son la misma pasada: se leen los valores viejos y se escriben los nuevos.
+    It fuses three things that in Stoix are separate functions
+    (`smc_weight_update_fn`, `calculate_gae` and `update_particles`) because with
+    one thread per particle all three are the same pass: the old values are read
+    and the new ones written.
 
-    El orden dentro del hilo es lo unico delicado: el error TD y la GAE necesitan
-    el V(s) y la profundidad VIEJOS, asi que se calculan antes de pisarlos.
+    The order inside the thread is the only delicate part: the TD error and the
+    GAE need the OLD V(s) and depth, so they are computed before overwriting them.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n_particles:
@@ -51,46 +54,46 @@ def update_particles_kernel(
     was_terminal = Int(terminal[p]) != 0
     step_discount = discount[p]
 
-    # El error TD no se multiplica por gamma porque ya viene plegado dentro de
-    # next_value, que es el bootstrap_value que devolvio el modelo. Stoix lo
-    # comenta igual: "We do not multiply by discount as we do it in the
+    # The TD error is not multiplied by gamma because it already comes folded
+    # inside next_value, which is the bootstrap_value the model returned. Stoix
+    # comments the same: "We do not multiply by discount as we do it in the
     # recurrent_fn".
     td_error = reward[p] + next_value[p] - old_value
 
-    # La mascara terminal congela el peso de las particulas ya muertas, porque
-    # lo que les pase despues de morir no deberia cambiar su evidencia.
+    # The terminal mask freezes the weight of particles that are already dead,
+    # because what happens to them after dying should not change their evidence.
     mask = Scalar[dtype](0) if was_terminal else Scalar[dtype](1)
     weights[p] = weights[p] + td_error * mask
 
-    # La GAE va al reves de lo habitual. Normalmente se calcula hacia atras en
-    # el tiempo, pero aqui la busqueda avanza y no se puede mirar al futuro, asi
-    # que cada profundidad anade su delta descontado por
-    # (gamma*lambda*discount)^profundidad.
+    # The GAE runs the other way round from usual. Normally it is computed
+    # backwards in time, but here the search moves forwards and cannot look into
+    # the future, so each depth adds its delta discounted by
+    # (gamma*lambda*discount)^depth.
     #
-    # Fijate en que no hay mascara terminal, igual que en Stoix. Lo que congela a
-    # una particula muerta es que su discount vale 0 y entonces el factor se
-    # anula solo. La excepcion es la profundidad 0, donde el exponente es 0 y el
-    # factor vale 1 pase lo que pase, y eso es correcto: el primer paso siempre
-    # cuenta entero aunque la particula muera en el.
+    # Note that there is no terminal mask, just as in Stoix. What freezes a dead
+    # particle is that its discount is 0 and then the factor vanishes on its own.
+    # The exception is depth 0, where the exponent is 0 and the factor is 1 no
+    # matter what, and that is correct: the first step always counts in full even
+    # if the particle dies on it.
     decay_base = search_gamma * search_gae_lambda * step_discount
     decay = Scalar[dtype](1)
     for _ in range(old_depth):
         decay *= decay_base
     gae[p] = gae[p] + td_error * decay
 
-    # Y el relevo: lo nuevo pasa a ser lo actual.
+    # And the handover: the new becomes the current.
     value[p] = next_value[p]
     prior_logits[p] = next_prior_logits[p]
     depth[p] = Scalar[idx_dtype](old_depth + 1)
-    # `terminal` es pegajoso: una vez muerta, muerta. Un discount de 0 la mata,
-    # tanto si fue muerte real como truncacion.
+    # `terminal` is sticky: once dead, dead. A discount of 0 kills it, whether it
+    # was a real death or a truncation.
     if was_terminal or step_discount == 0.0:
         terminal[p] = Scalar[idx_dtype](1)
 
 
 def update_particles(ctx: DeviceContext, particles: Particles,
                      outputs: StepOutputs, cfg: SPOConfig) raises:
-    """Encola el cierre de una profundidad."""
+    """Enqueues the closing of one depth."""
     p_total = cfg.num_search_particles()
     ctx.enqueue_function[update_particles_kernel, update_particles_kernel](
         particles.resample_td_weights.unsafe_ptr(), particles.gae.unsafe_ptr(),

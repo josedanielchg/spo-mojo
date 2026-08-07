@@ -1,17 +1,17 @@
-"""Fase 3 de la busqueda: remuestrear. Convierte peso en multiplicidad.
+"""Phase 3 of the search: resampling. It turns weight into multiplicity.
 
-Las particulas prometedoras se copian varias veces y las malas desaparecen.
-Despues todas vuelven a tener el mismo peso, y la informacion de cual era mejor ya
-no vive en los pesos sino en CUANTAS COPIAS hay de cada una. Eso es lo que evita
-la degeneracion: sin resamplear, al cabo de unas profundidades una sola particula
-se lleva toda la masa y las otras quince son ruido caro.
+Promising particles get copied several times and bad ones disappear. Afterwards
+they all have the same weight again, and the information about which one was
+better no longer lives in the weights but in HOW MANY COPIES there are of each.
+That is what avoids degeneracy: without resampling, after a few depths a single
+particle takes all the mass and the other fifteen are expensive noise.
 
-Cuatro kernels en cadena:
+Four chained kernels:
 
-    resample_logits    peso / temperatura
-    resample_indices   softmax -> CDF -> N sorteos por env
-    gather_particles   dst[i] = src[idx[i]], a un buffer intermedio
-    copy_back          scratch -> particulas, y pesos a cero
+    resample_logits    weight / temperature
+    resample_indices   softmax -> CDF -> N draws per env
+    gather_particles   dst[i] = src[idx[i]], into an intermediate buffer
+    copy_back          scratch -> particles, and weights to zero
 """
 
 from std.builtin.debug_assert import debug_assert
@@ -30,12 +30,12 @@ from systems.spo.spo_types import SPOConfig
 
 def resample_logits_kernel(logits_out: GlobalF32, weights: GlobalF32,
                            n_particles: Int, temperature: Scalar[dtype]):
-    """logits = pesos / temperatura, el `get_resample_logits` de Stoix.
+    """logits = weights / temperature, Stoix's `get_resample_logits`.
 
-    La temperatura decide lo agresiva que es la busqueda. Con una temperatura
-    baja solo sobreviven las mejores particulas y el ESS se hunde; con una alta
-    se reparte casi por igual y la busqueda apenas mejora al prior. Es el mismo
-    eta que el M-step acabara aprendiendo.
+    The temperature decides how aggressive the search is. With a low temperature
+    only the best particles survive and the ESS collapses; with a high one the
+    mass is spread almost evenly and the search barely improves on the prior. It
+    is the same eta that the M-step will end up learning.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n_particles:
@@ -45,15 +45,15 @@ def resample_logits_kernel(logits_out: GlobalF32, weights: GlobalF32,
 def resample_indices_kernel[TPB_P: Int](
         indices_out: GlobalI32, logits: GlobalF32, uniforms: GlobalF32,
         num_particles: Int):
-    """Sortea N indices por env, con probabilidad softmax(logits) (CDF inversa).
+    """Draws N indices per env, with probability softmax(logits) (inverse CDF).
 
-    Un bloque por env y un hilo por particula. El CDF se construye una sola vez
-    en shared memory y luego cada uno de los N hilos hace su busqueda con su
-    propio uniforme, o sea N muestras del mismo CDF. Esa es la diferencia con
-    `categorical_from_logits`, que saca una sola muestra por fila.
+    One block per env and one thread per particle. The CDF is built once in shared
+    memory and then each of the N threads does its own search with its own
+    uniform, that is, N samples from the same CDF. That is the difference with
+    `categorical_from_logits`, which draws a single sample per row.
 
-    Como en el muestreo de la fase 2, el CDF se deja sin normalizar y lo que se
-    escala es el uniforme.
+    As in phase 2's sampling, the CDF is left unnormalised and what gets scaled is
+    the uniform.
     """
     debug_assert(num_particles <= TPB_P,
                  "resample: las particulas de un env tienen que caber en el bloque")
@@ -64,7 +64,7 @@ def resample_indices_kernel[TPB_P: Int](
     env = Int(block_idx.x)
     base = env * num_particles
 
-    # softmax estable -> CDF
+    # stable softmax -> CDF
     shared[tid] = logits[base + tid] if tid < num_particles else NEG_INF
     barrier()
     row_max = block_reduce_max[TPB_P](shared, tid)
@@ -79,10 +79,10 @@ def resample_indices_kernel[TPB_P: Int](
     total = shared[num_particles - 1]
     target = uniforms[base + tid] * total
 
-    # Barrido lineal. Con 16 particulas no compensa una busqueda binaria y asi
-    # el codigo dice exactamente lo que hace.
-    chosen = num_particles - 1     # por defecto el ultimo, por si el redondeo
-                                   # deja el target justo en el borde
+    # Linear scan. With 16 particles a binary search does not pay off, and this
+    # way the code says exactly what it does.
+    chosen = num_particles - 1     # the last one by default, in case rounding
+                                   # leaves the target right on the edge
     for n in range(num_particles):
         cdf_prev = shared[n - 1] if n > 0 else Scalar[dtype](0)
         if cdf_prev <= target and target < shared[n]:
@@ -93,20 +93,20 @@ def resample_indices_kernel[TPB_P: Int](
 
 
 def gather_particles_kernel(
-        # destino (los buffers de scratch)
+        # destination (the scratch buffers)
         dst_state: GlobalF32, dst_root_actions: GlobalI32,
         dst_prior_logits: GlobalF32, dst_value: GlobalF32,
         dst_terminal: GlobalI32, dst_depth: GlobalI32,
-        # origen (las particulas de verdad)
+        # source (the real particles)
         src_state: GlobalF32, src_root_actions: GlobalI32,
         src_prior_logits: GlobalF32, src_value: GlobalF32,
         src_terminal: GlobalI32, src_depth: GlobalI32,
         indices: GlobalI32, n_particles: Int, num_particles: Int,
         state_dim: Int):
-    """dst[i] = src[indices[i]], con los indices dentro del mismo env.
+    """dst[i] = src[indices[i]], with the indices inside the same env.
 
-    Va a scratch y no in-place: si escribiera encima, un hilo podria pisar un
-    hueco que otro todavia no ha leido. Es la carrera clasica del gather.
+    It goes to scratch and not in place: if it wrote on top, one thread could
+    overwrite a slot another has not read yet. It is the classic gather race.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n_particles:
@@ -132,10 +132,10 @@ def copy_back_kernel(
         src_prior_logits: GlobalF32, src_value: GlobalF32,
         src_terminal: GlobalI32, src_depth: GlobalI32,
         n_particles: Int, state_dim: Int):
-    """Devuelve el scratch a las particulas y resetea el peso a cero.
+    """Returns the scratch to the particles and resets the weight to zero.
 
-    El reset es parte del resampling: tras repartir las copias, todas las
-    particulas vuelven a estar igual de bien consideradas.
+    The reset is part of resampling: once the copies have been handed out, all the
+    particles are equally well regarded again.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n_particles:
@@ -153,17 +153,16 @@ def copy_back_kernel(
 
 def resample(ctx: DeviceContext, particles: Particles, scratch: SearchScratch,
              cfg: SPOConfig, uniforms: DeviceBuffer[dtype]) raises:
-    """Resampling completo. Espeja `resample` de Stoix.
+    """Full resampling. Mirrors Stoix's `resample`.
 
-    La gae no se toca, y conviene fijarse en eso. Stoix hace el gather de todo
-    y luego reescribe la gae con la de antes del resampling, asi que en la
-    practica se queda tal cual estaba. El motivo, segun su comentario, es que el
-    loss de la temperatura necesita las ventajas de antes de resamplear para
-    apuntar bien al KL; el precio es que la gae solo cubre hasta el ultimo
-    resampling.
+    The gae is not touched, and that is worth noticing. Stoix gathers everything
+    and then rewrites the gae with the pre-resampling one, so in practice it stays
+    exactly as it was. The reason, according to their comment, is that the
+    temperature loss needs the pre-resampling advantages in order to aim the KL
+    correctly; the price is that the gae only covers up to the last resampling.
 
-    Aqui sale mas simple: basta con no copiarla, que es lo mismo y ahorra un
-    buffer.
+    Here it comes out simpler: it is enough not to copy it, which is the same
+    thing and saves a buffer.
     """
     p_total = cfg.num_search_particles()
     blocks = blocks_for(p_total)

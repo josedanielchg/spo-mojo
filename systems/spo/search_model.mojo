@@ -1,13 +1,14 @@
-"""El contrato que la busqueda le pide a un modelo. Solo esto.
+"""The contract the search asks of a model. Only this.
 
-Tiene fichero propio a proposito: es la frontera del sistema. Lo que este de este
-lado (dos metodos) es todo lo que hay que escribir para enchufar un entorno nuevo
-a la busqueda; el resto del E-step no se toca.
+It gets its own file on purpose: it is the system's boundary. What sits on this
+side (two methods) is everything that has to be written to plug a new environment
+into the search; the rest of the E-step is left untouched.
 
-Que viva aqui y no en el fichero de la busqueda importa para la direccion de las
-dependencias: un entorno implementa `SearchModel` importando solo el contrato y
-los tipos de datos, sin depender del algoritmo. Asi `envs/cartpole.mojo` podra
-usarse como entorno real, en el bucle de aprendizaje, sin arrastrar el E-step.
+That it lives here and not in the search's file matters for the direction of the
+dependencies: an environment implements `SearchModel` by importing only the
+contract and the data types, without depending on the algorithm. That way
+`envs/cartpole.mojo` will be usable as a real environment, in the learning loop,
+without dragging the E-step along.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -18,59 +19,59 @@ from systems.spo.spo_types import SPOConfig
 
 
 trait SearchModel:
-    """Lo que la busqueda necesita saber hacer a un modelo. Son dos cosas.
+    """What the search needs a model to know how to do. It is two things.
 
-    Es el equivalente del `recurrent_fn` abstracto que recibe la clase SPO de
-    Stoix: el nucleo SMC (pesos, GAE, resampling, ESS, readout) no sabe si detras
-    hay un MDP de juguete, CartPole o un MLP.
+    It is the equivalent of the abstract `recurrent_fn` that Stoix's SPO class
+    receives: the SMC core (weights, GAE, resampling, ESS, readout) does not know
+    whether there is a toy MDP, CartPole or an MLP behind it.
 
-    Como funciona esto en Mojo 1.0.0b1, que es lo que costo encontrar: el modelo es
-    una INSTANCIA que se queda siempre en el host, y sus `enqueue_function` viven
-    DENTRO de sus propios metodos, donde el simbolo del kernel es concreto. El
-    kernel nunca cruza la frontera generica; solo la cruza el tipo. Intentar lo
-    contrario (pasar el kernel como parametro comptime, o como funcion de device)
-    no compila -- ver docs/api_notes.md.
+    How this works in Mojo 1.0.0b1, which is what took the effort to find out: the
+    model is an INSTANCE that always stays on the host, and its `enqueue_function`
+    calls live INSIDE its own methods, where the kernel's symbol is concrete. The
+    kernel never crosses the generic boundary; only the type does. Trying the
+    opposite (passing the kernel as a comptime parameter, or as a device function)
+    does not compile -- see docs/api_notes.md.
 
-    Que el modelo sea una instancia y no un tipo suelto tambien importa: asi puede
-    llevar estado propio. El juguete lleva tres numeros; el MLP de la fase 5
-    llevara los DeviceBuffer de los pesos del actor y del critico.
+    That the model is an instance and not a bare type also matters: that way it
+    can carry its own state. The toy problem carries three numbers; phase 5's MLP
+    will carry the DeviceBuffers of the actor's and the critic's weights.
     """
 
     def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
                   root_state: DeviceBuffer[dtype],
                   logits_out: DeviceBuffer[dtype],
                   value_out: DeviceBuffer[dtype]) raises:
-        """El prior y el valor en los estados RAIZ, uno por entorno.
+        """The prior and the value at the ROOT states, one per environment.
 
-            root_state  [num_envs, state_dim]   entrada
-            logits_out  [num_envs, num_actions] salida: los logits del prior
-            value_out   [num_envs]              salida: V(s_raiz)
+            root_state  [num_envs, state_dim]   input
+            logits_out  [num_envs, num_actions] output: the prior's logits
+            value_out   [num_envs]              output: V(s_root)
         """
         ...
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
              outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
-        """Avanza las P particulas una profundidad. Es el `recurrent_fn` del modelo.
+        """Advances the P particles by one depth. It is the model's `recurrent_fn`.
 
-        Lee  `particles.state` y `outputs.next_action` (la accion que toca ejecutar)
-        y escribe:
-            particles.state         el estado nuevo, in-place
-            outputs.reward          [P] recompensa del paso
+        It reads `particles.state` and `outputs.next_action` (the action due to be
+        executed) and writes:
+            particles.state         the new state, in place
+            outputs.reward          [P] the step's reward
             outputs.discount        [P] rec_discount: discount * (1 - truncated)
             outputs.next_value      [P] bootstrap: discount_real * search_gamma * V(s')
-            outputs.action_logits   [P, num_actions] el prior en el estado NUEVO
+            outputs.action_logits   [P, num_actions] the prior at the NEW state
 
-        El plegado de gamma y de la truncacion es responsabilidad del modelo, igual
-        que en el `recurrent_fn` de Stoix, para que el nucleo SMC no tenga que saber
-        nada del entorno.
+        Folding in gamma and the truncation is the model's responsibility, just as
+        in Stoix's `recurrent_fn`, so that the SMC core does not have to know
+        anything about the environment.
 
-        `step_uniforms` [P] son uniformes en [0,1), uno por particula, para los
-        modelos con transicion ESTOCASTICA (p. ej. TTT contra un rival aleatorio:
-        con ellos se elige la casilla del rival). Un modelo determinista los ignora;
-        vienen de un stream RNG propio de la busqueda, distinto por profundidad.
+        `step_uniforms` [P] are uniforms in [0,1), one per particle, for models
+        with a STOCHASTIC transition (e.g. TTT against a random rival: they are
+        used to pick the rival's cell). A deterministic model ignores them; they
+        come from the search's own RNG stream, different at each depth.
 
-        Lo que NO hace: tocar `particles.value` (el error TD necesita el V viejo) ni
-        sortear la accion siguiente -- de eso se encarga `sample_next_actions`, que
-        es generico y lo llama la busqueda.
+        What it does NOT do: touch `particles.value` (the TD error needs the old
+        V) nor draw the next action -- that is handled by `sample_next_actions`,
+        which is generic and called by the search.
         """
         ...

@@ -1,19 +1,19 @@
-"""Fase 4 de la busqueda: medir. ESS y entropia de los pesos, por entorno.
+"""Phase 4 of the search: measuring. ESS and entropy of the weights, per environment.
 
-No cambian nada de la busqueda: son el diagnostico. Pero son EL diagnostico, y
-sin ellos no hay forma de saber si el enjambre esta sano o si quince de las
-dieciseis particulas son ruido.
+They change nothing about the search: they are the diagnostic. But they are THE
+diagnostic, and without them there is no way of knowing whether the swarm is
+healthy or whether fifteen of the sixteen particles are noise.
 
-    ESS = 1 / sum(w_i^2)   cuantas particulas aportan de verdad
-    entropia = -sum(w log w)
+    ESS = 1 / sum(w_i^2)   how many particles really contribute
+    entropy = -sum(w log w)
 
-Con pesos uniformes el ESS vale N, porque todas cuentan igual; cuando un peso se
-lo lleva todo baja a 1 y la busqueda ha colapsado. En la demo se ve caer entre
-resamplings y recuperarse justo despues, que es exactamente la curva que uno
-espera de SMC.
+With uniform weights the ESS is N, because they all count equally; when one weight
+takes everything it drops to 1 and the search has collapsed. In the demo it can be
+seen falling between resamplings and recovering right afterwards, which is exactly
+the curve one expects from SMC.
 
-En Stoix esto es tambien el disparador del modo de resampling por `ess`, que aqui
-no esta implementado (usamos el modo `period`).
+In Stoix this is also the trigger for the `ess` resampling mode, which is not
+implemented here (we use the `period` mode).
 """
 
 from std.gpu import block_idx, thread_idx, barrier
@@ -31,7 +31,7 @@ from systems.spo.spo_types import SPOConfig
 
 def ess_entropy_kernel[TPB_P: Int](ess_out: GlobalF32, entropy_out: GlobalF32,
                                    logits: GlobalF32, num_particles: Int):
-    """ESS y entropia de los pesos normalizados. Un bloque por env, un hilo por particula."""
+    """ESS and entropy of the normalised weights. One block per env, one thread per particle."""
     shared = stack_allocation[TPB_P, Scalar[dtype],
                               address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)
@@ -40,7 +40,7 @@ def ess_entropy_kernel[TPB_P: Int](ess_out: GlobalF32, entropy_out: GlobalF32,
 
     active = tid < num_particles
 
-    # softmax estable de los logits
+    # stable softmax of the logits
     shared[tid] = logits[base + tid] if active else NEG_INF
     barrier()
     row_max = block_reduce_max[TPB_P](shared, tid)
@@ -57,8 +57,8 @@ def ess_entropy_kernel[TPB_P: Int](ess_out: GlobalF32, entropy_out: GlobalF32,
     barrier()
     sum_sq = block_reduce_sum[TPB_P](shared, tid)
 
-    # -sum(w log w) -> entropia. El TINY evita log(0) en las particulas que se
-    # quedaron sin masa; Stoix usa el mismo truco con finfo.tiny.
+    # -sum(w log w) -> entropy. The TINY avoids log(0) on the particles that were
+    # left without mass; Stoix uses the same trick with finfo.tiny.
     TINY = Scalar[dtype](1e-30)
     shared[tid] = -w * log(w + TINY) if active else Scalar[dtype](0)
     barrier()
@@ -72,7 +72,7 @@ def ess_entropy_kernel[TPB_P: Int](ess_out: GlobalF32, entropy_out: GlobalF32,
 def compute_ess_entropy(ctx: DeviceContext, particles: Particles,
                         scratch: SearchScratch, output: SPOOutput,
                         cfg: SPOConfig, depth: Int) raises:
-    """Mide ESS y entropia con los pesos de ahora y los guarda en la fila `depth`."""
+    """Measures ESS and entropy with the current weights and stores them in row `depth`."""
     p_total = cfg.num_search_particles()
     ctx.enqueue_function[resample_logits_kernel, resample_logits_kernel](
         scratch.resample_logits.unsafe_ptr(),

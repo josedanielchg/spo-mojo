@@ -1,31 +1,31 @@
-"""La busqueda SMC completa: el E-step de SPO. Espeja la clase SPO de ff_spo.py.
+"""The full SMC search: SPO's E-step. Mirrors the SPO class in ff_spo.py.
 
-Este fichero solo ORQUESTA. Cada fase vive en su propio modulo y aqui se llaman
-en orden, que es como se lee el algoritmo:
+This file only ORCHESTRATES. Each phase lives in its own module and they are
+called here in order, which is how the algorithm reads:
 
-    root.mojo         sembrar      N particulas por env, una accion cada una
-    (el modelo)       avanzar      model.step(), lo unico especifico del entorno
-    weighting.mojo    pesar        peso <- peso + (r + V' - V)
-    metrics.mojo      medir        ESS y entropia, antes de resamplear
-    resampling.mojo   remuestrear  cada `resample_period` profundidades
-    readout.mojo      leer         la politica mejorada q y la accion a ejecutar
+    root.mojo         seed         N particles per env, one action each
+    (the model)       advance      model.step(), the only environment-specific bit
+    weighting.mojo    weigh        weight <- weight + (r + V' - V)
+    metrics.mojo      measure      ESS and entropy, before resampling
+    resampling.mojo   resample     every `resample_period` depths
+    readout.mojo      read out     the improved policy q and the action to execute
 
-Correspondencia con Stoix, por si hace falta comparar lado a lado:
+Correspondence with Stoix, in case a side-by-side comparison is needed:
 
     search[M]()        = SPO.search + SPO.rollout
-    smc_depth_close()  = la segunda mitad de one_step_rollout
+    smc_depth_close()  = the second half of one_step_rollout
     root.mojo          = make_root_fn
     weighting.mojo     = smc_weight_update_fn + calculate_gae + update_particles
     resampling.mojo    = get_resample_logits + resample
     metrics.mojo       = calculate_ess_and_entropy
     readout.mojo       = readout_weighted
 
-`search[M]()` es la UNICA copia del algoritmo: no hay una version por entorno.
-Lo que cambia entre modelos son los dos metodos de `SearchModel`.
+`search[M]()` is the ONLY copy of the algorithm: there is no per-environment
+version. What changes between models are `SearchModel`'s two methods.
 
-Convencion de indices en todo el E-step: la particula p = env * num_particles + n.
-Es plana a proposito, asi la mayoria de kernels son un map de un hilo por
-particula y `env = p // num_particles` sale con una division.
+Index convention throughout the E-step: particle p = env * num_particles + n. It
+is flat on purpose, so that most kernels are a map of one thread per particle and
+`env = p // num_particles` comes out with one division.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -44,38 +44,39 @@ from systems.spo.spo_types import SPOConfig
 from systems.spo.weighting import update_particles
 
 
-# Streams del RNG. Cada uso tiene el suyo para que no compartan secuencia: si el
-# sorteo de acciones y el del resampling salieran del mismo stream, las decisiones
-# quedarian correlacionadas. Viven aqui y no en el modelo porque la convencion es
-# una propiedad de la BUSQUEDA: asi el juguete y CartPole son comparables con la
-# misma semilla.
+# RNG streams. Each use gets its own so that they do not share a sequence: if the
+# action draw and the resampling draw came out of the same stream, the decisions
+# would end up correlated. They live here and not in the model because the
+# convention is a property of the SEARCH: that way the toy problem and CartPole
+# are comparable with the same seed.
 comptime RNG_ROOT = UInt32(0)
 comptime RNG_ACTION = UInt32(100)
 comptime RNG_STEP = UInt32(500)
 comptime RNG_RESAMPLE = UInt32(900)
 comptime RNG_READOUT = UInt32(7777)
 comptime RNG_NOISE = UInt32(3333)
-"""Stream propio del ruido de Dirichlet: no comparte secuencia con
-ninguno de los otros."""
+"""The Dirichlet noise's own stream: it shares a sequence with none of the
+others."""
 
 
 def smc_depth_close(ctx: DeviceContext, particles: Particles,
                     outputs: StepOutputs, scratch: SearchScratch,
                     output: SPOOutput, cfg: SPOConfig, depth: Int,
                     resample_uniforms: DeviceBuffer[dtype]) raises:
-    """Todo lo que va despues del paso del modelo en una profundidad.
+    """Everything that comes after the model's step within one depth.
 
-    Es la parte generica de `one_step_rollout` de Stoix: sirve igual para el
-    juguete, CartPole o el MLP.
+    It is the generic part of Stoix's `one_step_rollout`: it serves equally for
+    the toy problem, CartPole or the MLP.
 
-    El orden importa: el ESS se mide con los pesos ya actualizados pero ANTES de
-    resamplear, que es donde se ve el colapso que justifica el resampling. Medirlo
-    despues daria siempre un numero sano y no diria nada.
+    The order matters: the ESS is measured with the weights already updated but
+    BEFORE resampling, which is where the collapse that justifies resampling shows
+    up. Measuring it afterwards would always give a healthy number and would say
+    nothing.
     """
     update_particles(ctx, particles, outputs, cfg)
     compute_ess_entropy(ctx, particles, scratch, output, cfg, depth)
 
-    # Modo 'period' de Stoix: resamplea cuando (depth+1) es multiplo del periodo.
+    # Stoix's 'period' mode: resample when (depth+1) is a multiple of the period.
     if (depth + 1) % cfg.resample_period == 0:
         resample(ctx, particles, scratch, cfg, resample_uniforms)
 
@@ -84,22 +85,22 @@ def search[M: SearchModel](ctx: DeviceContext, ws: SearchWorkspace,
                            cfg: SPOConfig, model: M,
                            root_state: DeviceBuffer[dtype],
                            seed: UInt32) raises:
-    """Una busqueda SMC completa: de los estados raiz a la accion a ejecutar.
+    """One complete SMC search: from the root states to the action to execute.
 
-    El resultado queda en `ws.output`: la accion por entorno, la politica mejorada
-    q (soporte + pesos), las ventajas para el loss de la temperatura y las
-    metricas por profundidad.
+    The result is left in `ws.output`: the action per environment, the improved
+    policy q (support + weights), the advantages for the temperature loss and the
+    per-depth metrics.
     """
     p_total = cfg.num_search_particles()
     blocks_p = blocks_for(p_total)
 
-    # El modelo evaluado en la raiz, un estado por entorno.
+    # The model evaluated at the root, one state per environment.
     model.eval_root(ctx, cfg, root_state, ws.root_logits, ws.root_value)
 
-    # Ruido de exploracion en la raiz, en el mismo sitio que Stoix: sobre los
-    # prior_logits, ANTES de sortear las acciones de las particulas. Con
-    # `dirichlet_fraction = 0` (el defecto de Stoix) no se encola nada y la
-    # busqueda es bit a bit la de antes.
+    # Exploration noise at the root, in the same place as Stoix: on the
+    # prior_logits, BEFORE drawing the particles' actions. With
+    # `dirichlet_fraction = 0` (Stoix's default) nothing is enqueued and the
+    # search is bit for bit the one from before.
     if cfg.dirichlet_fraction > 0:
         n_cells = cfg.num_envs * cfg.num_actions
         ctx.enqueue_function[fill_uniform, fill_uniform](
@@ -119,9 +120,9 @@ def search[M: SearchModel](ctx: DeviceContext, ws: SearchWorkspace,
             ws.root_value, ws.u_action)
     snapshot_root_values(ctx, ws.particles, ws.output, cfg)
 
-    # El bucle de profundidad vive en el host pero solo encola kernels: no hay ni
-    # un synchronize dentro, porque el host no necesita leer nada hasta el final y
-    # el stream ya los ejecuta en orden.
+    # The depth loop lives on the host but only enqueues kernels: there is not a
+    # single synchronize inside, because the host does not need to read anything
+    # until the end and the stream already executes them in order.
     for d in range(cfg.search_depth):
         ctx.enqueue_function[fill_uniform, fill_uniform](
             ws.u_step.unsafe_ptr(), seed, RNG_STEP + UInt32(d), p_total,
@@ -130,7 +131,7 @@ def search[M: SearchModel](ctx: DeviceContext, ws: SearchWorkspace,
             ws.u_action.unsafe_ptr(), seed, RNG_ACTION + UInt32(d), p_total,
             grid_dim=blocks_p, block_dim=TPB)
 
-        # Las dos unicas lineas que dependen del modelo de toda la busqueda.
+        # The only two lines of the whole search that depend on the model.
         model.step(ctx, cfg, ws.particles, ws.outputs, ws.u_step)
         sample_next_actions(ctx, ws.outputs, cfg, ws.u_action)
 
@@ -140,7 +141,7 @@ def search[M: SearchModel](ctx: DeviceContext, ws: SearchWorkspace,
         smc_depth_close(ctx, ws.particles, ws.outputs, ws.scratch, ws.output,
                         cfg, d, ws.u_resample)
 
-    # Y por ultimo la accion que se ejecuta de verdad.
+    # And finally the action that actually gets executed.
     ctx.enqueue_function[fill_uniform, fill_uniform](
         ws.u_action.unsafe_ptr(), seed, RNG_READOUT, p_total,
         grid_dim=blocks_p, block_dim=TPB)
