@@ -1,18 +1,17 @@
-"""Prefix sum por filas, inclusivo y exclusivo.
+"""Row-wise prefix sum, inclusive and exclusive.
 
-En SPO usamos el inclusivo para construir la CDF del resampling. La CDF divide
-los pesos de las partículas en intervalos. Generamos un número aleatorio y
-elegimos la partícula cuyo intervalo contiene ese número.
+In SPO we use the inclusive one to build the resampling CDF. The CDF splits the
+particles' weights into intervals. We draw a random number and pick the particle
+whose interval contains that number.
 
-Cada bloque GPU procesa una fila y cada hilo procesa una posición. Toda la fila
-debe caber dentro del bloque, por eso row_size no puede ser mayor que TPB. En
-SPO cada fila contiene las partículas de un entorno, normalmente 16, así que
-caben dentro de un bloque de 32 o más hilos.
+Each GPU block handles one row and each thread one position. The whole row has to
+fit inside the block, which is why row_size cannot be larger than TPB. In SPO each
+row holds one environment's particles, usually 16, so they fit inside a block of
+32 threads or more.
 
-Primero se implementa block_scan_inclusive, que trabaja directamente sobre la
-memoria compartida de un bloque. Después se implementan inclusive_scan_rows y
-exclusive_scan_rows, que cargan las filas, llaman al primitivo y escriben los
-resultados.
+First comes block_scan_inclusive, which works directly on a block's shared memory.
+Then come inclusive_scan_rows and exclusive_scan_rows, which load the rows, call
+the primitive and write the results.
 """
 
 from std.builtin.debug_assert import debug_assert
@@ -23,15 +22,16 @@ from ops.common import dtype, SharedF32, GlobalF32
 
 
 def block_scan_inclusive[TPB: Int](shared: SharedF32, tid: Int):
-    """Prefix sum inclusivo in-place sobre shared[0..TPB).
+    """In-place inclusive prefix sum over shared[0..TPB).
 
-    Antes  : shared relleno y con barrier() hecho.
-    Despues: shared[i] = suma de shared[0..i], y barrier() hecho.
+    Before: shared filled in and with barrier() done.
+    After : shared[i] = sum of shared[0..i], and barrier() done.
     """
     offset = 1
     while offset < TPB:
-        # Sin el barrier de en medio el bug es de los peores: no revienta, solo
-        # da un resultado distinto segun como el scheduler ordene los warps.
+        # Without the barrier in the middle the bug is one of the worst kind: it
+        # does not blow up, it just gives a different result depending on how the
+        # scheduler orders the warps.
         val = shared[tid - offset] if tid >= offset else Scalar[dtype](0)
         barrier()
         shared[tid] += val
@@ -40,7 +40,7 @@ def block_scan_inclusive[TPB: Int](shared: SharedF32, tid: Int):
 
 
 def inclusive_scan_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
-    """out[i] = a[0] + ... + a[i], por filas."""
+    """out[i] = a[0] + ... + a[i], row by row."""
     debug_assert(row_size <= TPB, "inclusive_scan_rows: row_size tiene que caber en TPB")
     debug_assert(Int(block_dim.x) == TPB, "inclusive_scan_rows: block_dim tiene que ser TPB")
 
@@ -48,8 +48,8 @@ def inclusive_scan_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size
     tid = Int(thread_idx.x)
     base = Int(block_idx.x) * row_size
 
-    # Los hilos sobrantes cargan 0 (neutro de la suma) para que el scan del
-    # bloque entero salga bien sin casos especiales.
+    # The leftover threads load 0 (the sum's neutral element) so that the whole
+    # block's scan comes out right with no special cases.
     shared[tid] = a_ptr[base + tid] if tid < row_size else Scalar[dtype](0)
     barrier()
 
@@ -62,8 +62,8 @@ def inclusive_scan_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size
 def exclusive_scan_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     """out[0] = 0, out[i] = a[0] + ... + a[i-1].
 
-    Es el inclusivo desplazado un puesto a la derecha. El uso tipico es convertir
-    conteos en offsets de escritura: cada bucket sabe donde empieza su tramo.
+    It is the inclusive one shifted one place to the right. The typical use is
+    turning counts into write offsets: each bucket knows where its stretch begins.
     """
     debug_assert(row_size <= TPB, "exclusive_scan_rows: row_size tiene que caber en TPB")
     debug_assert(Int(block_dim.x) == TPB, "exclusive_scan_rows: block_dim tiene que ser TPB")

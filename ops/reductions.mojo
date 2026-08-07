@@ -1,19 +1,19 @@
-"""Reducciones por fila: sum, max y argmax.
+"""Row-wise reductions: sum, max and argmax.
 
-Un bloque se encarga de una fila y cada hilo de un elemento. Ese reparto es el
-que acaba usando SPO, donde la fila es un entorno y cada hilo una particula.
+One block handles one row and each thread one element. That layout is the one SPO
+ends up using, where the row is an environment and each thread a particle.
 
-Hay dos niveles aqui. Por un lado los primitivos (`block_reduce_sum`,
-`block_reduce_max`), que reducen un array que ya esta en shared memory; los
-reutilizan softmax.mojo y rng.mojo, que necesitan reducir a mitad de camino de
-otra cosa. Por otro los kernels (`sum_rows`, `max_rows`, `argmax_rows`), que
-cargan la fila desde memoria global y llaman al primitivo.
+There are two levels here. On one hand the primitives (`block_reduce_sum`,
+`block_reduce_max`), which reduce an array that is already in shared memory;
+softmax.mojo and rng.mojo reuse them, since they need to reduce halfway through
+something else. On the other hand the kernels (`sum_rows`, `max_rows`,
+`argmax_rows`), which load the row from global memory and call the primitive.
 
-Si la fila es mas larga que el bloque, cada hilo acumula a saltos de TPB antes
-de reducir, asi que row_size puede ser cualquiera.
+If the row is longer than the block, each thread accumulates in strides of TPB
+before reducing, so row_size can be anything.
 
-TPB tiene que ser potencia de dos: el arbol va partiendo el rango a la mitad y
-si no lo es se queda un trozo sin combinar.
+TPB has to be a power of two: the tree keeps halving the range and if it is not,
+a chunk is left uncombined.
 """
 
 from std.builtin.debug_assert import debug_assert
@@ -24,11 +24,11 @@ from std.memory import stack_allocation, AddressSpace
 from ops.common import dtype, idx_dtype, NEG_INF, SharedF32, GlobalF32, GlobalI32
 
 
-# Los dos primitivos de abajo devuelven el resultado a todos los hilos y no solo
-# al 0, porque el softmax necesita que todos conozcan el maximo de la fila.
-# Esperan que shared ya venga relleno y con su barrier hecho, y lo dejan
-# machacado pero reutilizable: salen con otro barrier para que nadie lo pise
-# mientras un vecino todavia lo esta leyendo.
+# The two primitives below return the result to every thread and not only to
+# thread 0, because the softmax needs everyone to know the row's maximum. They
+# expect shared to arrive already filled in and with its barrier done, and they
+# leave it clobbered but reusable: they exit with another barrier so that nobody
+# overwrites it while a neighbour is still reading it.
 
 def block_reduce_sum[TPB: Int](shared: SharedF32, tid: Int) -> Scalar[dtype]:
     stride = TPB // 2
@@ -59,8 +59,8 @@ def block_reduce_max[TPB: Int](shared: SharedF32, tid: Int) -> Scalar[dtype]:
 
 
 def sum_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
-    """out[fila] = suma de la fila. Lanzar con grid_dim=num_filas, block_dim=TPB."""
-    # shared se dimensiona con TPB, asi que lanzar con mas hilos escribiria fuera.
+    """out[row] = sum of the row. Launch with grid_dim=num_rows, block_dim=TPB."""
+    # shared is sized with TPB, so launching with more threads would write outside.
     debug_assert(Int(block_dim.x) == TPB, "sum_rows: block_dim tiene que ser TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
@@ -68,7 +68,7 @@ def sum_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     row = Int(block_idx.x)
     base = row * row_size
 
-    # Paso 1: cada hilo se come su parte de la fila (a saltos de TPB).
+    # Step 1: each thread eats its share of the row (in strides of TPB).
     acc = Scalar[dtype](0)
     i = tid
     while i < row_size:
@@ -77,7 +77,7 @@ def sum_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     shared[tid] = acc
     barrier()
 
-    # Paso 2: los TPB parciales se combinan en arbol.
+    # Step 2: the TPB partials are combined in a tree.
     total = block_reduce_sum[TPB](shared, tid)
 
     if tid == 0:
@@ -85,7 +85,7 @@ def sum_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
 
 
 def max_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
-    """out[fila] = maximo de la fila."""
+    """out[row] = maximum of the row."""
     debug_assert(Int(block_dim.x) == TPB, "max_rows: block_dim tiene que ser TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
@@ -93,8 +93,8 @@ def max_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     row = Int(block_idx.x)
     base = row * row_size
 
-    # Los hilos que no alcanzan ningun elemento (row_size < TPB) se quedan en
-    # NEG_INF, que pierde contra cualquier valor real.
+    # The threads that reach no element at all (row_size < TPB) stay at NEG_INF,
+    # which loses against any real value.
     acc = NEG_INF
     i = tid
     while i < row_size:
@@ -112,14 +112,15 @@ def max_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
 
 
 def argmax_rows[TPB: Int](out_ptr: GlobalI32, a_ptr: GlobalF32, row_size: Int):
-    """out[fila] = indice del maximo. Con empates gana el indice MENOR.
+    """out[row] = index of the maximum. On ties the LOWER index wins.
 
-    La regla de desempate no es un capricho: en una reduccion en arbol el orden
-    en que se combinan los elementos depende de TPB, asi que sin una regla
-    explicita el resultado cambiaria al cambiar el tamano del bloque. Justo el
-    tipo de no-determinismo que hace que un test falle un dia de cada diez.
+    The tie-breaking rule is not a whim: in a tree reduction the order in which
+    elements get combined depends on TPB, so without an explicit rule the result
+    would change when the block size changed. Exactly the kind of non-determinism
+    that makes a test fail one day in ten.
 
-    No usa block_reduce_max porque hay que arrastrar el indice junto al valor.
+    It does not use block_reduce_max because the index has to be carried along
+    with the value.
     """
     debug_assert(Int(block_dim.x) == TPB, "argmax_rows: block_dim tiene que ser TPB")
 
@@ -134,8 +135,8 @@ def argmax_rows[TPB: Int](out_ptr: GlobalI32, a_ptr: GlobalF32, row_size: Int):
     i = tid
     while i < row_size:
         v = a_ptr[base + i]
-        # Comparacion estricta: si empata se queda el que ya tenia, que viene de
-        # un i menor porque el bucle sube.
+        # Strict comparison: on a tie the one already held stays, and it comes
+        # from a lower i because the loop counts up.
         if v > best:
             best = v
             best_i = Scalar[idx_dtype](i)
@@ -149,10 +150,11 @@ def argmax_rows[TPB: Int](out_ptr: GlobalI32, a_ptr: GlobalF32, row_size: Int):
         if tid < stride:
             other = shared_val[tid + stride]
             mine = shared_val[tid]
-            # Cedo si el otro es estrictamente mayor; si empatan, gana el indice
-            # menor. Un hilo sin datos lleva NEG_INF y nunca gana (su -1 no puede
-            # colarse). Como cada mitad ya cumple "el indice menor de los que
-            # empatan en el maximo", combinarlas asi lo mantiene.
+            # I give way if the other is strictly greater; on a tie the lower
+            # index wins. A thread with no data carries NEG_INF and never wins
+            # (its -1 cannot sneak through). Since each half already satisfies
+            # "the lowest index among those tied at the maximum", combining them
+            # this way preserves it.
             take = other > mine
             if other == mine:
                 take = shared_idx[tid + stride] < shared_idx[tid]
@@ -167,14 +169,15 @@ def argmax_rows[TPB: Int](out_ptr: GlobalI32, a_ptr: GlobalF32, row_size: Int):
 
 
 def warp_sum_rows(out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
-    """Suma por fila usando shuffles de warp, sin shared memory ni barriers.
+    """Row-wise sum using warp shuffles, with no shared memory and no barriers.
 
-    Dentro de un warp los 32 lanes van en lockstep y el valor viaja por
-    registros, asi que sobra sincronizar. Sale bastante mas corto que la version
-    en arbol, a cambio de exigir row_size <= WARP_SIZE. Para SPO esa restriccion
-    no molesta, porque son 16 particulas, medio warp.
+    Inside a warp the 32 lanes run in lockstep and the value travels through
+    registers, so synchronising is unnecessary. It comes out considerably shorter
+    than the tree version, at the price of requiring row_size <= WARP_SIZE. For
+    SPO that restriction does not get in the way, since it is 16 particles, half a
+    warp.
 
-    Lanzar con block_dim=WARP_SIZE.
+    Launch with block_dim=WARP_SIZE.
     """
     debug_assert(row_size <= Int(WARP_SIZE),
                  "warp_sum_rows: la fila tiene que caber en un warp")
@@ -185,12 +188,12 @@ def warp_sum_rows(out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     row = Int(block_idx.x)
     base = row * row_size
 
-    # Los lanes sobrantes aportan 0, que es el neutro de la suma.
+    # The leftover lanes contribute 0, which is the sum's neutral element.
     v = a_ptr[base + tid] if tid < row_size else Scalar[dtype](0)
 
-    # shuffle_xor(v, offset) trae el valor del lane tid^offset. Tras
-    # log2(WARP_SIZE) rondas todos los lanes tienen la suma total, no solo el
-    # lane 0: el intercambio es simetrico y no colapsa hacia ningun sitio.
+    # shuffle_xor(v, offset) brings the value from lane tid^offset. After
+    # log2(WARP_SIZE) rounds every lane holds the total sum, not only lane 0: the
+    # exchange is symmetric and does not collapse towards anywhere.
     offset = Int(WARP_SIZE) // 2
     while offset > 0:
         v += shuffle_xor(v, UInt32(offset))
