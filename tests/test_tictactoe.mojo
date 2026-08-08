@@ -1,9 +1,9 @@
-"""Layout del tablero de TTT: 9 floats por particula, sin solaparse.
+"""TTT board layout: 9 floats per particle, without overlapping.
 
-A1a solo fija la convencion de almacenamiento. La prueba sube tableros DISTINTOS
-para varias particulas y comprueba que el accesor lee la casilla correcta de la
-particula correcta -- que el paso STATE_DIM es el bueno y una particula no ve las
-casillas de su vecina (el mismo tipo de comprobacion que el broadcast de root_fn).
+A1a only pins down the storage convention. The test uploads DIFFERENT boards for
+several particles and checks that the accessor reads the right cell of the right
+particle -- that the STATE_DIM stride is the correct one and that a particle does
+not see its neighbour's cells (the same kind of check as root_fn's broadcast).
 """
 
 from std.gpu.host import DeviceContext
@@ -27,8 +27,8 @@ comptime TOL = Scalar[dtype](1e-6)
 
 def board9(c0: Int, c1: Int, c2: Int, c3: Int, c4: Int,
            c5: Int, c6: Int, c7: Int, c8: Int) -> List[Scalar[dtype]]:
-    """Un tablero legible: 9 codigos de casilla (1=X agente, -1=O rival, 0=vacia)
-    en el orden 0..8. Todas las pruebas de TTT construyen tableros asi."""
+    """A readable board: 9 cell codes (1=X agent, -1=O rival, 0=empty) in the order
+    0..8. Every TTT test builds boards this way."""
     out = List[Scalar[dtype]]()
     out.append(Scalar[dtype](c0))
     out.append(Scalar[dtype](c1))
@@ -43,11 +43,11 @@ def board9(c0: Int, c1: Int, c2: Int, c3: Int, c4: Int,
 
 
 def test_cell_codes(ctx: DeviceContext) raises:
-    """Los codigos de casilla son simetricos y distinguibles.
+    """The cell codes are symmetric and distinguishable.
 
-    X (+1) y O (-1) suman 0 (la casilla vacia): la simetria respecto al 0 es lo
-    que le viene bien a la red de la fase M. Y su diferencia es 2, o sea que no
-    se confunden entre si.
+    X (+1) and O (-1) sum to 0 (the empty cell): the symmetry about 0 is what suits
+    the M-phase network. And their difference is 2, that is, they cannot be
+    confused with one another.
     """
     assert_close(CELL_AGENT + CELL_RIVAL, CELL_EMPTY, TOL,
                  "X y O deberian ser simetricos respecto a la casilla vacia")
@@ -57,10 +57,10 @@ def test_cell_codes(ctx: DeviceContext) raises:
 
 
 def test_layout_roundtrip(ctx: DeviceContext) raises:
-    """Tres tableros distintos, uno por particula, leidos por el accesor.
+    """Three different boards, one per particle, read by the accessor.
 
-    Si el paso fuera distinto de STATE_DIM, o el accesor mezclara particulas,
-    alguna casilla saldria con el valor de la vecina y el test lo cazaria.
+    If the stride were other than STATE_DIM, or the accessor mixed particles up,
+    some cell would come out with the neighbour's value and the test would catch it.
     """
     b0 = board9( 1, 0,-1,   0, 1, 0,  -1, 0, 0)   # X . O / . X . / O . .
     b1 = board9( 0, 0, 0,   1, 1, 1,   0, 0, 0)   # fila del medio de X
@@ -89,7 +89,7 @@ def test_layout_roundtrip(ctx: DeviceContext) raises:
 
 def run_has_won(ctx: DeviceContext, boards: List[Scalar[dtype]], n: Int,
                 player: Scalar[dtype]) raises -> List[Scalar[dtype]]:
-    """Corre ttt_has_won_kernel para `player` sobre n tableros y baja las flags."""
+    """Runs ttt_has_won_kernel for `player` over n boards and brings the flags down."""
     state = upload[dtype](ctx, boards)
     won = zeros[dtype](ctx, n)
     ctx.enqueue_function[ttt_has_won_kernel, ttt_has_won_kernel](
@@ -100,7 +100,7 @@ def run_has_won(ctx: DeviceContext, boards: List[Scalar[dtype]], n: Int,
 
 
 def test_wins_on_every_line(ctx: DeviceContext) raises:
-    """Las 8 lineas: un tablero por linea con X completandola, todas ganan."""
+    """The 8 lines: one board per line with X completing it, all of them win."""
     wins = List[List[Scalar[dtype]]]()
     names = List[String]()
     wins.append(board9(1,1,1, 0,0,0, 0,0,0)); names.append("fila 0")
@@ -126,7 +126,7 @@ def test_wins_on_every_line(ctx: DeviceContext) raises:
 
 
 def test_no_false_win(ctx: DeviceContext) raises:
-    """Tableros sin linea completa no cuentan como victoria."""
+    """Boards with no completed line do not count as a win."""
     boards = List[List[Scalar[dtype]]]()
     names = List[String]()
     boards.append(board9(0,0,0, 0,0,0, 0,0,0)); names.append("vacio")
@@ -147,10 +147,10 @@ def test_no_false_win(ctx: DeviceContext) raises:
 
 
 def test_players_dont_cross(ctx: DeviceContext) raises:
-    """La victoria de un jugador no cuenta para el otro.
+    """One player's win does not count for the other.
 
-    Tablero 0: O completa la fila 0 (X tiene fichas sueltas sin linea).
-    Tablero 1: X completa la diagonal (O tiene fichas sueltas sin linea).
+    Board 0: O completes row 0 (X has loose marks with no line).
+    Board 1: X completes the diagonal (O has loose marks with no line).
     """
     b0 = board9(-1,-1,-1,  1,1,0,  0,0,1)   # gana O (fila 0)
     b1 = board9( 1,0,-1,   0,1,-1,  0,0,1)   # gana X (diagonal 0,4,8)
@@ -171,7 +171,7 @@ def test_players_dont_cross(ctx: DeviceContext) raises:
 
 def run_legal_mask(ctx: DeviceContext, boards: List[Scalar[dtype]],
                    n: Int) raises -> List[Scalar[dtype]]:
-    """Corre ttt_legal_mask_kernel sobre n tableros y baja la mascara [n, 9]."""
+    """Runs ttt_legal_mask_kernel over n boards and brings the [n, 9] mask down."""
     state = upload[dtype](ctx, boards)
     mask = zeros[dtype](ctx, n * NUM_ACTIONS)
     ctx.enqueue_function[ttt_legal_mask_kernel, ttt_legal_mask_kernel](
@@ -182,7 +182,7 @@ def run_legal_mask(ctx: DeviceContext, boards: List[Scalar[dtype]],
 
 
 def test_legal_mask(ctx: DeviceContext) raises:
-    """La mascara marca 1 en las casillas libres y 0 en las ocupadas."""
+    """The mask marks 1 on the free cells and 0 on the occupied ones."""
     boards_l = List[List[Scalar[dtype]]]()
     exp_l = List[List[Scalar[dtype]]]()
     # Con huecos: ocupadas 0,2,4,6 -> libres 1,3,5,7,8.
@@ -209,8 +209,8 @@ def test_legal_mask(ctx: DeviceContext) raises:
 
 
 def test_apply_changes_one_cell(ctx: DeviceContext) raises:
-    """Aplicar una jugada cambia solo esa casilla; el resto queda igual."""
-    # Dos particulas, misma ficha (X), casillas distintas: cada una cambia la suya.
+    """Applying a move changes only that cell; the rest stays as it was."""
+    # Two particles, same mark (X), different cells: each changes its own.
     startA = board9(1,0,-1, 0,1,0, -1,0,0)   # libre en 1,3,5,7,8
     startB = board9(0,0,-1, 0,1,0, 0,0,0)    # libre en 0,1,3,5,6,7,8
     batch = List[Scalar[dtype]]()
@@ -236,7 +236,7 @@ def test_apply_changes_one_cell(ctx: DeviceContext) raises:
         assert_close(got[NUM_CELLS + c], expB[c], TOL,
                      String("apply X tablero 1 casilla ", c))
 
-    # Una jugada de O para comprobar el argumento player.
+    # One O move, to check the player argument.
     startC = board9(0,0,0, 0,0,0, 0,0,0)
     stateC = upload[dtype](ctx, startC)
     actionC = List[Scalar[idx_dtype]]()
@@ -256,8 +256,8 @@ def test_apply_changes_one_cell(ctx: DeviceContext) raises:
 
 @fieldwise_init
 struct Outcome(Movable):
-    """Terminal y reward de cada tablero, ya en el host. Struct y no tupla porque
-    en 1.0.0b1 una tupla de List no se deja construir."""
+    """Terminal and reward of each board, already on the host. A struct and not a
+    tuple because in 1.0.0b1 a tuple of Lists will not construct."""
     var terminal: List[Scalar[dtype]]
     var reward: List[Scalar[dtype]]
 
@@ -276,7 +276,7 @@ def run_outcome(ctx: DeviceContext, boards: List[Scalar[dtype]],
 
 
 def test_terminal_and_reward(ctx: DeviceContext) raises:
-    """Los cuatro finales + un no-terminal, con su recompensa de agente."""
+    """The four endings + one non-terminal, with their agent reward."""
     boards_l = List[List[Scalar[dtype]]]()
     term_exp = List[Scalar[dtype]]()
     rew_exp = List[Scalar[dtype]]()
@@ -298,7 +298,7 @@ def test_terminal_and_reward(ctx: DeviceContext) raises:
     boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))
     term_exp.append(Scalar[dtype](0)); rew_exp.append(Scalar[dtype](0))
     names.append("no terminal")
-    # Gana X y ademas llena el tablero: es victoria, no empate.
+    # X wins and also fills the board: it is a win, not a draw.
     boards_l.append(board9(1,1,1, -1,-1,1, -1,1,-1))
     term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](1))
     names.append("gana X en tablero lleno")
@@ -319,7 +319,7 @@ def test_terminal_and_reward(ctx: DeviceContext) raises:
 
 def run_prior(ctx: DeviceContext, boards: List[Scalar[dtype]],
               n: Int) raises -> List[Scalar[dtype]]:
-    """Corre ttt_prior_logits_kernel sobre n estados raiz y baja los logits [n, 9]."""
+    """Runs ttt_prior_logits_kernel over n root states and brings the [n, 9] logits down."""
     state = upload[dtype](ctx, boards)
     logits = zeros[dtype](ctx, n * NUM_ACTIONS)
     ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
@@ -330,10 +330,10 @@ def run_prior(ctx: DeviceContext, boards: List[Scalar[dtype]],
 
 
 def test_prior_masks_illegal(ctx: DeviceContext) raises:
-    """El prior raiz: logit 0 en las casillas legales, NEG_INF en las ocupadas.
+    """The root prior: logit 0 on the legal cells, NEG_INF on the occupied ones.
 
-    Tras el softmax eso es una distribucion uniforme sobre las casillas libres y
-    probabilidad 0 de jugar sobre una ficha ya puesta.
+    After the softmax that is a uniform distribution over the free cells and
+    probability 0 of playing on a mark already placed.
     """
     boards_l = List[List[Scalar[dtype]]]()
     boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))    # ocupadas 0,2,4,6
@@ -358,8 +358,8 @@ def test_prior_masks_illegal(ctx: DeviceContext) raises:
 
 @fieldwise_init
 struct DynResult(Movable):
-    """Salidas del step, ya en el host (struct porque en 1.0.0b1 una tupla de
-    List no se deja construir)."""
+    """The step's outputs, already on the host (a struct because in 1.0.0b1 a tuple
+    of Lists will not construct)."""
     var state: List[Scalar[dtype]]
     var reward: List[Scalar[dtype]]
     var discount: List[Scalar[dtype]]
@@ -372,7 +372,7 @@ def run_dynamics_at(ctx: DeviceContext, boards: List[Scalar[dtype]],
                     depths: List[Scalar[idx_dtype]], n: Int,
                     reward_gamma: Scalar[dtype],
                     loss_penalty: Scalar[dtype] = 0) raises -> DynResult:
-    """Corre ttt_dynamics_kernel con la profundidad y el descuento dados."""
+    """Runs ttt_dynamics_kernel with the given depth and discount."""
     state = upload[dtype](ctx, boards)
     action = upload[idx_dtype](ctx, actions)
     us = upload[dtype](ctx, uniforms)
@@ -394,7 +394,7 @@ def run_dynamics_at(ctx: DeviceContext, boards: List[Scalar[dtype]],
 def run_dynamics(ctx: DeviceContext, boards: List[Scalar[dtype]],
                  actions: List[Scalar[idx_dtype]], uniforms: List[Scalar[dtype]],
                  n: Int) raises -> DynResult:
-    """El caso base: profundidad 0 y sin descuento, o sea la recompensa cruda."""
+    """The base case: depth 0 and no discount, that is, the raw reward."""
     depths = List[Scalar[idx_dtype]]()
     for _ in range(n):
         depths.append(Scalar[idx_dtype](0))
@@ -403,11 +403,11 @@ def run_dynamics(ctx: DeviceContext, boards: List[Scalar[dtype]],
 
 
 def test_step_all_paths(ctx: DeviceContext) raises:
-    """Los caminos del step, con tableros/acciones/uniformes puestos a mano.
+    """The step's paths, with boards/actions/uniforms set by hand.
 
-    El rival es aleatorio, asi que para los casos deterministas monto tableros
-    donde O solo tiene una casilla legal; y para el caso 'sigue' pongo dos huecos
-    y elijo el uniforme para saber cual le toca.
+    The rival is random, so for the deterministic cases I set up boards where O has
+    only one legal cell; and for the 'goes on' case I leave two gaps and choose the
+    uniform so as to know which one it takes.
     """
     boards = List[List[Scalar[dtype]]]()
     acts = List[Scalar[idx_dtype]]()
@@ -417,19 +417,19 @@ def test_step_all_paths(ctx: DeviceContext) raises:
     exp_discount = List[Scalar[dtype]]()
     names = List[String]()
 
-    # gana el agente: completa la fila 0.
+    # the agent wins: it completes row 0.
     boards.append(board9(1,1,0, -1,-1,0, 0,0,0)); acts.append(Scalar[idx_dtype](2)); us.append(Scalar[dtype](0.5))
     exp_board.append(board9(1,1,1, -1,-1,0, 0,0,0)); exp_reward.append(Scalar[dtype](1)); exp_discount.append(Scalar[dtype](0)); names.append("gana agente")
-    # empate: la jugada del agente llena el tablero sin linea.
+    # draw: the agent's move fills the board with no line.
     boards.append(board9(1,-1,1, 1,-1,-1, -1,1,0)); acts.append(Scalar[idx_dtype](8)); us.append(Scalar[dtype](0.5))
     exp_board.append(board9(1,-1,1, 1,-1,-1, -1,1,1)); exp_reward.append(Scalar[dtype](0.5)); exp_discount.append(Scalar[dtype](0)); names.append("empate al llenar")
-    # gana el rival: tras la jugada del agente, O solo tiene la casilla 6 y con ella hace columna 0.
+    # the rival wins: after the agent's move, O has only cell 6 and with it makes column 0.
     boards.append(board9(-1,1,0, -1,1,-1, 0,-1,1)); acts.append(Scalar[idx_dtype](2)); us.append(Scalar[dtype](0.5))
     exp_board.append(board9(-1,1,1, -1,1,-1, -1,-1,1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](0)); names.append("gana rival")
-    # sigue: u=0.1 -> el rival toma la 1a casilla vacia (la 7).
+    # goes on: u=0.1 -> the rival takes the 1st empty cell (7).
     boards.append(board9(1,-1,1, -1,1,0, -1,0,0)); acts.append(Scalar[idx_dtype](5)); us.append(Scalar[dtype](0.1))
     exp_board.append(board9(1,-1,1, -1,1,1, -1,-1,0)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("sigue u=0.1 -> O en 7")
-    # sigue: u=0.9 -> el rival toma la 2a casilla vacia (la 8).
+    # goes on: u=0.9 -> the rival takes the 2nd empty cell (8).
     boards.append(board9(1,-1,1, -1,1,0, -1,0,0)); acts.append(Scalar[idx_dtype](5)); us.append(Scalar[dtype](0.9))
     exp_board.append(board9(1,-1,1, -1,1,1, -1,0,-1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("sigue u=0.9 -> O en 8")
 
@@ -450,17 +450,17 @@ def test_step_all_paths(ctx: DeviceContext) raises:
 
 
 def test_step_discounts_reward_by_depth(ctx: DeviceContext) raises:
-    """La recompensa se descuenta por profundidad: ganar YA vale mas que ganar tarde.
+    """The reward is discounted by depth: winning NOW is worth more than winning late.
 
-    Existe por un diagnostico concreto de la demo: sin descuento (gamma=1) el peso
-    SMC es la suma de recompensas sin descontar, asi que una particula que gana en
-    el paso 0 EMPATA con otra que gana en el paso 3, y el softmax del readout no
-    puede distinguir "gane seguro" de "gane con suerte". Con gamma<1 el empate se
-    rompe: se midio que q(jugada ganadora) sube de 0.24 a 0.9999 en una posicion
-    con victoria inmediata.
+    It exists because of a concrete diagnosis from the demo: without a discount
+    (gamma=1) the SMC weight is the sum of undiscounted rewards, so a particle that
+    wins at step 0 TIES with one that wins at step 3, and the readout's softmax
+    cannot tell "I win for sure" from "I won by luck". With gamma<1 the tie breaks:
+    it was measured that q(winning move) goes from 0.24 to 0.9999 in a position with
+    an immediate win.
 
-    Mismo tablero ganador evaluado a cuatro profundidades: la recompensa tiene que
-    salir gamma^profundidad.
+    The same winning board evaluated at four depths: the reward has to come out as
+    gamma^depth.
     """
     n = 4
     gamma = Scalar[dtype](0.5)
@@ -469,7 +469,7 @@ def test_step_discounts_reward_by_depth(ctx: DeviceContext) raises:
     us = List[Scalar[dtype]]()
     depths = List[Scalar[idx_dtype]]()
     for d in range(n):
-        # X X . / -1 -1 . / . . .  -> la accion 2 completa la fila 0 y gana.
+        # X X . / -1 -1 . / . . .  -> action 2 completes row 0 and wins.
         b = board9(1,1,0, -1,-1,0, 0,0,0)
         for c in range(NUM_CELLS):
             boards.append(b[c])
@@ -483,12 +483,12 @@ def test_step_discounts_reward_by_depth(ctx: DeviceContext) raises:
     for d in range(n):
         assert_close(out.reward[d], want, TOL,
                      String("la victoria a profundidad ", d, " deberia valer gamma^", d))
-        # Terminal en todas: el descuento no cambia el discount, solo la recompensa.
+        # Terminal in all of them: the discount does not change the discount field, only the reward.
         assert_close(out.discount[d], Scalar[dtype](0), TOL,
                      String("una victoria es terminal, profundidad ", d))
         want *= gamma
 
-    # Y con gamma=1 las cuatro valen lo mismo: es el empate que rompe el descuento.
+    # And with gamma=1 all four are worth the same: it is the tie the discount breaks.
     flat = run_dynamics_at(ctx, boards, acts, us, depths, n, Scalar[dtype](1))
     for d in range(n):
         assert_close(flat.reward[d], Scalar[dtype](1), TOL,
@@ -497,7 +497,7 @@ def test_step_discounts_reward_by_depth(ctx: DeviceContext) raises:
 
 
 def ttt_config(num_envs: Int, num_particles: Int) -> SPOConfig:
-    """Config pequena para probar el modelo TTT en aislamiento."""
+    """A small config for testing the TTT model in isolation."""
     return SPOConfig(num_envs=num_envs, num_particles=num_particles,
                      num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                      search_depth=4, resample_period=4, temperature=0.5,
@@ -505,7 +505,7 @@ def ttt_config(num_envs: Int, num_particles: Int) -> SPOConfig:
 
 
 def test_model_eval_root(ctx: DeviceContext) raises:
-    """El eval_root del modelo: prior enmascarado en la raiz + V puesto a 0."""
+    """The model's eval_root: masked prior at the root + V set to 0."""
     model = default_tictactoe()
     num_envs = 2
     cfg = ttt_config(num_envs, 4)
@@ -520,8 +520,8 @@ def test_model_eval_root(ctx: DeviceContext) raises:
 
     root_state = upload[dtype](ctx, roots)
     logits = zeros[dtype](ctx, num_envs * NUM_ACTIONS)
-    # Relleno el valor a 99 para comprobar que eval_root lo PISA a 0 (no que ya
-    # estuviera a 0 por casualidad).
+    # I fill the value with 99 to check that eval_root OVERWRITES it with 0 (not
+    # that it was already 0 by coincidence).
     value = filled[dtype](ctx, num_envs, Scalar[dtype](99))
     model.eval_root(ctx, cfg, root_state, logits, value)
     ctx.synchronize()
@@ -541,7 +541,7 @@ def test_model_eval_root(ctx: DeviceContext) raises:
 
 
 def test_model_step(ctx: DeviceContext) raises:
-    """Step del modelo: avanza el estado y rellena action_logits con el prior nuevo."""
+    """The model's step: it advances the state and fills action_logits with the new prior."""
     model = default_tictactoe()
     cfg = ttt_config(1, 1)
     p_total = cfg.num_search_particles()   # 1
@@ -549,7 +549,7 @@ def test_model_step(ctx: DeviceContext) raises:
     particles = Particles(ctx, cfg)
     outputs = StepOutputs(ctx, cfg)
 
-    # El caso 'sigue' de A3b: el agente juega la 5, el rival (u=0.1) toma la 7.
+    # A3b's 'goes on' case: the agent plays 5, the rival (u=0.1) takes 7.
     write_into[dtype](particles.state, board9(1,-1,1, -1,1,0, -1,0,0))
     acts = List[Scalar[idx_dtype]](); acts.append(Scalar[idx_dtype](5))
     write_into[idx_dtype](outputs.next_action, acts)
@@ -567,7 +567,7 @@ def test_model_step(ctx: DeviceContext) raises:
     for c in range(NUM_CELLS):
         assert_close(got_state[c], new_board[c], TOL,
                      String("step estado casilla ", c))
-    # action_logits = prior enmascarado del tablero nuevo: 0 solo en la casilla 8.
+    # action_logits = masked prior of the new board: 0 only on cell 8.
     for c in range(NUM_ACTIONS):
         want = Scalar[dtype](0)
         if new_board[c] != CELL_EMPTY:
@@ -590,22 +590,21 @@ def run_encode(ctx: DeviceContext, boards: List[Scalar[dtype]],
 
 
 def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raises:
-    """Con `loss_penalty`, perder deja de valer lo mismo que seguir jugando.
+    """With `loss_penalty`, losing stops being worth the same as playing on.
 
-    Es el problema que destapo la auditoria de las derrotas: `ttt_advance`
-    devuelve recompensa 0 tanto si la partida se PIERDE como si simplemente
-    SIGUE, asi que el peso SMC no puede distinguirlas y la busqueda no tiene
-    ningun motivo para bloquear una amenaza.
+    It is the problem the losses audit uncovered: `ttt_advance` returns reward 0
+    whether the game is LOST or simply GOES ON, so the SMC weight cannot tell them
+    apart and the search has no reason whatsoever to block a threat.
 
-    Cuatro particulas, una por desenlace, todas a profundidad 0 para que el
-    descuento no enturbie la lectura.
+    Four particles, one per outcome, all at depth 0 so that the discount does not
+    muddy the reading.
     """
     boards = List[Scalar[dtype]]()
     # p0 gana: X en 0 y 1, juega la 2.
     for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
-    # p1 pierde: O en 3 y 4, X juega la 8 (no bloquea) y el rival remata la 5.
+    # p1 loses: O on 3 and 4, X plays 8 (does not block) and the rival finishes on 5.
     for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
-    # p2 empata: tablero casi lleno sin lineas, X cierra la ultima casilla.
+    # p2 draws: a nearly full board with no lines, X closes the last cell.
     for b in board9(1,-1,1, 1,-1,-1, -1,1,0): boards.append(b)
     # p3 sigue: tablero vacio.
     for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
@@ -617,15 +616,15 @@ def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raise
     acts.append(Scalar[idx_dtype](4))    # sigue
     us = List[Scalar[dtype]]()
     us.append(Scalar[dtype](0.1))
-    # Tras la jugada 8 de X quedan libres 2,5,6,7; u=0.3 elige la segunda, o sea
-    # la casilla 5, que le completa al rival la linea 3-4-5.
+    # After X's move on 8, cells 2,5,6,7 are free; u=0.3 picks the second, that is
+    # cell 5, which completes line 3-4-5 for the rival.
     us.append(Scalar[dtype](0.3))
     us.append(Scalar[dtype](0.1))
     us.append(Scalar[dtype](0.1))
     depths = List[Scalar[idx_dtype]]()
     for _ in range(4): depths.append(Scalar[idx_dtype](0))
 
-    # Sin castigo: perder y seguir dan lo mismo, que es justo el problema.
+    # Without a penalty: losing and going on give the same, which is exactly the problem.
     plain = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 0)
     assert_close(plain.reward[0], Scalar[dtype](1), TOL, "sin castigo, ganar")
     assert_close(plain.reward[1], Scalar[dtype](0), TOL, "sin castigo, perder")
@@ -633,15 +632,15 @@ def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raise
     if plain.discount[1] != Scalar[dtype](0):
         raise Error("la particula 1 deberia haber perdido (discount 0)")
 
-    # Con castigo 1: el convenio +1 / 0 / -1 de los juegos.
+    # With penalty 1: games' +1 / 0 / -1 convention.
     pen = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 1)
     assert_close(pen.reward[0], Scalar[dtype](1), TOL, "con castigo, ganar")
     assert_close(pen.reward[1], Scalar[dtype](-1), TOL, "con castigo, perder")
     assert_close(pen.reward[2], Scalar[dtype](0.5), TOL, "con castigo, empatar")
     assert_close(pen.reward[3], Scalar[dtype](0), TOL, "con castigo, seguir")
 
-    # Y el castigo se descuenta por profundidad como cualquier recompensa:
-    # perder mas tarde duele menos, igual que ganar mas tarde premia menos.
+    # And the penalty is discounted by depth like any reward: losing later hurts
+    # less, just as winning later rewards less.
     deep = List[Scalar[idx_dtype]]()
     for _ in range(4): deep.append(Scalar[idx_dtype](2))
     d2 = run_dynamics_at(ctx, boards, acts, us, deep, 4, 0.5, 1)
@@ -651,10 +650,10 @@ def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raise
 
 
 def test_encode_obs_two_planes(ctx: DeviceContext) raises:
-    """El tablero se traduce a dos planos binarios, calculados a mano.
+    """The board is translated into two binary planes, computed by hand.
 
-    Es lo que comeran el critico y el actor, asi que un error aqui envenenaria
-    todo el M-step sin que nada falle: la red simplemente aprenderia mal.
+    It is what the critic and the actor will eat, so an error here would poison the
+    whole M-step without anything failing: the network would simply learn wrongly.
     """
     # X . O / . X . / . . .
     b = board9(1,0,-1, 0,1,0, 0,0,0)
@@ -672,11 +671,11 @@ def test_encode_obs_two_planes(ctx: DeviceContext) raises:
 
 
 def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
-    """Vacio, lleno, y la invariante que los relaciona.
+    """Empty, full, and the invariant that relates them.
 
-    La invariante importa: una casilla no puede estar en los dos planos a la vez,
-    y una ocupada tiene que estar exactamente en uno. Eso caza un intercambio de
-    planos o una comparacion mal escrita.
+    The invariant matters: a cell cannot be in both planes at once, and an occupied
+    one has to be in exactly one. That catches a swap of planes or a badly written
+    comparison.
     """
     boards = List[Scalar[dtype]]()
     empty = board9(0,0,0, 0,0,0, 0,0,0)
@@ -686,12 +685,12 @@ def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
 
     got = run_encode(ctx, boards, 2)
 
-    # El vacio: los 18 valores a cero (nada en ningun plano).
+    # The empty one: all 18 values at zero (nothing in either plane).
     for i in range(OBS_DIM):
         assert_close(got[i], Scalar[dtype](0), TOL,
                      String("tablero vacio, valor ", i))
 
-    # El lleno y la invariante, sobre los dos tableros.
+    # The full one and the invariant, over both boards.
     for t in range(2):
         base = t * OBS_DIM
         for c in range(NUM_CELLS):
@@ -700,7 +699,7 @@ def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
             if mine + theirs > Scalar[dtype](1.5):
                 raise Error("la casilla ", c, " del tablero ", t,
                             " esta en LOS DOS planos")
-            # El tablero de origen sale del array plano, sin copiar listas.
+            # The source board comes out of the flat array, without copying lists.
             cell = boards[t * NUM_CELLS + c]
             occupied = Scalar[dtype](0) if cell == CELL_EMPTY else Scalar[dtype](1)
             assert_close(mine + theirs, occupied, TOL,
@@ -710,10 +709,10 @@ def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
 
 
 def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
-    """Varios tableros seguidos: ninguno pisa la observacion del vecino.
+    """Several boards in a row: none overwrites its neighbour's observation.
 
-    Mismo tipo de comprobacion que el layout de A1a, pero sobre el paso OBS_DIM
-    en vez de STATE_DIM.
+    The same kind of check as A1a's layout, but over the OBS_DIM stride instead of
+    STATE_DIM.
     """
     b0 = board9(1,1,1, 0,0,0, 0,0,0)      # solo mias, la fila de arriba
     b1 = board9(-1,-1,-1, 0,0,0, 0,0,0)   # solo suyas, la misma fila
@@ -725,7 +724,7 @@ def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
     for c in range(NUM_CELLS): boards.append(b2[c])
     got = run_encode(ctx, boards, 3)
 
-    # Tablero 0: tres unos en el plano propio, nada en el del rival.
+    # Board 0: three ones in the own plane, nothing in the rival's.
     for c in range(3):
         assert_close(got[c], Scalar[dtype](1), TOL, String("t0 mia ", c))
     for c in range(NUM_CELLS):
@@ -737,7 +736,7 @@ def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
                      String("t1 suya ", c))
         assert_close(got[OBS_DIM + c], Scalar[dtype](0), TOL,
                      String("t1 no deberia tener fichas mias, ", c))
-    # Tablero 2: solo la casilla 8 en el plano propio.
+    # Board 2: only cell 8 in the own plane.
     assert_close(got[2 * OBS_DIM + 8], Scalar[dtype](1), TOL, "t2 esquina mia")
     total = Scalar[dtype](0)
     for i in range(OBS_DIM):
@@ -747,21 +746,21 @@ def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
 
 
 def test_mask_from_obs_matches_mask_from_state(ctx: DeviceContext) raises:
-    """La mascara sacada de la OBSERVACION coincide con la sacada del tablero.
+    """The mask taken from the OBSERVATION matches the one taken from the board.
 
-    El buffer de entrenamiento guarda observaciones (18 floats), no estados (9),
-    asi que el actor necesita derivar la legalidad de ahi. Las dos rutas TIENEN que
-    dar lo mismo: si divergieran, el actor entrenaria con una mascara distinta de
-    la que usa al jugar, y pondria probabilidad sobre casillas ocupadas sin que
-    nada fallara.
+    The training buffer stores observations (18 floats), not states (9), so the
+    actor needs to derive legality from there. The two routes HAVE to give the same
+    thing: if they diverged, the actor would train with a different mask from the
+    one it uses when playing, and would put probability on occupied cells without
+    anything failing.
 
-    Se prueba con 40 tableros para pasar de un bloque (TPB=32) y con tamano no
-    redondo.
+    It is tested with 40 boards so as to go past one block (TPB=32) and with a
+    non-round size.
     """
     boards = List[Scalar[dtype]]()
     n = 40
     for i in range(n):
-        # Tableros variados y deterministas: la casilla c se llena segun i y c.
+        # Varied, deterministic boards: cell c gets filled according to i and c.
         for c in range(NUM_CELLS):
             v = (i * 7 + c * 3) % 5
             if v == 0: boards.append(Scalar[dtype](1))
@@ -792,8 +791,8 @@ def test_mask_from_obs_matches_mask_from_state(ctx: DeviceContext) raises:
         if a[i] != b[i]:
             raise Error("la mascara difiere en ", i, ": del estado ", a[i],
                         " y de la observacion ", b[i])
-        # Y contra el tablero, no solo una contra la otra: si las dos estuvieran
-        # mal igual, compararlas entre si no lo detectaria.
+        # And against the board, not just one against the other: if both were
+        # wrong in the same way, comparing them would not detect it.
         want = Scalar[dtype](1) if boards[(i // NUM_ACTIONS) * NUM_CELLS
                                          + (i % NUM_ACTIONS)] == 0 \
                else Scalar[dtype](0)

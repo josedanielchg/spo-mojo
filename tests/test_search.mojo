@@ -1,11 +1,12 @@
-"""La busqueda SMC completa sobre el juguete: pruebas de COMPORTAMIENTO.
+"""The full SMC search over the toy problem: BEHAVIOUR tests.
 
-Aqui no se dicta nada, se corre `search()` de punta a punta y se mira lo que sale.
-El tercero es el que importa de toda la fase 3: partiendo de una politica que no
-sabe nada (prior uniforme) y SIN entrenar nada, la busqueda tiene que concentrar
-la masa en la accion buena. Si eso pasa, el E-step funciona.
+Nothing is dictated here, `search()` is run end to end and what comes out is
+inspected. The third one is the one that matters in the whole of phase 3: starting
+from a policy that knows nothing (uniform prior) and WITHOUT training anything, the
+search has to concentrate the mass on the good action. If that happens, the E-step
+works.
 
-Las piezas sueltas (resampling, ESS) se prueban en test_resampling.mojo.
+The individual pieces (resampling, ESS) are tested in test_resampling.mojo.
 """
 
 from std.gpu.host import DeviceContext
@@ -33,11 +34,11 @@ def make_config(num_envs: Int, num_particles: Int, depth: Int,
 
 
 def test_ess_drops_and_recovers_after_resampling(ctx: DeviceContext) raises:
-    """A lo largo del rollout el ESS baja y se recupera tras cada resampling.
+    """Along the rollout the ESS drops and recovers after each resampling.
 
-    Con profundidad 8 y periodo 4 hay resampling despues de las profundidades 3
-    y 7. Como el ESS se mide ANTES de resamplear, la profundidad 4 (la primera
-    despues del reset) tiene que verse mas sana que la 3.
+    With depth 8 and period 4 there is resampling after depths 3 and 7. Since the
+    ESS is measured BEFORE resampling, depth 4 (the first after the reset) has to
+    look healthier than depth 3.
     """
     cfg = make_config(num_envs=4, num_particles=16, depth=8, period=4)
     toy = ToyChain(chain_length=20, horizon=20, value_scale=1.0)
@@ -54,7 +55,7 @@ def test_ess_drops_and_recovers_after_resampling(ctx: DeviceContext) raises:
 
     ess = download[dtype](ws.output.ess, cfg.search_depth * cfg.num_envs)
 
-    # Media por profundidad sobre los envs
+    # Mean per depth over the envs
     means = List[Scalar[dtype]]()
     for d in range(cfg.search_depth):
         total = Scalar[dtype](0)
@@ -70,7 +71,7 @@ def test_ess_drops_and_recovers_after_resampling(ctx: DeviceContext) raises:
     if means[3] >= means[0]:
         raise Error("el ESS deberia degradarse entre resamplings: d0=",
                     means[0], " d3=", means[3])
-    # ...y se recupera justo despues del resampling de la profundidad 3.
+    # ...and recovers right after depth 3's resampling.
     if means[4] <= means[3]:
         raise Error("el ESS deberia recuperarse tras el resampling: d3=",
                     means[3], " d4=", means[4])
@@ -78,14 +79,14 @@ def test_ess_drops_and_recovers_after_resampling(ctx: DeviceContext) raises:
 
 
 def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
-    """LA prueba de la fase: la busqueda mejora una politica que no sabe nada.
+    """THE phase's test: the search improves a policy that knows nothing.
 
-    El prior del juguete es uniforme (50/50) y no se entrena nada. Solo con
-    simular, la politica mejorada q tiene que poner al menos el 80% de la masa
-    en la accion buena.
+    The toy problem's prior is uniform (50/50) and nothing is trained. By
+    simulating alone, the improved policy q has to put at least 80% of the mass on
+    the good action.
 
-    q se lee de la salida igual que la usara el M-step: el histograma de
-    `sampled_actions` ponderado por `sampled_action_weights`.
+    q is read from the output exactly as the M-step will use it: the histogram of
+    `sampled_actions` weighted by `sampled_action_weights`.
     """
     cfg = make_config(num_envs=8, num_particles=16, depth=4, period=4)
     toy = default_toy_chain()
@@ -114,7 +115,7 @@ def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
             q_total += weights[p]
             if Int(actions[p]) == ACTION_GOOD:
                 q_good += weights[p]
-        # Los pesos son un softmax por env, o sea que ya suman 1.
+        # The weights are a per-env softmax, so they already sum to 1.
         assert_close(q_total, 1.0, Scalar[dtype](1e-4),
                      String("los pesos del env ", e, " deberian sumar 1"))
         if q_good < worst:
@@ -124,7 +125,7 @@ def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
     if worst < 0.8:
         raise Error("la busqueda no mejoro el prior lo suficiente: q(GOOD)=", worst)
 
-    # Y la accion que se ejecuta de verdad tiene que ser valida.
+    # And the action actually executed has to be valid.
     for e in range(cfg.num_envs):
         a = Int(final_action[e])
         if a != ACTION_BAD and a != ACTION_GOOD:
@@ -134,7 +135,7 @@ def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
 
 
 def test_search_is_reproducible(ctx: DeviceContext) raises:
-    """Misma semilla, misma busqueda. Sin esto no hay test que valga."""
+    """Same seed, same search. Without this no test is worth anything."""
     cfg = make_config(num_envs=4, num_particles=16, depth=4, period=4)
     toy = default_toy_chain()
     p_total = cfg.num_search_particles()
@@ -160,15 +161,15 @@ def test_search_is_reproducible(ctx: DeviceContext) raises:
 
 
 def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
-    """Regresion: con N grande la busqueda tiene que seguir mejorando, no empeorar.
+    """Regression: with a large N the search has to keep improving, not get worse.
 
-    Este test existe por un bug de verdad. Los kernels cuya fila es la dimension
-    de particulas (resampling, ESS, softmax del readout) usan UN bloque por env,
-    asi que N tiene que caber en el bloque. Con bloques de 32 y N=64 la busqueda
-    devolvia q(GOOD)=0.75, PEOR que con N=16 (0.99), y sin avisar de nada.
+    This test exists because of a real bug. The kernels whose row is the particle
+    dimension (resampling, ESS, the readout's softmax) use ONE block per env, so N
+    has to fit in the block. With blocks of 32 and N=64 the search returned
+    q(GOOD)=0.75, WORSE than with N=16 (0.99), and without warning about anything.
 
-    Lo caza el debug_assert del kernel, pero solo con -D ASSERT=all; por eso
-    ademas hay una comprobacion en host (check_search_config) y este test.
+    The kernel's debug_assert catches it, but only with -D ASSERT=all; that is why
+    there is also a host-side check (check_search_config) and this test.
     """
     toy = default_toy_chain()
     q = List[Scalar[dtype]]()
@@ -206,29 +207,29 @@ def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
 
 
 def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
-    """Regresion: reutilizar el workspace tiene que dar el MISMO resultado.
+    """Regression: reusing the workspace has to give the SAME result.
 
-    Este test existe por un bug de verdad, y de los caros: `root_fn` sembraba las
-    particulas pero no ponia a cero los acumuladores (peso, gae, terminal, depth).
-    Con un workspace recien creado no se notaba, porque nacen a cero; pero el
-    SearchWorkspace existe justamente para reservarse UNA vez y reutilizarse en
-    cada paso de entorno, y ahi la segunda busqueda heredaba `terminal = 1` de la
-    primera. La mascara de update_particles congelaba entonces el peso de TODAS
-    las particulas desde la profundidad 0, los pesos se quedaban a cero, el
-    softmax del readout salia uniforme y la busqueda degeneraba en elegir al azar.
+    This test exists because of a real bug, and an expensive one: `root_fn` seeded
+    the particles but did not zero the accumulators (weight, gae, terminal, depth).
+    With a freshly created workspace it did not show, because they are born at zero;
+    but the SearchWorkspace exists precisely to be allocated ONCE and reused at
+    every environment step, and there the second search inherited `terminal = 1`
+    from the first. update_particles' mask then froze the weight of ALL the
+    particles from depth 0, the weights stayed at zero, the readout's softmax came
+    out uniform and the search degenerated into choosing at random.
 
-    Lo peor es que no fallaba nada: la busqueda seguia devolviendo acciones
-    validas, solo que malas. Se detecto porque un planificador sobre tres en raya
-    no ganaba mas partidas que jugar al azar.
+    The worst of it is that nothing failed: the search kept returning valid actions,
+    only bad ones. It was detected because a planner on tic-tac-toe won no more
+    games than playing at random.
 
-    La comprobacion es directa: dos busquedas identicas, una con workspace nuevo y
-    otra reutilizando uno que ya corrio, tienen que dar exactamente lo mismo.
+    The check is direct: two identical searches, one with a fresh workspace and one
+    reusing a workspace that has already run, have to give exactly the same thing.
     """
-    # Sin resampling (periodo > profundidad) y con pasillo largo, a proposito: asi
-    # los pesos llegan al readout con valores distintos entre si y se puede exigir
-    # que NO sean uniformes. Con resampling los pesos se resetean a cero por
-    # diseno (la informacion pasa a la multiplicidad), y esa comprobacion no
-    # distinguiria el bug.
+    # No resampling (period > depth) and a long corridor, on purpose: that way the
+    # weights reach the readout with values that differ from one another and it can
+    # be demanded that they NOT be uniform. With resampling the weights are reset to
+    # zero by design (the information moves into the multiplicity), and that check
+    # would not discriminate the bug.
     cfg = make_config(num_envs=4, num_particles=16, depth=6, period=99)
     toy = ToyChain(chain_length=20, horizon=20, value_scale=1.0)
     p_total = cfg.num_search_particles()
@@ -237,7 +238,7 @@ def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
     for _ in range(cfg.num_envs):
         root_state.append(0.0)
 
-    # Referencia: workspace nuevo, la busqueda que nos interesa.
+    # Reference: a fresh workspace, the search we care about.
     fresh = SearchWorkspace(ctx, cfg)
     search[ToyChain](ctx, fresh, cfg, toy, upload[dtype](ctx, root_state),
                      UInt32(8080))
@@ -245,7 +246,7 @@ def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
     want_w = download[dtype](fresh.output.sampled_action_weights, p_total)
     want_a = download[idx_dtype](fresh.output.action, cfg.num_envs)
 
-    # Y ahora el mismo workspace despues de haber corrido otra busqueda distinta.
+    # And now the same workspace after having run a different search.
     reused = SearchWorkspace(ctx, cfg)
     search[ToyChain](ctx, reused, cfg, toy, upload[dtype](ctx, root_state),
                      UInt32(1111))          # una busqueda cualquiera, para ensuciarlo
@@ -263,8 +264,8 @@ def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
         if Int(got_a[e]) != Int(want_a[e]):
             raise Error("el workspace reutilizado eligio otra accion en el env ", e)
 
-    # Y que los pesos no sean todos iguales: si el bug estuviera, saldrian todos a
-    # cero y la comprobacion de arriba pasaria igualmente por ser identicos.
+    # And that the weights are not all equal: if the bug were present they would
+    # all come out at zero and the check above would pass anyway by being identical.
     spread = False
     for p in range(1, p_total):
         if got_w[p] != got_w[0]:
@@ -276,23 +277,23 @@ def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
 
 
 def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
-    """El readout codicioso coge la accion con mas MASA de q, no la particula
-    con mas peso.
+    """The greedy readout takes the action with the most q MASS, not the particle
+    with the most weight.
 
-    La distincion importa y es facil de confundir. q es un histograma ponderado:
-    varias particulas comparten accion raiz y sus pesos se SUMAN. Un "argmax
-    sobre particulas" cogeria la particula individual mas pesada, que no tiene por
-    que pertenecer a la accion mas votada.
+    The distinction matters and is easy to confuse. q is a weighted histogram:
+    several particles share a root action and their weights are SUMMED. An "argmax
+    over particles" would take the heaviest individual particle, which need not
+    belong to the most-voted action.
 
-    Los dos envs estan montados justo para separar las dos cosas, y ademas con
-    respuestas distintas para que un cruce de envs tambien se vea:
+    The two envs are set up precisely to separate the two things, and moreover with
+    different answers so that a mix-up between envs also shows:
 
-        env 0   accion 0: una particula de 0.40  <- la particula mas pesada
-                accion 1: 0.16+0.16+0.16+0.12 = 0.60  <- la moda, la correcta
-        env 1   accion 0: 0.20+0.20+0.20 = 0.60   <- la moda, la correcta
-                accion 1: una particula de 0.30 y otra de 0.10
+        env 0   action 0: one particle of 0.40  <- the heaviest particle
+                action 1: 0.16+0.16+0.16+0.12 = 0.60  <- the mode, the correct one
+        env 1   action 0: 0.20+0.20+0.20 = 0.60   <- the mode, the correct one
+                action 1: one particle of 0.30 and another of 0.10
 
-    El juguete tiene 2 acciones, asi que q es [env0_a0, env0_a1, env1_a0, env1_a1].
+    The toy problem has 2 actions, so q is [env0_a0, env0_a1, env1_a0, env1_a1].
     """
     num_envs = 2
     num_particles = 5
@@ -303,7 +304,7 @@ def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
     roots = List[Scalar[idx_dtype]]()
     weights = List[Scalar[dtype]]()
 
-    # Las dos listas en paralelo: accion raiz de la particula y su peso.
+    # The two lists in parallel: the particle's root action and its weight.
     acts = List[Int]();     ws_ = List[Float64]()
     acts.append(0); ws_.append(0.40)          # env 0, la particula mas pesada
     acts.append(1); ws_.append(0.16)
@@ -326,7 +327,7 @@ def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
     readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
     ctx.synchronize()
 
-    # Primero la q agregada, que es lo que se quiere comprobar de verdad.
+    # First the aggregated q, which is what we really want to check.
     q = download[dtype](q_buf, num_envs * NUM_ACTIONS)
     assert_close(q[0], Scalar[dtype](0.40), TOL, "q[env0, accion 0]")
     assert_close(q[1], Scalar[dtype](0.60), TOL, "q[env0, accion 1]")
@@ -345,11 +346,11 @@ def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
 
 
 def test_greedy_is_deterministic(ctx: DeviceContext) raises:
-    """Dos lecturas codiciosas seguidas dan la misma accion.
+    """Two greedy readouts in a row give the same action.
 
-    Es la diferencia con `readout_weighted`, que sortea: si evaluamos en modo
-    codicioso, el mismo estado tiene que dar siempre la misma jugada, o los
-    numeros de la comparacion no serian reproducibles.
+    It is the difference from `readout_weighted`, which draws: if we evaluate in
+    greedy mode, the same state has to give the same move every time, or the
+    comparison's numbers would not be reproducible.
     """
     num_envs = 3
     num_particles = 8
@@ -379,25 +380,26 @@ def test_greedy_is_deterministic(ctx: DeviceContext) raises:
 
 
 def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
-    """La variante castiga el riesgo; el readout de SPO no. Mismos pesos, distinta
-    jugada.
+    """The variant penalises risk; SPO's readout does not. Same weights, different
+    move.
 
-    Es el test que fija el hallazgo de la auditoria de derrotas, asi que el montaje
-    reproduce la situacion real: una accion ARRIESGADA (una particula estupenda y
-    tres desastrosas) contra una SEGURA (cuatro particulas mediocres pero iguales).
+    It is the test that pins down the losses audit's finding, so the setup
+    reproduces the real situation: a RISKY action (one splendid particle and three
+    disastrous ones) against a SAFE one (four mediocre but equal particles).
 
-        accion 0   pesos  1.0, -1.0, -1.0, -1.0    media -0.50
-        accion 1   pesos  0.2,  0.2,  0.2,  0.2    media  0.20
+        action 0   weights  1.0, -1.0, -1.0, -1.0    mean -0.50
+        action 1   weights  0.2,  0.2,  0.2,  0.2    mean  0.20
 
-    SPO hace q(a) = SUMA exp(peso/tau), que con tau=0.5 da
+    SPO does q(a) = SUM exp(weight/tau), which with tau=0.5 gives
 
-        accion 0   e^2 + 3*e^-2 = 7.39 + 0.41 = 7.80   <- gana la arriesgada
-        accion 1   4 * e^0.4                  = 5.97
+        action 0   e^2 + 3*e^-2 = 7.39 + 0.41 = 7.80   <- the risky one wins
+        action 1   4 * e^0.4                  = 5.97
 
-    porque las tres particulas malas aportan casi cero pero NO RESTAN. La variante
-    promedia primero, y entonces gana la segura. Las dos lecturas son correctas
-    para lo que estiman: la de SPO estima E[exp(A/tau)] y la variante exp(E[A]/tau).
-    Coinciden si el entorno es determinista; con un rival al azar, no.
+    because the three bad particles contribute almost zero but do NOT SUBTRACT. The
+    variant averages first, and then the safe one wins. Both readouts are correct
+    for what they estimate: SPO's estimates E[exp(A/tau)] and the variant
+    exp(E[A]/tau). They coincide if the environment is deterministic; with a random
+    rival, they do not.
     """
     num_envs = 1
     num_particles = 8
@@ -420,7 +422,7 @@ def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
     write_into[dtype](ws.particles.resample_td_weights, w)
     ctx.synchronize()
 
-    # 1. El readout de SPO: se queda con la arriesgada.
+    # 1. SPO's readout: it goes for the risky one.
     readout_weighted(ctx, ws.particles, ws.scratch, ws.output, cfg, us)
     readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
     ctx.synchronize()
@@ -429,7 +431,7 @@ def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
         raise Error("con el readout de SPO deberia salir la accion 0 (la de la "
                     "particula buena), salio ", Int(spo[0]))
 
-    # 2. La variante: se queda con la segura.
+    # 2. The variant: it goes for the safe one.
     readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf, q_buf, us,
                      True)
     ctx.synchronize()
@@ -438,7 +440,7 @@ def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
         raise Error("con la variante deberia salir la accion 1 (media mayor), "
                     "salio ", Int(exp_a[0]))
 
-    # Y las medias, que son lo que la variante calcula de verdad.
+    # And the means, which are what the variant actually computes.
     logits = download[dtype](logits_buf, num_envs * NUM_ACTIONS)
     tau = Scalar[dtype](0.5)
     assert_close(logits[0] * tau, Scalar[dtype](-0.5), TOL, "media de la accion 0")
@@ -447,11 +449,11 @@ def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
 
 
 def test_expected_readout_ignores_unsampled_actions(ctx: DeviceContext) raises:
-    """Una accion que ninguna particula probo se queda con q = 0.
+    """An action no particle tried is left with q = 0.
 
-    Sin esto, la media de cero particulas seria 0/0 y podria salir NaN o, peor,
-    un 0 que compite de tu a tu con acciones de media negativa y acabaria
-    eligiendose una jugada que la busqueda nunca evaluo.
+    Without this, the mean of zero particles would be 0/0 and could come out NaN
+    or, worse, a 0 that competes on equal terms with actions of negative mean and
+    would end up selecting a move the search never evaluated.
     """
     num_envs = 1
     num_particles = 4
@@ -461,8 +463,8 @@ def test_expected_readout_ignores_unsampled_actions(ctx: DeviceContext) raises:
     logits_buf = zero_buffer[dtype](ctx, num_envs * NUM_ACTIONS)
     us = zero_buffer[dtype](ctx, num_particles)
 
-    # Todas las particulas juegan la accion 1, y ademas con media NEGATIVA: si la
-    # accion 0 (sin probar) contara como 0, le ganaria.
+    # Every particle plays action 1, and with a NEGATIVE mean at that: if action 0
+    # (untried) counted as 0, it would beat it.
     roots = List[Scalar[idx_dtype]]()
     w = List[Scalar[dtype]]()
     for _ in range(4):

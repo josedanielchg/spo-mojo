@@ -1,12 +1,12 @@
-"""Pruebas de ops/reductions.mojo contra bucles en host.
+"""Tests for ops/reductions.mojo against host-side loops.
 
-Los tamanos no son al azar:
-  16   -> media fila de warp, el caso real de SPO (16 particulas)
-  32   -> justo un warp / un bloque entero
-  33   -> el caso "ragged": mas largo que el bloque y no multiplo. Aqui es donde
-          se caen los guards mal escritos y donde el bucle a saltos de TPB tiene
-          que dar la vuelta con hilos desparejados.
-  1024 -> 32 elementos por hilo, para que el bucle de acumulacion se note.
+The sizes are not random:
+  16   -> half a warp row, SPO's real case (16 particles)
+  32   -> exactly one warp / one whole block
+  33   -> the "ragged" case: longer than the block and not a multiple. This is
+          where badly written guards fall over and where the TPB-strided loop has
+          to go round with mismatched threads.
+  1024 -> 32 elements per thread, so that the accumulation loop is noticeable.
 """
 
 from std.gpu.host import DeviceContext
@@ -18,19 +18,19 @@ from tests.helpers import upload, zeros, download, assert_close, assert_eq_int
 
 comptime TPB = 32
 
-# Los datos son enteros pequenos, y float32 representa exacto todo entero hasta
-# 2^24. O sea que las sumas de referencia y las de la GPU coinciden BIT a BIT
-# aunque el orden de acumulacion sea distinto: la tolerancia sobra, pero la dejo
-# por si algun dia cambio el patron a valores no enteros.
+# The data are small integers, and float32 represents every integer up to 2^24
+# exactly. That is, the reference sums and the GPU's coincide BIT for BIT even
+# though the accumulation order differs: the tolerance is unnecessary, but I leave
+# it in case I ever change the pattern to non-integer values.
 comptime TOL = Scalar[dtype](1e-4)
 
 
 def fill_pattern(rows: Int, row_size: Int) -> List[Scalar[dtype]]:
-    """Patron determinista y no monotono.
+    """A deterministic, non-monotonic pattern.
 
-    El `% 31` hace que los valores se repitan cada 31 columnas, asi que con
-    row_size=1024 hay un monton de empates en el maximo: el test de argmax pasa
-    a ser tambien un test de la regla de desempate, gratis.
+    The `% 31` makes the values repeat every 31 columns, so with row_size=1024
+    there are plenty of ties at the maximum: the argmax test becomes a test of the
+    tie-breaking rule as well, for free.
     """
     data = List[Scalar[dtype]]()
     for r in range(rows):
@@ -47,8 +47,8 @@ def host_sum(data: List[Scalar[dtype]], row: Int, row_size: Int) -> Scalar[dtype
 
 
 def host_argmax(data: List[Scalar[dtype]], row: Int, row_size: Int) -> Int:
-    """Referencia en host. Comparacion estricta -> se queda el indice menor,
-    la misma regla que promete argmax_rows."""
+    """Host-side reference. Strict comparison -> the lower index stays, the same
+    rule argmax_rows promises."""
     best = data[row * row_size]
     best_i = 0
     for c in range(row_size):
@@ -75,8 +75,8 @@ def check_sum(ctx: DeviceContext, rows: Int, row_size: Int) raises:
 
 
 def check_warp_sum(ctx: DeviceContext, rows: Int, row_size: Int) raises:
-    """El butterfly de warp tiene que dar exactamente lo mismo que la version
-    en arbol con shared memory. Son dos caminos distintos al mismo numero."""
+    """The warp butterfly has to give exactly the same as the tree version with
+    shared memory. They are two different routes to the same number."""
     data = fill_pattern(rows, row_size)
     a = upload[dtype](ctx, data)
     o = zeros[dtype](ctx, rows)
@@ -127,11 +127,10 @@ def check_argmax(ctx: DeviceContext, rows: Int, row_size: Int) raises:
 
 
 def check_argmax_all_tied(ctx: DeviceContext) raises:
-    """Caso extremo: la fila entera vale lo mismo. Tiene que salir el indice 0.
+    """Extreme case: the whole row has the same value. Index 0 has to come out.
 
-    Con 33 elementos y bloques de 32, el hilo 0 ve las columnas 0 y 32 (las dos
-    empatadas), asi que ademas comprueba el desempate dentro del bucle a saltos,
-    no solo el del arbol.
+    With 33 elements and blocks of 32, thread 0 sees columns 0 and 32 (both tied),
+    so it also checks the tie-breaking inside the strided loop, not only the tree's.
     """
     row_size = 33
     data = List[Scalar[dtype]]()
@@ -158,7 +157,7 @@ def main() raises:
             check_max(ctx, rows, row_size)
             check_argmax(ctx, rows, row_size)
 
-        # El butterfly solo vale si la fila cabe en un warp.
+        # The butterfly is only valid if the row fits in a warp.
         for row_size in [16, 32]:
             check_warp_sum(ctx, rows, row_size)
 

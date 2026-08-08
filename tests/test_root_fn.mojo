@@ -1,9 +1,9 @@
-"""La siembra de la busqueda: root_fn.
+"""The search's seeding: root_fn.
 
-Tres niveles de comprobacion, de mas exacto a mas estadistico:
-  1. el broadcast: cada particula se lleva el estado y el valor de SU env,
-  2. con uniformes inyectados, las acciones salen exactas,
-  3. con el RNG de verdad, las frecuencias siguen al prior.
+Three levels of checking, from most exact to most statistical:
+  1. the broadcast: each particle takes ITS env's state and value,
+  2. with injected uniforms, the actions come out exact,
+  3. with the real RNG, the frequencies follow the prior.
 """
 
 from std.gpu.host import DeviceContext
@@ -22,7 +22,7 @@ comptime TOL = Scalar[dtype](1e-6)
 
 def make_config(num_envs: Int, num_particles: Int, num_actions: Int,
                 state_dim: Int) -> SPOConfig:
-    """Config pequena y a medida de cada test, no la del paper."""
+    """A small config tailored to each test, not the paper's."""
     return SPOConfig(
         num_envs=num_envs, num_particles=num_particles, num_actions=num_actions,
         state_dim=state_dim, search_depth=4, resample_period=4,
@@ -30,14 +30,14 @@ def make_config(num_envs: Int, num_particles: Int, num_actions: Int,
 
 
 def test_broadcast(ctx: DeviceContext) raises:
-    """Cada particula arranca con el estado y el valor de su env, no del vecino."""
+    """Each particle starts with its env's state and value, not its neighbour's."""
     num_envs = 3
     num_particles = 4
     state_dim = 2
     cfg = make_config(num_envs, num_particles, 2, state_dim)
     p_total = cfg.num_search_particles()
 
-    # Estados bien distintos por env para que un cruce se note: env e -> (10e, 10e+1)
+    # Clearly different states per env so that a mix-up shows: env e -> (10e, 10e+1)
     root_state = List[Scalar[dtype]]()
     for e in range(num_envs):
         root_state.append(Scalar[dtype](10 * e))
@@ -77,10 +77,10 @@ def test_broadcast(ctx: DeviceContext) raises:
 
 
 def test_exact_actions_with_injected_uniforms(ctx: DeviceContext) raises:
-    """Con logits fijos y uniformes elegidos a mano, las acciones son exactas.
+    """With fixed logits and hand-chosen uniforms, the actions are exact.
 
-    Prior [0.25, 0.75] -> CDF [0.25, 1.0]. Un uniforme < 0.25 da la accion 0 y
-    cualquiera por encima da la 1.
+    Prior [0.25, 0.75] -> CDF [0.25, 1.0]. A uniform < 0.25 gives action 0 and
+    anything above gives action 1.
     """
     num_envs = 1
     num_particles = 6
@@ -93,12 +93,12 @@ def test_exact_actions_with_injected_uniforms(ctx: DeviceContext) raises:
 
     us = List[Scalar[dtype]]()
     want = List[Int]()
-    us.append(0.0);   want.append(0)   # borde inferior
-    us.append(0.20);  want.append(0)   # dentro de [0, 0.25)
-    us.append(0.249); want.append(0)   # pegado al corte, por debajo
-    us.append(0.26);  want.append(1)   # pasado el corte
+    us.append(0.0);   want.append(0)   # lower edge
+    us.append(0.20);  want.append(0)   # inside [0, 0.25)
+    us.append(0.249); want.append(0)   # right against the cut, below
+    us.append(0.26);  want.append(1)   # past the cut
     us.append(0.90);  want.append(1)
-    us.append(0.999); want.append(1)   # borde superior
+    us.append(0.999); want.append(1)   # upper edge
 
     root_state = List[Scalar[dtype]]()
     root_state.append(0.0)
@@ -119,7 +119,7 @@ def test_exact_actions_with_injected_uniforms(ctx: DeviceContext) raises:
 
 
 def test_log_probs_match_prior(ctx: DeviceContext) raises:
-    """El campo prior_logits guarda log pi(a|s) de la accion de cada particula."""
+    """The prior_logits field stores log pi(a|s) of each particle's action."""
     num_envs = 1
     num_particles = 6
     cfg = make_config(num_envs, num_particles, 2, 1)
@@ -157,12 +157,12 @@ def test_log_probs_match_prior(ctx: DeviceContext) raises:
 
 
 def test_action_frequencies_follow_prior(ctx: DeviceContext) raises:
-    """Con el RNG real, la fraccion de particulas por accion sigue al prior.
+    """With the real RNG, the fraction of particles per action follows the prior.
 
-    La muestra grande se consigue con MUCHOS ENVS, no con muchas particulas por
-    env: las particulas de un env tienen que caber en un bloque (ver
-    TPB_PARTICLES en launch.mojo). 1250 envs x 16 particulas = 20000 muestras,
-    que es lo mismo pero respetando el limite real de la busqueda.
+    The large sample is obtained with MANY ENVS, not with many particles per env:
+    an env's particles have to fit in one block (see TPB_PARTICLES in
+    launch.mojo). 1250 envs x 16 particles = 20000 samples, which is the same
+    thing while respecting the search's real limit.
     """
     num_envs = 1250
     num_particles = 16
@@ -209,10 +209,10 @@ def test_action_frequencies_follow_prior(ctx: DeviceContext) raises:
 
 
 def test_accumulators_start_at_zero(ctx: DeviceContext) raises:
-    """La siembra no toca los acumuladores: peso, gae, terminal y depth a cero.
+    """The seeding does not touch the accumulators: weight, gae, terminal and depth at zero.
 
-    Importa porque el peso SMC se acumula en el sitio: si root_fn dejara basura,
-    la primera profundidad ya arrancaria sesgada.
+    It matters because the SMC weight accumulates in place: if root_fn left
+    garbage, the first depth would already start biased.
     """
     cfg = make_config(2, 8, 2, 1)
     p_total = cfg.num_search_particles()

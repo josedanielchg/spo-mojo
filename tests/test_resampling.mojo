@@ -1,10 +1,10 @@
-"""Las piezas del resampling y del ESS, con entradas dictadas a mano.
+"""The resampling and ESS pieces, with inputs dictated by hand.
 
-Nada de aqui corre una busqueda completa: se escriben los pesos que interesan
-directamente en las particulas y se comprueba el resultado EXACTO. Cuando algo
-falla, el fallo apunta a un kernel concreto en vez de a "la busqueda".
+Nothing here runs a full search: the weights of interest are written straight into
+the particles and the EXACT result is checked. When something fails, the failure
+points at a specific kernel instead of at "the search".
 
-El comportamiento de la busqueda entera se prueba aparte, en test_search.mojo.
+The whole search's behaviour is tested separately, in test_search.mojo.
 """
 
 from std.gpu.host import DeviceContext
@@ -31,11 +31,11 @@ def make_config(num_envs: Int, num_particles: Int, depth: Int,
 
 
 def test_resample_indices_are_exact(ctx: DeviceContext) raises:
-    """Con pesos y uniformes dictados, los indices elegidos son exactos.
+    """With weights and uniforms dictated, the chosen indices are exact.
 
-    Cuatro particulas con pesos/temperatura que dan probabilidades
-    [0.1, 0.2, 0.3, 0.4] -> CDF [0.1, 0.3, 0.6, 1.0]. Como la temperatura es 0.5,
-    los pesos que hay que meter son 0.5*log(p) mas cualquier constante.
+    Four particles with weights/temperature giving probabilities
+    [0.1, 0.2, 0.3, 0.4] -> CDF [0.1, 0.3, 0.6, 1.0]. Since the temperature is 0.5,
+    the weights to feed in are 0.5*log(p) plus any constant.
     """
     cfg = make_config(num_envs=1, num_particles=4, depth=1, period=1)
     p_total = cfg.num_search_particles()
@@ -51,7 +51,7 @@ def test_resample_indices_are_exact(ctx: DeviceContext) raises:
         weights.append(cfg.temperature * log(probs[n]))
     write_into[dtype](particles.resample_td_weights, weights)
 
-    # Marco cada particula con su indice para poder ver a quien copio cada hueco.
+    # I mark each particle with its index so as to see which one each slot copied.
     marks = List[Scalar[dtype]]()
     for n in range(4):
         marks.append(Scalar[dtype](n))
@@ -59,10 +59,10 @@ def test_resample_indices_are_exact(ctx: DeviceContext) raises:
 
     us = List[Scalar[dtype]]()
     want = List[Int]()
-    us.append(0.05); want.append(0)   # dentro de [0, 0.1)
-    us.append(0.15); want.append(1)   # dentro de [0.1, 0.3)
-    us.append(0.45); want.append(2)   # dentro de [0.3, 0.6)
-    us.append(0.90); want.append(3)   # dentro de [0.6, 1.0)
+    us.append(0.05); want.append(0)   # inside [0, 0.1)
+    us.append(0.15); want.append(1)   # inside [0.1, 0.3)
+    us.append(0.45); want.append(2)   # inside [0.3, 0.6)
+    us.append(0.90); want.append(3)   # inside [0.6, 1.0)
 
     resample(ctx, particles, scratch, cfg, upload[dtype](ctx, us))
     ctx.synchronize()
@@ -71,18 +71,18 @@ def test_resample_indices_are_exact(ctx: DeviceContext) raises:
     state = download[dtype](particles.state, p_total)
     for n in range(4):
         assert_eq_int(Int(idx[n]), want[n], String("u=", us[n], " -> indice"))
-        # y el gather de verdad trajo el estado de esa particula
+        # and the actual gather brought that particle's state across
         assert_close(state[n], Scalar[dtype](want[n]), TOL,
                      String("el hueco ", n, " deberia tener el estado de ", want[n]))
     print("PASS indices de resampling exactos y gather correcto")
 
 
 def test_resample_resets_weights_but_keeps_gae(ctx: DeviceContext) raises:
-    """El detalle critico de Stoix: pesos a cero, gae intacta y SIN gatherear.
+    """Stoix's critical detail: weights to zero, gae intact and NOT gathered.
 
-    La gae no se reordena aunque todo lo demas si. Stoix lo hace a proposito
-    (ff_spo.py:914) porque el loss de la temperatura necesita las ventajas de
-    antes de resamplear.
+    The gae is not reordered even though everything else is. Stoix does it on
+    purpose (ff_spo.py:914) because the temperature loss needs the pre-resampling
+    advantages.
     """
     cfg = make_config(num_envs=1, num_particles=4, depth=1, period=1)
     p_total = cfg.num_search_particles()
@@ -90,13 +90,13 @@ def test_resample_resets_weights_but_keeps_gae(ctx: DeviceContext) raises:
     particles = Particles(ctx, cfg)
     scratch = SearchScratch(ctx, cfg)
 
-    # Peso enorme en la particula 2: casi todos los huecos la van a copiar.
+    # A huge weight on particle 2: almost every slot is going to copy it.
     weights = List[Scalar[dtype]]()
     weights.append(-100.0); weights.append(-100.0)
     weights.append(0.0); weights.append(-100.0)
     write_into[dtype](particles.resample_td_weights, weights)
 
-    # gae distinta en cada particula, para notar si se reordena
+    # a different gae in each particle, to notice if it gets reordered
     gae = List[Scalar[dtype]]()
     for n in range(4):
         gae.append(Scalar[dtype](10 + n))
@@ -117,14 +117,14 @@ def test_resample_resets_weights_but_keeps_gae(ctx: DeviceContext) raises:
                      String("el peso ", n, " deberia resetearse a 0"))
         assert_close(got_gae[n], Scalar[dtype](10 + n), TOL,
                      String("la gae ", n, " no deberia moverse"))
-        # y efectivamente el resampling SI reordeno (todos copiaron a la 2)
+        # and the resampling DID indeed reorder (they all copied number 2)
         assert_eq_int(Int(got_idx[n]), 2,
                       String("el hueco ", n, " deberia copiar a la particula 2"))
     print("PASS resampling: pesos a 0, gae preservada sin reordenar")
 
 
 def test_ess_uniform_vs_concentrated(ctx: DeviceContext) raises:
-    """ESS = N con pesos iguales, y ESS -> 1 cuando uno se lo lleva todo."""
+    """ESS = N with equal weights, and ESS -> 1 when one takes everything."""
     n_particles = 16
     cfg = make_config(num_envs=2, num_particles=n_particles, depth=1, period=99)
 
@@ -133,10 +133,10 @@ def test_ess_uniform_vs_concentrated(ctx: DeviceContext) raises:
     output = SPOOutput(ctx, cfg)
 
     weights = List[Scalar[dtype]]()
-    # env 0: todos iguales -> ESS = 16
+    # env 0: all equal -> ESS = 16
     for _ in range(n_particles):
         weights.append(3.0)
-    # env 1: uno gigante -> ESS ~ 1
+    # env 1: one giant -> ESS ~ 1
     weights.append(100.0)
     for _ in range(n_particles - 1):
         weights.append(-100.0)

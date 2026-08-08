@@ -1,13 +1,12 @@
-"""RNG y muestreo categorico.
+"""RNG and categorical sampling.
 
-El muestreo se prueba de dos formas que se complementan:
-  - con uniformes INYECTADOS a mano -> indices exactos, cero tolerancias. Si
-    esto falla, la CDF inversa esta mal.
-  - con el RNG de verdad -> frecuencias cerca de las probabilidades. Si esto
-    falla pero lo anterior pasa, el problema esta en el generador, no en el
-    muestreo.
+The sampling is tested in two complementary ways:
+  - with uniforms INJECTED by hand -> exact indices, zero tolerances. If this
+    fails, the inverse CDF is wrong.
+  - with the real RNG -> frequencies close to the probabilities. If this fails but
+    the previous one passes, the problem is in the generator, not in the sampling.
 
-Separarlo asi es lo que hace que un fallo diga DONDE mirar.
+Splitting it this way is what makes a failure say WHERE to look.
 """
 
 from std.gpu.host import DeviceContext
@@ -21,8 +20,8 @@ comptime TPB = 32
 
 
 def log_probs_rows(probs: List[Scalar[dtype]], rows: Int) -> List[Scalar[dtype]]:
-    """Repite log(p) en `rows` filas. El softmax del kernel deshace el log y
-    recupera p, asi que las probabilidades salen tal cual se piden."""
+    """Repeats log(p) across `rows` rows. The kernel's softmax undoes the log and
+    recovers p, so the probabilities come out exactly as requested."""
     out = List[Scalar[dtype]]()
     for _ in range(rows):
         for c in range(len(probs)):
@@ -31,8 +30,8 @@ def log_probs_rows(probs: List[Scalar[dtype]], rows: Int) -> List[Scalar[dtype]]
 
 
 def make_probs() -> List[Scalar[dtype]]:
-    """[0.1, 0.2, 0.3, 0.4]: desiguales a proposito, para que un muestreo que
-    devolviera siempre lo mismo (o uniforme) se note."""
+    """[0.1, 0.2, 0.3, 0.4]: unequal on purpose, so that a sampler that always
+    returned the same thing (or uniform) would show up."""
     p = List[Scalar[dtype]]()
     p.append(0.1)
     p.append(0.2)
@@ -42,13 +41,13 @@ def make_probs() -> List[Scalar[dtype]]:
 
 
 def test_determinism() raises:
-    """Misma key -> misma secuencia. Streams distintos -> secuencias distintas."""
+    """Same key -> same sequence. Different streams -> different sequences."""
     for i in range(64):
         if rand_uniform(42, 0, UInt32(i)) != rand_uniform(42, 0, UInt32(i)):
             raise Error("rand_uniform no es determinista en i=", i)
 
-    # Dos streams del mismo seed tienen que decorrelacionarse. Permito hasta 2
-    # coincidencias de 64 por pura casualidad; en la practica salen 0.
+    # Two streams from the same seed have to decorrelate. I allow up to 2 out of 64
+    # coincidences by pure chance; in practice 0 come out.
     same = 0
     for i in range(64):
         if rand_uniform(42, 0, UInt32(i)) == rand_uniform(42, 1, UInt32(i)):
@@ -63,7 +62,7 @@ def test_determinism() raises:
 
 
 def test_uniform_stats(ctx: DeviceContext) raises:
-    """Media ~ 0.5 y varianza ~ 1/12 = 0.0833, que es lo que debe dar U(0,1)."""
+    """Mean ~ 0.5 and variance ~ 1/12 = 0.0833, which is what U(0,1) must give."""
     n = 100000
     o = zeros[dtype](ctx, n)
 
@@ -74,8 +73,8 @@ def test_uniform_stats(ctx: DeviceContext) raises:
 
     got = download[dtype](o, n)
 
-    # Acumulo en float64: sumar 100k floats en float32 pierde precision
-    # suficiente como para mover la media en el tercer decimal.
+    # I accumulate in float64: summing 100k floats in float32 loses enough
+    # precision to move the mean in the third decimal.
     total = Float64(0)
     for i in range(n):
         v = Float64(got[i])
@@ -98,27 +97,27 @@ def test_uniform_stats(ctx: DeviceContext) raises:
 
 
 def test_categorical_exact(ctx: DeviceContext) raises:
-    """Uniformes inyectados -> indices exactos, calculados a mano.
+    """Injected uniforms -> exact indices, computed by hand.
 
-    Con probabilidades [0.1, 0.2, 0.3, 0.4] el CDF es [0.1, 0.3, 0.6, 1.0].
-    Pruebo el interior de cada tramo y los dos bordes.
+    With probabilities [0.1, 0.2, 0.3, 0.4] the CDF is [0.1, 0.3, 0.6, 1.0]. I test
+    the interior of each stretch and both edges.
     """
     probs = make_probs()
     row_size = len(probs)
 
     us = List[Scalar[dtype]]()
     want = List[Int]()
-    us.append(0.0);   want.append(0)   # borde inferior exacto
-    us.append(0.05);  want.append(0)   # dentro de [0.0, 0.1)
-    us.append(0.15);  want.append(1)   # dentro de [0.1, 0.3)
-    us.append(0.45);  want.append(2)   # dentro de [0.3, 0.6)
-    us.append(0.75);  want.append(3)   # dentro de [0.6, 1.0)
-    us.append(0.999); want.append(3)   # pegado al borde superior
+    us.append(0.0);   want.append(0)   # exact lower edge
+    us.append(0.05);  want.append(0)   # inside [0.0, 0.1)
+    us.append(0.15);  want.append(1)   # inside [0.1, 0.3)
+    us.append(0.45);  want.append(2)   # inside [0.3, 0.6)
+    us.append(0.75);  want.append(3)   # inside [0.6, 1.0)
+    us.append(0.999); want.append(3)   # right up against the upper edge
     rows = len(us)
 
     logits = upload[dtype](ctx, log_probs_rows(probs, rows))
     u = upload[dtype](ctx, us)
-    # Salida a -1: si el kernel no escribiera nada, se veria.
+    # Output at -1: if the kernel wrote nothing, it would show.
     o = filled[idx_dtype](ctx, rows, -1)
 
     ctx.enqueue_function[categorical_from_logits[TPB], categorical_from_logits[TPB]](
@@ -133,7 +132,7 @@ def test_categorical_exact(ctx: DeviceContext) raises:
 
 
 def test_categorical_frequencies(ctx: DeviceContext) raises:
-    """Con el RNG real, las frecuencias tienen que acercarse a las probabilidades."""
+    """With the real RNG, the frequencies have to approach the probabilities."""
     probs = make_probs()
     row_size = len(probs)
     n = 100000
@@ -171,8 +170,9 @@ def test_categorical_frequencies(ctx: DeviceContext) raises:
         d = Float64(counts[c]) - e
         chi2 += d * d / e
 
-    # 3 grados de libertad: 16.3 es el p=0.001. Con la seed fija esto no es
-    # flaky, sale siempre lo mismo; el umbral es por si toco el generador.
+    # 3 degrees of freedom: 16.3 is p=0.001. With the seed fixed this is not flaky,
+    # it always comes out the same; the threshold is there in case I touch the
+    # generator.
     if chi2 > 16.3:
         raise Error("chi2 demasiado alto: ", chi2)
     print("PASS categorical: frecuencias ~ probabilidades (chi2 =", chi2, ")")

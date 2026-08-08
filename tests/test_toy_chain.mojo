@@ -1,15 +1,16 @@
-"""Dinamica del MDP de juguete, calculada a mano.
+"""The toy MDP's dynamics, computed by hand.
 
-Con L=8 y horizonte 4, V(pos) = 8 - pos. Los tres casos que hay que distinguir:
+With L=8 and horizon 4, V(pos) = 8 - pos. The three cases that have to be told
+apart:
 
-  paso normal    GOOD desde 0: r=1, rec_disc=1, bootstrap = V(1) = 7
-  TRUNCACION     GOOD desde 3: r=1, rec_disc=0 (deja de simular)
-                               PERO bootstrap = V(4) = 4, porque habia futuro
-  TERMINAL       BAD  desde 0: r=0, rec_disc=0 y bootstrap = 0, no hay futuro
+  normal step    GOOD from 0: r=1, rec_disc=1, bootstrap = V(1) = 7
+  TRUNCATION     GOOD from 3: r=1, rec_disc=0 (it stops simulating)
+                              BUT bootstrap = V(4) = 4, because there was a future
+  TERMINAL       BAD  from 0: r=0, rec_disc=0 and bootstrap = 0, there is no future
 
-La diferencia entre las dos ultimas filas es todo el sentido de este fichero: en
-las dos el rec_discount vale 0, y si uno se equivoca y pone tambien el bootstrap
-a 0 en la truncacion, el bug no se nota hasta que el entrenamiento no converge.
+The difference between the last two rows is this file's entire point: in both the
+rec_discount is 0, and if one gets it wrong and also sets the bootstrap to 0 on
+truncation, the bug goes unnoticed until training fails to converge.
 """
 
 from std.gpu.host import DeviceContext
@@ -29,8 +30,8 @@ comptime TOL = Scalar[dtype](1e-6)
 
 @fieldwise_init
 struct StepResult(Movable):
-    """Lo que devuelve un paso, ya bajado al host. Es un struct y no una tupla
-    porque en 1.0.0b1 una tupla de List no se deja construir."""
+    """What one step returns, already brought down to the host. It is a struct and
+    not a tuple because in 1.0.0b1 a tuple of Lists will not construct."""
     var next_pos: List[Scalar[dtype]]
     var reward: List[Scalar[dtype]]
     var discount: List[Scalar[dtype]]
@@ -40,7 +41,7 @@ struct StepResult(Movable):
 def run_step(ctx: DeviceContext, positions: List[Scalar[dtype]],
              actions: List[Scalar[idx_dtype]], cfg: ToyChain,
              search_gamma: Scalar[dtype]) raises -> StepResult:
-    """Un paso del modelo sobre las posiciones dadas."""
+    """One model step over the given positions."""
     n = len(positions)
     state = upload[dtype](ctx, positions)
     action = upload[idx_dtype](ctx, actions)
@@ -61,7 +62,7 @@ def run_step(ctx: DeviceContext, positions: List[Scalar[dtype]],
 
 
 def test_value_function(ctx: DeviceContext) raises:
-    """V(pos) = 8 - pos, y nunca negativo pasada la ultima casilla."""
+    """V(pos) = 8 - pos, and never negative past the last cell."""
     cfg = default_toy_chain()
     positions = List[Scalar[dtype]]()
     for p in range(10):
@@ -85,7 +86,7 @@ def test_value_function(ctx: DeviceContext) raises:
 
 
 def test_uniform_prior(ctx: DeviceContext) raises:
-    """El prior es uniforme: todos los logits iguales."""
+    """The prior is uniform: all logits equal."""
     n = 5
     positions = List[Scalar[dtype]]()
     for p in range(n):
@@ -106,11 +107,11 @@ def test_uniform_prior(ctx: DeviceContext) raises:
 
 
 def test_normal_step(ctx: DeviceContext) raises:
-    """GOOD desde 0, 1 y 2: avanza, da 1 de recompensa y sigue viva."""
+    """GOOD from 0, 1 and 2: it advances, gives 1 of reward and stays alive."""
     cfg = default_toy_chain()
     positions = List[Scalar[dtype]]()
     actions = List[Scalar[idx_dtype]]()
-    for p in range(3):          # 0, 1, 2 -> llegan a 1, 2, 3 < horizonte 4
+    for p in range(3):          # 0, 1, 2 -> reach 1, 2, 3 < horizon 4
         positions.append(Scalar[dtype](p))
         actions.append(Scalar[idx_dtype](ACTION_GOOD))
 
@@ -119,7 +120,7 @@ def test_normal_step(ctx: DeviceContext) raises:
     for p in range(3):
         assert_close(r.next_pos[p], Scalar[dtype](p + 1), TOL, String("next_pos desde ", p))
         assert_close(r.reward[p], 1.0, TOL, String("reward desde ", p))
-        # Sigue viva: el rec_discount es 1.
+        # Still alive: the rec_discount is 1.
         assert_close(r.discount[p], 1.0, TOL, String("rec_discount desde ", p))
         # bootstrap = 1 * gamma * V(p+1)
         assert_close(r.bootstrap[p], toy_value(Scalar[dtype](p + 1), cfg.chain_length, cfg.value_scale), TOL,
@@ -128,30 +129,30 @@ def test_normal_step(ctx: DeviceContext) raises:
 
 
 def test_terminal_vs_truncation(ctx: DeviceContext) raises:
-    """El test que justifica todo el fichero: los dos finales no son iguales."""
+    """The test that justifies the whole file: the two endings are not the same."""
     cfg = default_toy_chain()
 
     positions = List[Scalar[dtype]]()
     actions = List[Scalar[idx_dtype]]()
-    # [0] TERMINAL: BAD desde la casilla 0
+    # [0] TERMINAL: BAD from cell 0
     positions.append(0.0); actions.append(Scalar[idx_dtype](ACTION_BAD))
-    # [1] TRUNCACION: GOOD desde 3 -> llega a 4 == horizonte
+    # [1] TRUNCATION: GOOD from 3 -> reaches 4 == horizon
     positions.append(3.0); actions.append(Scalar[idx_dtype](ACTION_GOOD))
 
     r = run_step(ctx, positions, actions, cfg, 1.0)
 
-    # El caso terminal.
+    # The terminal case.
     assert_close(r.reward[0], 0.0, TOL, "terminal: recompensa")
     assert_close(r.discount[0], 0.0, TOL, "terminal: rec_discount tiene que ser 0")
     assert_close(r.bootstrap[0], 0.0, TOL,
                  "terminal: el bootstrap tiene que ser 0, no hay futuro")
 
-    # Y el de truncacion, que es donde esta la diferencia.
+    # And the truncation one, which is where the difference lies.
     assert_close(r.next_pos[1], 4.0, TOL, "truncacion: posicion final")
     assert_close(r.reward[1], 1.0, TOL, "truncacion: el paso si dio recompensa")
     assert_close(r.discount[1], 0.0, TOL,
                  "truncacion: rec_discount 0, la particula deja de simular")
-    # Y aqui la diferencia: V(4) = 8 - 4 = 4, NO cero.
+    # And here is the difference: V(4) = 8 - 4 = 4, NOT zero.
     assert_close(r.bootstrap[1], 4.0, TOL,
                  "truncacion: el bootstrap conserva el valor del futuro")
 
@@ -159,10 +160,10 @@ def test_terminal_vs_truncation(ctx: DeviceContext) raises:
 
 
 def test_zero_value_variant(ctx: DeviceContext) raises:
-    """Con value_scale=0 el modelo no tiene critico: V==0 en todas partes.
+    """With value_scale=0 the model has no critic: V==0 everywhere.
 
-    Es el modo que usara la demo de CartPole en la fase 4, donde los pesos SMC
-    degeneran al retorno acumulado.
+    It is the mode the CartPole demo will use in phase 4, where the SMC weights
+    degenerate to the accumulated return.
     """
     cfg = ToyChain(chain_length=8, horizon=4, value_scale=0.0)
 
@@ -180,7 +181,7 @@ def test_zero_value_variant(ctx: DeviceContext) raises:
 
 
 def test_search_gamma_applies(ctx: DeviceContext) raises:
-    """El bootstrap escala con search_gamma; la recompensa del paso no."""
+    """The bootstrap scales with search_gamma; the step's reward does not."""
     cfg = default_toy_chain()
     positions = List[Scalar[dtype]]()
     actions = List[Scalar[idx_dtype]]()
@@ -196,11 +197,11 @@ def test_search_gamma_applies(ctx: DeviceContext) raises:
 
 
 def test_types_fit_the_toy_model(ctx: DeviceContext) raises:
-    """Los tipos de la busqueda se instancian con el juguete.
+    """The search's types instantiate with the toy problem.
 
-    Es el "la interfaz encaja" de la fase: comprueba que SPOConfig/Particles/
-    StepOutputs compilan y reservan lo que toca para este modelo, antes de que
-    exista el nucleo SMC que los va a llenar.
+    It is the phase's "the interface fits": it checks that SPOConfig/Particles/
+    StepOutputs compile and allocate the right things for this model, before the
+    SMC core that will fill them exists.
     """
     num_envs = 3
     cfg = default_config(num_envs, STATE_DIM, NUM_ACTIONS)
@@ -213,7 +214,8 @@ def test_types_fit_the_toy_model(ctx: DeviceContext) raises:
     outputs = StepOutputs(ctx, cfg)
     ctx.synchronize()
 
-    # Todo tiene que arrancar a cero: el peso SMC, la gae y la marca de terminal.
+    # Everything has to start at zero: the SMC weight, the gae and the terminal
+    # flag.
     weights = download[dtype](particles.resample_td_weights, p)
     gae = download[dtype](particles.gae, p)
     terminal = download[idx_dtype](particles.terminal, p)
@@ -223,7 +225,7 @@ def test_types_fit_the_toy_model(ctx: DeviceContext) raises:
         if Int(terminal[i]) != 0:
             raise Error("la particula ", i, " nace marcada como terminal")
 
-    # El buffer de logits es [P, num_actions], no [P].
+    # The logits buffer is [P, num_actions], not [P].
     logits = download[dtype](outputs.action_logits, p * cfg.num_actions)
     if len(logits) != p * NUM_ACTIONS:
         raise Error("action_logits deberia ser P*num_actions")

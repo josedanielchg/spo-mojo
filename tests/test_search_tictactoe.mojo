@@ -1,17 +1,17 @@
-"""La busqueda SMC completa sobre Tic-Tac-Toe: pruebas de COMPORTAMIENTO.
+"""The full SMC search over Tic-Tac-Toe: BEHAVIOUR tests.
 
-Es el equivalente de test_search.mojo pero con el modelo de TTT: no se dicta
-nada, se corre `search[TicTacToe]()` de punta a punta y se mira lo que sale. La
-primera integracion de todo lo de la fase A con el nucleo SMC.
+It is test_search.mojo's equivalent but with the TTT model: nothing is dictated,
+`search[TicTacToe]()` is run end to end and what comes out is inspected. The first
+integration of everything from phase A with the SMC core.
 
-Lo que se comprueba, de mas basico a mas exigente:
-  1. la busqueda corre y no produce NaN,
-  2. la accion elegida es SIEMPRE legal (el prior enmascarado hace su trabajo),
-  3. misma seed -> misma busqueda, bit a bit,
-  4. el ESS se mantiene en rango sano [1, N].
+What gets checked, from most basic to most demanding:
+  1. the search runs and produces no NaN,
+  2. the chosen action is ALWAYS legal (the masked prior does its job),
+  3. same seed -> same search, bit for bit,
+  4. the ESS stays in the healthy range [1, N].
 
-Lo que NO se comprueba aqui: si la busqueda JUEGA bien. Eso necesita partidas de
-verdad contra un rival, y va en la fase A' (el bucle real y la demo).
+What is NOT checked here: whether the search PLAYS well. That needs real games
+against an opponent, and it belongs to phase A' (the real loop and the demo).
 """
 
 from std.gpu.host import DeviceContext
@@ -30,7 +30,7 @@ comptime TOL = Scalar[dtype](1e-5)
 
 def make_config(num_envs: Int, num_particles: Int, depth: Int,
                 period: Int) -> SPOConfig:
-    """Config de busqueda para TTT: 9 acciones, 9 floats de estado."""
+    """Search config for TTT: 9 actions, 9 state floats."""
     return SPOConfig(
         num_envs=num_envs, num_particles=num_particles, num_actions=NUM_ACTIONS,
         state_dim=STATE_DIM, search_depth=depth, resample_period=period,
@@ -39,7 +39,7 @@ def make_config(num_envs: Int, num_particles: Int, depth: Int,
 
 def board9(c0: Int, c1: Int, c2: Int, c3: Int, c4: Int,
            c5: Int, c6: Int, c7: Int, c8: Int) -> List[Scalar[dtype]]:
-    """Un tablero legible: 9 codigos de casilla (1=X agente, -1=O rival, 0=vacia)."""
+    """A readable board: 9 cell codes (1=X agent, -1=O rival, 0=empty)."""
     out = List[Scalar[dtype]]()
     out.append(Scalar[dtype](c0)); out.append(Scalar[dtype](c1))
     out.append(Scalar[dtype](c2)); out.append(Scalar[dtype](c3))
@@ -50,31 +50,31 @@ def board9(c0: Int, c1: Int, c2: Int, c3: Int, c4: Int,
 
 
 def mixed_roots(num_envs: Int) -> List[Scalar[dtype]]:
-    """Estados raiz variados: vacio, media partida y casi lleno, en rotacion.
+    """Varied root states: empty, mid-game and nearly full, in rotation.
 
-    Interesa mezclar posiciones porque cada una ejercita un camino distinto: desde
-    el vacio la busqueda tiene 9 acciones y profundidad de sobra; desde casi lleno
-    casi todas las particulas llegan a terminal en uno o dos pasos.
+    Mixing positions is worthwhile because each exercises a different path: from
+    the empty board the search has 9 actions and depth to spare; from a nearly full
+    one almost every particle reaches terminal in one or two steps.
     """
     roots = List[Scalar[dtype]]()
     for e in range(num_envs):
         which = e % 3
-        b = board9(0,0,0, 0,0,0, 0,0,0)              # vacio: le toca a X
+        b = board9(0,0,0, 0,0,0, 0,0,0)              # empty: X's turn
         if which == 1:
-            b = board9(1,0,-1, 0,1,0, -1,0,0)         # media partida
+            b = board9(1,0,-1, 0,1,0, -1,0,0)         # mid-game
         elif which == 2:
-            b = board9(1,-1,1, -1,1,0, -1,1,0)        # casi lleno: solo 5 y 8 libres
+            b = board9(1,-1,1, -1,1,0, -1,1,0)        # nearly full: only 5 and 8 free
         for c in range(NUM_CELLS):
             roots.append(b[c])
     return roots^
 
 
 def test_search_runs_without_nan(ctx: DeviceContext) raises:
-    """La busqueda corre de punta a punta y ninguna salida trae NaN.
+    """The search runs end to end and no output carries a NaN.
 
-    Es el smoke de verdad: con el prior enmascarado hay NEG_INF en los logits de
-    las casillas ocupadas, y ese es justo el sitio por donde se colaria un NaN
-    (exp(-inf - -inf) en el softmax) si la convencion de enmascarado estuviera mal.
+    It is the real smoke test: with the masked prior there is NEG_INF in the logits
+    of the occupied cells, and that is precisely where a NaN would sneak in
+    (exp(-inf - -inf) in the softmax) if the masking convention were wrong.
     """
     cfg = make_config(num_envs=6, num_particles=16, depth=6, period=3)
     model = default_tictactoe()
@@ -102,7 +102,7 @@ def test_search_runs_without_nan(ctx: DeviceContext) raises:
         if isnan(ess[i]):
             raise Error("ESS NaN en el indice ", i)
 
-    # Los pesos son un softmax por env: tienen que sumar 1.
+    # The weights are a per-env softmax: they have to sum to 1.
     for e in range(cfg.num_envs):
         total = Scalar[dtype](0)
         for n in range(cfg.num_particles):
@@ -113,11 +113,11 @@ def test_search_runs_without_nan(ctx: DeviceContext) raises:
 
 
 def test_search_only_picks_legal_actions(ctx: DeviceContext) raises:
-    """LA prueba de la fase A: la accion elegida nunca cae sobre una casilla ocupada.
+    """THE phase-A test: the chosen action never lands on an occupied cell.
 
-    Es lo que justifica el prior enmascarado. Se comprueba tanto la accion final
-    por env como TODAS las acciones raiz muestreadas: si una sola particula hubiera
-    podido elegir una casilla ocupada, el enmascarado no estaria funcionando.
+    It is what justifies the masked prior. Both the final action per env and ALL
+    the sampled root actions are checked: if a single particle could have chosen an
+    occupied cell, the masking would not be working.
     """
     cfg = make_config(num_envs=6, num_particles=16, depth=6, period=3)
     model = default_tictactoe()
@@ -150,11 +150,11 @@ def test_search_only_picks_legal_actions(ctx: DeviceContext) raises:
 
 
 def test_search_is_reproducible(ctx: DeviceContext) raises:
-    """Misma semilla, misma busqueda, aunque el modelo sea estocastico.
+    """Same seed, same search, even though the model is stochastic.
 
-    Importa mas que en el juguete: el step de TTT sortea la jugada del rival, asi
-    que si el stream RNG del paso no fuera determinista el resultado cambiaria
-    entre corridas.
+    It matters more than in the toy problem: TTT's step draws the rival's move, so
+    if the step's RNG stream were not deterministic the result would change between
+    runs.
     """
     cfg = make_config(num_envs=4, num_particles=16, depth=6, period=3)
     model = default_tictactoe()
@@ -184,12 +184,12 @@ def test_search_is_reproducible(ctx: DeviceContext) raises:
 
 
 def test_ess_stays_in_range(ctx: DeviceContext) raises:
-    """El ESS se mantiene en [1, N] en todas las profundidades y envs.
+    """The ESS stays in [1, N] at every depth and env.
 
-    No exijo la sierra del juguete: en TTT muchas particulas llegan a terminal y
-    congelan su peso, asi que la forma de la curva depende mucho de la posicion
-    inicial. Lo que si tiene que cumplirse siempre es el rango: el ESS de N
-    particulas no puede ser menor que 1 ni mayor que N.
+    I do not demand the toy problem's sawtooth: in TTT many particles reach
+    terminal and freeze their weight, so the curve's shape depends heavily on the
+    starting position. What always has to hold is the range: the ESS of N particles
+    cannot be less than 1 nor greater than N.
     """
     cfg = make_config(num_envs=6, num_particles=16, depth=6, period=3)
     model = default_tictactoe()

@@ -1,15 +1,15 @@
-"""El MLP del critico contra el golden de numpy, capa por capa.
+"""The critic's MLP against the numpy golden, layer by layer.
 
-Golden: tests/golden/gen/gen_critic.py, arquitectura 18 -> H -> H -> 1 con ReLU y
-tres tamanos: H = 32 (1697 pesos), 64 (5441) y 256 (70913, el de Stoix).
+Golden: tests/golden/gen/gen_critic.py, architecture 18 -> H -> H -> 1 with ReLU
+and three sizes: H = 32 (1697 weights), 64 (5441) and 256 (70913, Stoix's).
 
-Se comparan las activaciones INTERMEDIAS y no solo la salida. Si solo se comparara
-V y fallara, no se sabria en que capa se rompio; comparando a1, a2 y V el fallo
-queda localizado.
+The INTERMEDIATE activations are compared, not just the output. If only V were
+compared and it failed, there would be no telling which layer broke; comparing a1,
+a2 and V localises the fault.
 
-Cada arquitectura se prueba con dos batches que comparten pesos, asi que tambien
-se comprueba que el resultado no depende del tamano del batch: 5 no es multiplo del
-tile de 16 y pisa los guards, 64 ocupa varios tiles.
+Each architecture is tested with two batches sharing weights, so it also checks
+that the result does not depend on the batch size: 5 is not a multiple of the tile
+of 16 and hits the guards, 64 spans several tiles.
 """
 
 from std.gpu.host import DeviceContext
@@ -27,12 +27,12 @@ comptime OUT_DIM = 1
 
 
 def tag(hidden: Int) -> String:
-    """Prefijo de los ficheros del golden de esa arquitectura."""
+    """Prefix of that architecture's golden files."""
     return GOLDEN + "critic_h" + String(hidden) + "_"
 
 
 def load_params(ctx: DeviceContext, hidden: Int) raises -> CriticParams:
-    """Los pesos del golden de la arquitectura dada, subidos a la GPU."""
+    """The golden weights of the given architecture, uploaded to the GPU."""
     t = tag(hidden)
     p = zero_critic_params(ctx, IN_DIM, hidden, OUT_DIM)
     write_into[dtype](p.w1, read_f32(t + "w1.bin"))
@@ -46,7 +46,7 @@ def load_params(ctx: DeviceContext, hidden: Int) raises -> CriticParams:
 
 def compare(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
             tol: Scalar[dtype], what: String) raises -> Scalar[dtype]:
-    """Mayor diferencia absoluta; revienta si pasa de la tolerancia."""
+    """Largest absolute difference; blows up if it exceeds the tolerance."""
     worst = Scalar[dtype](0)
     at = 0
     for i in range(n):
@@ -61,7 +61,7 @@ def compare(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
 
 
 def check_batch(ctx: DeviceContext, hidden: Int, m: Int) raises:
-    """Un (arquitectura, batch) del golden, comparando las tres etapas."""
+    """One (architecture, batch) from the golden, comparing all three stages."""
     params = load_params(ctx, hidden)
     cache = CriticCache(ctx, m, hidden, OUT_DIM)
     t = tag(hidden)
@@ -80,8 +80,8 @@ def check_batch(ctx: DeviceContext, hidden: Int, m: Int) raises:
     got_a2 = download[dtype](cache.a2, m * hidden)
     got_v = download[dtype](cache.value, m * OUT_DIM)
 
-    # La tolerancia crece con la profundidad: el error de cada capa entra en la
-    # siguiente. Escala con sqrt(fan_in) como en el test de la lineal.
+    # The tolerance grows with depth: each layer's error feeds into the next. It
+    # scales with sqrt(fan_in) as in the linear layer's test.
     t1 = Scalar[dtype](1e-5) * sqrt(Scalar[dtype](IN_DIM))
     t2 = Scalar[dtype](2e-5) * sqrt(Scalar[dtype](hidden))
     t3 = Scalar[dtype](3e-5) * sqrt(Scalar[dtype](hidden))
@@ -98,28 +98,28 @@ def check_batch(ctx: DeviceContext, hidden: Int, m: Int) raises:
 
 
 def test_against_numpy(ctx: DeviceContext) raises:
-    """Las tres arquitecturas x los dos batches, capa por capa.
+    """The three architectures x the two batches, layer by layer.
 
-    Las tres corren con el MISMO codigo: el MLP es generico en las dimensiones,
-    asi que pasar de 32 a 256 no toca ni una linea de Mojo. Se comparan varios
-    tamanos porque el numero de neuronas no lo fija ni el paper ni Stoix (Stoix
-    usa [256,256]); para un juego de 9 casillas hay que medirlo.
+    All three run with the SAME code: the MLP is generic in its dimensions, so
+    going from 32 to 256 does not touch a single line of Mojo. Several sizes are
+    compared because the number of neurons is fixed neither by the paper nor by
+    Stoix (Stoix uses [256,256]); for a game of 9 cells it has to be measured.
     """
     hiddens = List[Int]()
     hiddens.append(32); hiddens.append(64); hiddens.append(256)
     for i in range(len(hiddens)):
-        check_batch(ctx, hiddens[i], 5)     # ragged: 5 no es multiplo de 16
-        check_batch(ctx, hiddens[i], 64)    # varios tiles en el batch
+        check_batch(ctx, hiddens[i], 5)     # ragged: 5 is not a multiple of 16
+        check_batch(ctx, hiddens[i], 64)    # several tiles across the batch
     print("PASS el MLP coincide con numpy en las 3 arquitecturas (a1, a2 y V)")
 
 
 def test_relu_actually_fires(ctx: DeviceContext) raises:
-    """Comprobacion de que el test de arriba prueba algo.
+    """A check that the test above tests something.
 
-    Si el ReLU nunca recortara nada, el golden pasaria igual y no distinguiriamos
-    una red CON ReLU de una sin el. El generador reporta ~50% de activaciones
-    apagadas; aqui se verifica en la salida real: tiene que haber ceros en a1 y a2,
-    y ningun valor negativo.
+    If the ReLU never clipped anything, the golden would pass all the same and we
+    could not tell a network WITH a ReLU from one without. The generator reports
+    ~50% of activations switched off; here it is verified on the real output: there
+    have to be zeros in a1 and a2, and no negative value at all.
     """
     m = 64
     hidden = 64
@@ -155,10 +155,10 @@ def test_relu_actually_fires(ctx: DeviceContext) raises:
 
 
 def test_relu_is_exact(ncx: DeviceContext) raises:
-    """El ReLU suelto, sobre valores elegidos: negativos a 0, el resto intactos.
+    """The ReLU on its own, over chosen values: negatives to 0, the rest untouched.
 
-    Incluye el 0 y valores muy pequenos a los dos lados, que es donde una
-    comparacion mal escrita (`<=` en vez de `<`) se notaria.
+    It includes 0 and very small values on both sides, which is where a badly
+    written comparison (`<=` instead of `<`) would show up.
     """
     vals = List[Scalar[dtype]]()
     vals.append(-3.0); vals.append(-1e-7); vals.append(0.0)

@@ -1,22 +1,22 @@
-"""El backward del MLP completo: gradientes a traves de dos ReLU.
+"""The full MLP's backward: gradients through two ReLUs.
 
-Dos verificaciones independientes, porque una sola no basta para el riesgo nº1:
+Two independent checks, because one alone is not enough for risk #1:
 
-  1. Contra el autodiff de JAX (referencia EXACTA), sobre los 6 tensores de pesos
-     y dos configuraciones (H=32 batch 20 ragged, H=64 batch 64 multi-tile).
-  2. Contra diferencias finitas centrales sobre una red mini, que no depende de
-     ningun golden: si los dos coinciden, o los dos estan mal de la misma forma
-     (improbable) o el backward es correcto.
+  1. Against JAX's autodiff (the EXACT reference), over the 6 weight tensors and
+     two configurations (H=32 batch 20 ragged, H=64 batch 64 multi-tile).
+  2. Against central finite differences on a mini network, which depends on no
+     golden: if the two agree, either both are wrong in the same way (unlikely) or
+     the backward is correct.
 
-Lo nuevo respecto a E1.4 es que el gradiente atraviesa la mascara del ReLU. Ahi
-esta el error tipico: aplicarla con la activacion equivocada, o en el lado
-equivocado de la capa. Un fallo asi no rompe nada visible — la red simplemente
-aprende peor.
+What is new with respect to E1.4 is that the gradient passes through the ReLU's
+mask. That is where the typical error lives: applying it with the wrong activation,
+or on the wrong side of the layer. A fault like that breaks nothing visible: the
+network simply learns worse.
 
-Y ojo con una diferencia importante frente a E1.4: alli la perdida era LINEAL en
-los pesos, asi que las diferencias finitas eran exactas. Aqui la perdida es
-cuadratica y pasa por dos ReLU, o sea que la aproximacion numerica ya tiene error
-de verdad. Es una prueba mas exigente.
+And mind an important difference from E1.4: there the loss was LINEAR in the
+weights, so the finite differences were exact. Here the loss is quadratic and goes
+through two ReLUs, that is, the numerical approximation now has real error. It is a
+more demanding test.
 """
 
 from std.gpu.host import DeviceContext
@@ -39,7 +39,7 @@ def cbwd_tag(hidden: Int, m: Int) -> String:
 
 def worst_abs(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
               tol: Scalar[dtype], what: String) raises -> Scalar[dtype]:
-    """Mayor diferencia absoluta; revienta si pasa de la tolerancia."""
+    """Largest absolute difference; blows up if it exceeds the tolerance."""
     worst = Scalar[dtype](0)
     at = 0
     for i in range(n):
@@ -54,7 +54,7 @@ def worst_abs(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
 
 
 def check_against_jax(ctx: DeviceContext, hidden: Int, m: Int) raises:
-    """Un caso del golden: forward primero, y despues los 6 gradientes."""
+    """One golden case: the forward first, and then the 6 gradients."""
     t = cbwd_tag(hidden, m)
     params = zero_critic_params(ctx, IN_DIM, hidden, OUT_DIM)
     write_into[dtype](params.w1, read_f32(t + "w1.bin"))
@@ -74,15 +74,16 @@ def check_against_jax(ctx: DeviceContext, hidden: Int, m: Int) raises:
     critic_backward(ctx, params, cache, grads, scratch, x, target, m)
     ctx.synchronize()
 
-    # Primero el forward: si ya difiere, el gradiente diferiria por razones que no
-    # son el backward, y el mensaje de error apuntaria al sitio equivocado.
+    # The forward first: if it already differs, the gradient would differ for
+    # reasons that are not the backward, and the error message would point at the
+    # wrong place.
     tol_fwd = Scalar[dtype](1e-5) * sqrt(Scalar[dtype](hidden))
     _ = worst_abs(download[dtype](cache.value, m * OUT_DIM),
                   read_f32(t + "v.bin"), m * OUT_DIM, tol_fwd,
                   String("h", hidden, " forward V"))
 
-    # Y ahora los seis gradientes. La tolerancia escala con la dimension que se
-    # reduce en cada uno.
+    # And now the six gradients. The tolerance scales with the dimension being
+    # reduced in each one.
     tol = Scalar[dtype](1e-6) * sqrt(Scalar[dtype](m * hidden))
     e = List[Scalar[dtype]]()
     e.append(worst_abs(download[dtype](grads.dw1, IN_DIM * hidden),
@@ -113,13 +114,13 @@ def check_against_jax(ctx: DeviceContext, hidden: Int, m: Int) raises:
 
 
 def test_against_jax_autodiff(ctx: DeviceContext) raises:
-    """Los 6 gradientes contra el autodiff de JAX, en dos configuraciones."""
-    check_against_jax(ctx, 32, 20)    # batch ragged
+    """The 6 gradients against JAX's autodiff, in two configurations."""
+    check_against_jax(ctx, 32, 20)    # ragged batch
     check_against_jax(ctx, 64, 64)    # multi-tile
     print("PASS los 6 gradientes del critico coinciden con el autodiff de JAX")
 
 
-# --- La segunda verificacion: diferencias finitas, sin depender de ningun golden
+# --- The second check: finite differences, depending on no golden at all
 
 comptime FD_IN = 4
 comptime FD_HID = 5
@@ -127,31 +128,32 @@ comptime FD_OUT = 1
 comptime FD_M = 3
 comptime EPS = Scalar[dtype](1e-3)
 comptime FD_TOL = Scalar[dtype](5e-2)
-"""Tolerancia relativa floja: la perdida ya no es lineal en los pesos (es
-cuadratica y pasa por dos ReLU), asi que la aproximacion numerica tiene error de
-verdad. Lo que se busca no es precision sino cazar un gradiente equivocado."""
+"""A loose relative tolerance: the loss is no longer linear in the weights (it is
+quadratic and goes through two ReLUs), so the numerical approximation has real
+error. What is sought is not precision but catching a wrong gradient."""
 
 comptime FD_MIN_SIGNAL = Scalar[dtype](1e-4)
-"""Cambio minimo de la perdida (|L(w+e) - L(w-e)|) para fiarse de la medida.
+"""Minimum change in the loss (|L(w+e) - L(w-e)|) for the measurement to be
+trusted.
 
-Existe por una limitacion REAL del metodo, medida al escribir este test: la
-perdida vale ~0.8 y el cambio a medir es 2*e*grad, que para un gradiente de 0.004
-son 8.6e-6. Restar dos numeros de 0.8 que difieren en 8.6e-6 pierde cinco cifras
-significativas (cancelacion catastrofica), y en float32 solo hay siete. Medido en
-numpy sobre ese mismo parametro:
+It exists because of a REAL limitation of the method, measured while writing this
+test: the loss is ~0.8 and the change to be measured is 2*e*grad, which for a
+gradient of 0.004 is 8.6e-6. Subtracting two numbers of 0.8 that differ by 8.6e-6
+loses five significant figures (catastrophic cancellation), and in float32 there
+are only seven. Measured in numpy on that same parameter:
 
-    float64   exacto -0.00432000   dif.finita -0.00432000   error   0.00%
-    float32   exacto -0.00432005   dif.finita -0.00476837   error  10.38%
+    float64   exact -0.00432000   finite diff -0.00432000   error   0.00%
+    float32   exact -0.00432005   finite diff -0.00476837   error  10.38%
 
-O sea que la diferencia finita en float32 NO tiene resolucion para gradientes
-pequenos; no es que el backward este mal (nuestro kernel dio -0.00432005, que
-coincide con el exacto). Asi que los parametros cuya senal no supera el ruido se
-saltan y se reportan, en vez de subir la tolerancia hasta que pase. La cobertura
-no se pierde: el autodiff de JAX ya verifica TODOS los parametros a 1e-8."""
+That is, the finite difference in float32 does NOT have the resolution for small
+gradients; it is not that the backward is wrong (our kernel gave -0.00432005, which
+matches the exact value). So the parameters whose signal does not clear the noise
+get skipped and reported, instead of raising the tolerance until it passes. No
+coverage is lost: JAX's autodiff already verifies ALL the parameters to 1e-8."""
 
 
 def fd_values(n: Int, seed: Int) -> List[Scalar[dtype]]:
-    """Valores deterministas con signos mezclados, para la red mini."""
+    """Deterministic values with mixed signs, for the mini network."""
     out = List[Scalar[dtype]]()
     for i in range(n):
         out.append(Scalar[dtype](((i * seed) % 11) - 5) * Scalar[dtype](0.3))
@@ -163,7 +165,7 @@ def fd_loss(ctx: DeviceContext, w1: List[Scalar[dtype]], b1: List[Scalar[dtype]]
             w3: List[Scalar[dtype]], b3: List[Scalar[dtype]],
             x: List[Scalar[dtype]],
             target: List[Scalar[dtype]]) raises -> Scalar[dtype]:
-    """La perdida L2 media, calculada corriendo el forward de verdad."""
+    """The mean L2 loss, computed by actually running the forward."""
     p = zero_critic_params(ctx, FD_IN, FD_HID, FD_OUT)
     write_into[dtype](p.w1, w1); write_into[dtype](p.b1, b1)
     write_into[dtype](p.w2, w2); write_into[dtype](p.b2, b2)
@@ -181,11 +183,11 @@ def fd_loss(ctx: DeviceContext, w1: List[Scalar[dtype]], b1: List[Scalar[dtype]]
 
 
 def test_finite_differences_through_relu(ctx: DeviceContext) raises:
-    """Diferencias finitas sobre TODOS los pesos de una red mini 4->5->5->1.
+    """Finite differences over ALL the weights of a mini 4->5->5->1 network.
 
-    No usa ningun golden: perturba cada peso, mide como cambia la perdida de
-    verdad, y lo compara con lo que dice el backward. Es la comprobacion que no
-    depende de que JAX (ni nadie) tenga razon.
+    It uses no golden: it perturbs each weight, measures how the loss really
+    changes, and compares that with what the backward says. It is the check that
+    does not depend on JAX (or anyone) being right.
     """
     w1 = fd_values(FD_IN * FD_HID, 7)
     b1 = fd_values(FD_HID, 13)
@@ -215,8 +217,8 @@ def test_finite_differences_through_relu(ctx: DeviceContext) raises:
     got_dw3 = download[dtype](grads.dw3, FD_HID * FD_OUT)
     got_db3 = download[dtype](grads.db3, FD_OUT)
 
-    # dW1 es el que mas lejos esta de la perdida: su gradiente atraviesa las DOS
-    # mascaras de ReLU y las tres capas. Si la cadena esta bien, ese lo confirma.
+    # dW1 is the furthest from the loss: its gradient crosses BOTH ReLU masks and
+    # all three layers. If the chain is right, that one confirms it.
     worst = Scalar[dtype](0)
     checked = 0
     skipped = 0
@@ -228,8 +230,8 @@ def test_finite_differences_through_relu(ctx: DeviceContext) raises:
         moved[i] = base - EPS
         down = fd_loss(ctx, moved, b1, w2, b2, w3, b3, x, target)
 
-        # Si la perdida apenas se movio, la resta es casi todo ruido de float32:
-        # esa medida no puede verificar nada (ver FD_MIN_SIGNAL).
+        # If the loss barely moved, the subtraction is almost all float32 noise:
+        # that measurement can verify nothing (see FD_MIN_SIGNAL).
         if abs(up - down) < FD_MIN_SIGNAL:
             skipped += 1
             continue
@@ -251,7 +253,7 @@ def test_finite_differences_through_relu(ctx: DeviceContext) raises:
     print("      dW1 (a traves de 2 ReLU y 3 capas):", checked, "comprobados,",
           skipped, "sin senal suficiente, peor error relativo", worst)
 
-    # Y la ultima capa, que es el camino corto.
+    # And the last layer, which is the short path.
     worst3 = Scalar[dtype](0)
     checked3 = 0
     skipped3 = 0
@@ -284,16 +286,17 @@ def test_finite_differences_through_relu(ctx: DeviceContext) raises:
 
 
 def test_relu_mask_actually_blocks(ctx: DeviceContext) raises:
-    """Donde el ReLU recorto, no puede pasar gradiente.
+    """Where the ReLU clipped, no gradient can pass.
 
-    Es la comprobacion estructural de lo unico nuevo de esta etapa. Si la mascara
-    no se aplicara, el gradiente seguiria pareciendo plausible pero seria el de una
-    red SIN ReLU. Aqui se fuerza el caso extremo: pesos que apagan casi todo.
+    It is the structural check of the only new thing at this stage. If the mask
+    were not applied, the gradient would still look plausible but would be that of
+    a network WITHOUT a ReLU. Here the extreme case is forced: weights that switch
+    almost everything off.
     """
     hidden = 8
     m = 4
     p = zero_critic_params(ctx, FD_IN, hidden, FD_OUT)
-    # Bias muy negativo en la capa 1 -> a1 = 0 en todas las neuronas.
+    # A very negative bias in layer 1 -> a1 = 0 across every neuron.
     ones = List[Scalar[dtype]]()
     for _ in range(FD_IN * hidden):
         ones.append(Scalar[dtype](0.1))
@@ -324,8 +327,8 @@ def test_relu_mask_actually_blocks(ctx: DeviceContext) raises:
         if a1[i] != Scalar[dtype](0):
             raise Error("el montaje es incorrecto: a1 deberia estar todo a 0")
 
-    # Con toda la primera capa apagada, ningun peso de la capa 1 puede influir en
-    # la perdida: su gradiente tiene que ser exactamente cero.
+    # With the whole first layer switched off, no layer-1 weight can influence the
+    # loss: its gradient has to be exactly zero.
     dw1 = download[dtype](grads.dw1, FD_IN * hidden)
     for i in range(FD_IN * hidden):
         if dw1[i] != Scalar[dtype](0):

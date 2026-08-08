@@ -1,9 +1,9 @@
-"""Smoke test: el kernel map del Puzzle 1 con el guard del Puzzle 3.
+"""Smoke test: Puzzle 1's map kernel with Puzzle 3's guard.
 
-Confirma que DeviceContext funciona en esta maquina y que el guard `if i < size`
-aguanta un tamano que no es multiplo del block size (33 con TPB=32). Es el
-primer kernel del proyecto y el que se mira cuando algo raro pasa: si este falla,
-el problema es del entorno, no del codigo.
+It confirms that DeviceContext works on this machine and that the `if i < size`
+guard holds up for a size that is not a multiple of the block size (33 with
+TPB=32). It is the project's first kernel and the one to look at when something
+odd happens: if this one fails, the problem is the environment, not the code.
 """
 
 from std.gpu.host import DeviceContext
@@ -17,9 +17,9 @@ comptime TOL = Scalar[dtype](1e-6)
 
 
 def add_ten(out_ptr: GlobalF32, a_ptr: GlobalF32, size: Int):
-    # El guard es el punto del test: el numero de hilos lanzados se redondea
-    # hacia arriba al tamano del bloque, asi que casi nunca coincide con el
-    # tamano de los datos. Sin el `if` los hilos de mas escriben fuera.
+    # The guard is the point of the test: the number of threads launched is
+    # rounded up to the block size, so it almost never matches the size of the
+    # data. Without the `if`, the extra threads write out of bounds.
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < size:
         out_ptr[i] = a_ptr[i] + 10.0
@@ -47,5 +47,5 @@ def check(ctx: DeviceContext, size: Int) raises:
 def main() raises:
     with DeviceContext() as ctx:
         print("device:", ctx.name())
-        check(ctx, 4)    # cabe de sobra en un bloque
-        check(ctx, 33)   # ragged: 2 bloques, 31 hilos de mas en el segundo
+        check(ctx, 4)    # fits in one block with room to spare
+        check(ctx, 33)   # ragged: 2 blocks, 31 extra threads in the second

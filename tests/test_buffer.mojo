@@ -1,8 +1,8 @@
-"""El replay buffer de trayectorias: FIFO, campos y muestreo.
+"""The trajectory replay buffer: FIFO, fields and sampling.
 
-No tiene matematica interesante, pero si una forma tipica de romperse en silencio:
-perder o mezclar secuencias al dar la vuelta. Asi que se comprueba con valores
-marcados y numeros exactos, no con tolerancias.
+There is no interesting maths here, but there is a typical way of breaking
+silently: losing or mixing up sequences when wrapping around. So it is checked with
+marked values and exact numbers, not with tolerances.
 """
 
 from ops.common import dtype
@@ -14,7 +14,7 @@ comptime N_ACT = 4
 
 
 def seq_obs(value: Int) -> List[Scalar[dtype]]:
-    """Una secuencia de observaciones marcadas con `value`, para reconocerlas."""
+    """A sequence of observations marked with `value`, so as to recognise them."""
     out = List[Scalar[dtype]]()
     for i in range(T_LEN * OBS_DIM):
         out.append(Scalar[dtype](value * 100 + i))
@@ -22,8 +22,8 @@ def seq_obs(value: Int) -> List[Scalar[dtype]]:
 
 
 def q_for(value: Int) -> List[Scalar[dtype]]:
-    """Una q marcada con `value`, para reconocerla al salir. A nivel de modulo:
-    una funcion anidada no puede capturar variables del ambito de fuera."""
+    """A q marked with `value`, so as to recognise it on the way out. At module
+    level: a nested function cannot capture variables from the enclosing scope."""
     out = List[Scalar[dtype]]()
     for i in range(T_LEN * N_ACT):
         out.append(Scalar[dtype](value * 1000 + i))
@@ -38,17 +38,17 @@ def seq_steps(value: Int) -> List[Scalar[dtype]]:
 
 
 def add_marked(mut buf: TrajectoryBuffer, value: Int) raises:
-    """Mete una secuencia entera marcada con `value`."""
+    """Puts in a whole sequence marked with `value`."""
     buf.add(seq_obs(value), seq_steps(value), seq_steps(value),
             seq_steps(value), seq_obs(value + 1000))
 
 
 def test_buffer_fifo_and_wraparound() raises:
-    """Al llenarse, las secuencias nuevas pisan las mas viejas, en orden.
+    """Once full, the new sequences overwrite the oldest ones, in order.
 
-    Con capacidad 3 y cinco secuencias metidas (1..5), tienen que quedar las tres
-    ultimas (3, 4, 5) y en los huecos correctos. Es donde un ring buffer mal
-    escrito pierde datos o los deja desordenados.
+    With capacity 3 and five sequences put in (1..5), the last three (3, 4, 5) have
+    to remain, and in the right slots. It is where a badly written ring buffer
+    loses data or leaves it out of order.
     """
     buf = TrajectoryBuffer(3, T_LEN, OBS_DIM)
     if buf.size() != 0:
@@ -59,13 +59,13 @@ def test_buffer_fifo_and_wraparound() raises:
     if buf.size() != 3 or not buf.is_full():
         raise Error("tras 3 secuencias con capacidad 3 deberia estar lleno")
 
-    # Dos mas: pisan a la 1 y a la 2.
+    # Two more: they overwrite 1 and 2.
     add_marked(buf, 4)
     add_marked(buf, 5)
     if buf.size() != 3:
         raise Error("la capacidad no puede crecer: ", buf.size())
 
-    # El hueco 0 tiene ahora la 4, el 1 la 5, y el 2 sigue con la 3.
+    # Slot 0 now holds 4, slot 1 holds 5, and slot 2 still holds 3.
     want = List[Int](); want.append(4); want.append(5); want.append(3)
     for slot in range(3):
         idx = List[Int](); idx.append(slot)
@@ -79,9 +79,9 @@ def test_buffer_fifo_and_wraparound() raises:
 
 
 def test_buffer_fields_dont_cross() raises:
-    """Cada campo se guarda en el suyo: reward, done y truncated no se mezclan.
+    """Each field is stored in its own: reward, done and truncated do not mix.
 
-    Se meten con valores distintos a proposito para que un cruce se vea.
+    They go in with different values on purpose so that a crossover shows.
     """
     buf = TrajectoryBuffer(2, T_LEN, OBS_DIM)
     r = List[Scalar[dtype]](); d = List[Scalar[dtype]](); tr = List[Scalar[dtype]]()
@@ -103,7 +103,7 @@ def test_buffer_fields_dont_cross() raises:
         if got_t[i] != tr[i]:
             raise Error("truncated[", i, "] salio ", got_t[i])
 
-    # Y las bootstrap_obs no son las obs.
+    # And the bootstrap_obs are not the obs.
     got_obs = buf.gather(idx)
     got_boot = buf.gather_bootstrap(idx)
     if got_obs[0] == got_boot[0]:
@@ -112,9 +112,9 @@ def test_buffer_fields_dont_cross() raises:
 
 
 def test_buffer_sampling_is_deterministic() raises:
-    """Misma semilla, mismos indices; y siempre dentro de lo que hay guardado."""
+    """Same seed, same indices; and always within what is stored."""
     buf = TrajectoryBuffer(8, T_LEN, OBS_DIM)
-    for v in range(1, 6):        # 5 secuencias, capacidad 8: no da la vuelta
+    for v in range(1, 6):        # 5 sequences, capacity 8: it does not wrap
         add_marked(buf, v)
 
     a = buf.sample_indices(20, UInt32(123), UInt32(0))
@@ -138,17 +138,17 @@ def test_buffer_sampling_is_deterministic() raises:
 
 
 def test_gather_respects_order_and_repeats() raises:
-    """`gather` con VARIOS indices, en el orden pedido y con repetidos.
+    """`gather` with SEVERAL indices, in the requested order and with repeats.
 
-    Los tests anteriores solo pedian un indice cada vez, asi que no comprobaban ni
-    el orden ni que un indice repetido salga dos veces. Y repetidos los va a haber:
-    el muestreo es CON REEMPLAZO, asi que en un batch real se repiten secuencias.
+    The previous tests only asked for one index at a time, so they checked neither
+    the order nor that a repeated index comes out twice. And there will be repeats:
+    the sampling is WITH REPLACEMENT, so in a real batch sequences repeat.
     """
     buf = TrajectoryBuffer(4, T_LEN, OBS_DIM)
     for v in range(1, 5):
-        add_marked(buf, v)          # secuencias 1..4 en los huecos 0..3
+        add_marked(buf, v)          # sequences 1..4 in slots 0..3
 
-    # Orden deliberadamente desordenado, con el 2 repetido.
+    # A deliberately shuffled order, with 2 repeated.
     idx = List[Int]()
     idx.append(3); idx.append(0); idx.append(2); idx.append(2)
 
@@ -168,7 +168,7 @@ def test_gather_respects_order_and_repeats() raises:
                             "secuencia ", want_values[k], ", pero el valor ", i,
                             " es ", got[k * span + i])
 
-    # Lo mismo para los campos por paso y para las bootstrap_obs.
+    # The same for the per-step fields and for the bootstrap_obs.
     got_r = buf.gather_steps(idx, 0)
     if len(got_r) != len(idx) * T_LEN:
         raise Error("gather_steps deberia devolver ", len(idx), "x", T_LEN)
@@ -188,14 +188,14 @@ def test_gather_respects_order_and_repeats() raises:
 
 
 def test_sampling_more_than_stored() raises:
-    """Pedir mas muestras que secuencias guardadas funciona (hay reemplazo).
+    """Asking for more samples than stored sequences works (there is replacement).
 
-    En el entrenamiento real el batch (32) puede ser mayor que lo que hay al
-    principio, asi que esto tiene que estar soportado y no salirse de rango.
+    In real training the batch (32) may be larger than what is there at the start,
+    so this has to be supported and must not go out of range.
     """
     buf = TrajectoryBuffer(16, T_LEN, OBS_DIM)
     add_marked(buf, 1)
-    add_marked(buf, 2)          # solo 2 secuencias guardadas
+    add_marked(buf, 2)          # only 2 sequences stored
 
     idx = buf.sample_indices(32, UInt32(5), UInt32(0))
     if len(idx) != 32:
@@ -204,7 +204,7 @@ def test_sampling_more_than_stored() raises:
         if idx[i] < 0 or idx[i] >= 2:
             raise Error("indice ", idx[i], " fuera de las 2 secuencias validas")
 
-    # Y el gather de ese batch grande no revienta.
+    # And the gather of that large batch does not blow up.
     got = buf.gather(idx)
     if len(got) != 32 * T_LEN * OBS_DIM:
         raise Error("el gather del batch grande no tiene el tamano esperado")
@@ -212,10 +212,10 @@ def test_sampling_more_than_stored() raises:
 
 
 def test_buffer_rejects_bad_input() raises:
-    """Una secuencia con el tamano equivocado se rechaza en vez de corromper.
+    """A sequence with the wrong size is rejected instead of corrupting things.
 
-    Sin esta comprobacion, meter una secuencia corta escribiria basura en los
-    pasos que faltan y nadie se enteraria hasta ver el entrenamiento raro.
+    Without this check, putting in a short sequence would write garbage into the
+    missing steps and nobody would find out until training looked odd.
     """
     buf = TrajectoryBuffer(2, T_LEN, OBS_DIM)
     short = List[Scalar[dtype]]()
@@ -230,7 +230,7 @@ def test_buffer_rejects_bad_input() raises:
     if not failed:
         raise Error("deberia rechazar una secuencia con menos pasos de la cuenta")
 
-    # Y un buffer vacio no deja muestrear.
+    # And an empty buffer does not allow sampling.
     empty = TrajectoryBuffer(2, T_LEN, OBS_DIM)
     failed2 = False
     try:
@@ -243,12 +243,12 @@ def test_buffer_rejects_bad_input() raises:
 
 
 def test_q_roundtrip_and_validation() raises:
-    """La q entra y sale intacta, y una q mal formada se rechaza.
+    """The q goes in and comes out intact, and a malformed q is rejected.
 
-    La q es el objetivo del actor (ecuacion 11). Si se guardara mal, el actor
-    aprenderia de basura y NADA fallaria: la perdida bajaria igual, contra un
-    objetivo equivocado. De ahi que se compruebe el valor exacto y no una
-    tolerancia.
+    The q is the actor's target (equation 11). If it were stored wrongly, the actor
+    would learn from garbage and NOTHING would fail: the loss would go down all the
+    same, against the wrong target. Hence the exact value is checked and not a
+    tolerance.
     """
     buf = TrajectoryBuffer(3, T_LEN, OBS_DIM, N_ACT)
 
@@ -267,7 +267,7 @@ def test_q_roundtrip_and_validation() raises:
                 raise Error("q de la secuencia ", want_v[k], " valor ", i,
                             ": ", got[k * span + i], " != ", expected[i])
 
-    # Una q con el tamano equivocado se rechaza.
+    # A q with the wrong size is rejected.
     short = List[Scalar[dtype]]()
     for _ in range(span - 1):
         short.append(Scalar[dtype](0))
@@ -280,7 +280,7 @@ def test_q_roundtrip_and_validation() raises:
     if not failed:
         raise Error("deberia rechazar una q con menos valores de la cuenta")
 
-    # Y un buffer sin q no deja pedirla.
+    # And a buffer without q does not allow asking for it.
     plain = TrajectoryBuffer(2, T_LEN, OBS_DIM)
     add_marked(plain, 1)
     failed2 = False

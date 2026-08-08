@@ -1,28 +1,27 @@
-"""Verifie l'alternance de siege contre les references exactes.
+"""Checks the seat alternation against the exact references.
 
-Le morpion est assez petit pour etre resolu par recursion. Contre un adversaire
-uniforme, une politique elle-meme uniforme obtient exactement :
+Tic-tac-toe is small enough to be solved by recursion. Against a uniform opponent,
+a policy that is itself uniform obtains exactly:
 
-    en ouvrant           0.6484
-    en repondant         0.3516
-    moitie-moitie        0.5000     <- par symetrie du jeu
+    opening              0.6484
+    answering            0.3516
+    half and half        0.5000     <- by the game's symmetry
 
-Ce dernier nombre est le test le plus severe qui soit : il ne depend d'aucune
-mesure, seulement du fait que le jeu est symetrique et que le partage des sieges
-est exact. S'il ne sort pas, c'est le montage qui est faux, pas l'agent.
+That last number is the most severe test there is: it depends on no measurement at
+all, only on the game being symmetric and the seat split being exact. If it does
+not come out, it is the setup that is wrong, not the agent.
 
-On verifie aussi que les deux sieges pris SEPAREMENT retrouvent leurs valeurs
-propres. Une erreur qui echangerait les deux sieges laisserait la moyenne
-correcte tout en inversant les moities : sans ce second controle elle passerait
-inapercue.
+We also check that the two seats taken SEPARATELY recover their own values. An
+error that swapped the two seats would leave the mean correct while inverting the
+halves: without this second control it would go unnoticed.
 
-ATTENTION -- la moyenne se calcule comme la moyenne NON PONDEREE des deux scores
-de siege, jamais en agregeant toutes les parties dans un seul compteur. Les deux
-sieges ne produisent pas le meme nombre de parties a duree de campagne egale :
-quand l'adversaire ouvre, il consomme une case, la partie est plus courte, et il
-s'en termine davantage. Agreger biaiserait donc le resultat vers ce siege-la.
-Mesure a l'appui : 12 233 parties contre 14 801 sur une meme campagne, et une
-moyenne agregee de 0.4845 la ou la valeur exacte est 0.5000.
+CAREFUL -- the mean is computed as the UNWEIGHTED mean of the two seat scores,
+never by aggregating all the games into a single counter. The two seats do not
+produce the same number of games at equal campaign length: when the opponent
+opens, it consumes a cell, the game is shorter, and more of them finish.
+Aggregating would therefore bias the result towards that seat. Measurement to
+prove it: 12,233 games against 14,801 over the same campaign, and an aggregated
+mean of 0.4852 where the exact value is 0.5000.
 """
 
 from std.gpu.host import DeviceContext
@@ -62,7 +61,7 @@ def main() raises:
             state.unsafe_ptr(), u_open.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
 
-        # Un compteur par siege : indices pairs (l'agent ouvre) et impairs.
+        # One counter per seat: even indices (the agent opens) and odd ones.
         var g = InlineArray[Int, 2](fill=0)
         var e_ = InlineArray[Int, 2](fill=0)
         var d = InlineArray[Int, 2](fill=0)
@@ -113,13 +112,13 @@ def main() raises:
             print("  " + nom + "   " + String(n) + "    "
                   + String(scores[k]) + "   " + String(refs[k]))
 
-        # Moyenne NON PONDEREE des deux sieges. Voir l'avertissement en tete.
+        # UNWEIGHTED mean of the two seats. See the warning in the header.
         n_tot = g[0] + g[1] + e_[0] + e_[1] + d[0] + d[1]
         moy = 0.5 * (scores[0] + scores[1])
         print("  moyenne       " + String(n_tot) + "    " + String(moy)
               + "   " + String(REF_MOYENNE))
 
-        # Trois sigma sur une proportion de variance au plus 0.25.
+        # Three sigma on a proportion of variance at most 0.25.
         tol0 = 3.0 * (0.25 / Float64(g[0] + e_[0] + d[0])) ** 0.5
         tol1 = 3.0 * (0.25 / Float64(g[1] + e_[1] + d[1])) ** 0.5
         tolm = 0.5 * (tol0 * tol0 + tol1 * tol1) ** 0.5

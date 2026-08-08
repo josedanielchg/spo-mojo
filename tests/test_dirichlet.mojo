@@ -1,23 +1,23 @@
-"""El ruido de Dirichlet en la raiz, contra la formula de rlax.
+"""The Dirichlet noise at the root, against rlax's formula.
 
-Se espeja `apply_exploration_noise` de Stoix (`ff_spo.py:119`), que llama a
+It mirrors Stoix's `apply_exploration_noise` (`ff_spo.py:119`), which calls
 `rlax.add_dirichlet_noise`:
 
     noisy = (1 - fraction) * prior + fraction * noise,     noise ~ Dir(alpha)
 
-Con alpha = 1 (el valor por defecto de Stoix) la Dirichlet simetrica es la uniforme
-sobre el simplex, y se muestrea normalizando exponenciales: e_i = -ln(u_i),
-noise = e / SUM(e). Aqui se comprueba esa cuenta con uniformes conocidas, asi que el
-valor esperado se calcula a mano y no depende del generador.
+With alpha = 1 (Stoix's default) the symmetric Dirichlet is uniform over the
+simplex, and it is sampled by normalising exponentials: e_i = -ln(u_i),
+noise = e / SUM(e). Here that computation is checked with known uniforms, so the
+expected value is worked out by hand and does not depend on the generator.
 
-Lo que se prueba, y por que cada cosa:
-  - con fraction = 0 los logits quedan **bit a bit iguales** (es el defecto de
-    Stoix, asi que toda la suite anterior depende de que sea inerte);
-  - con fraction > 0 sale exactamente la formula;
-  - una casilla tapada (NEG_INF) **sigue tapada**, o el ruido dejaria a la busqueda
-    muestreando jugadas ilegales;
-  - el ruido suma 1 sobre las acciones (es una Dirichlet, no un vector cualquiera);
-  - y con mas de un bloque de hilos.
+What gets tested, and why each thing:
+  - with fraction = 0 the logits come out **bit for bit identical** (it is Stoix's
+    default, so the whole preceding suite depends on it being inert);
+  - with fraction > 0 exactly the formula comes out;
+  - a masked cell (NEG_INF) **stays masked**, or the noise would leave the search
+    sampling illegal moves;
+  - the noise sums to 1 over the actions (it is a Dirichlet, not just any vector);
+  - and with more than one block of threads.
 """
 
 from std.gpu.host import DeviceContext
@@ -45,7 +45,7 @@ def run_noise(ctx: DeviceContext, logits: List[Scalar[dtype]],
 
 
 def make_uniforms(n: Int, seed: Int) -> List[Scalar[dtype]]:
-    """Uniformes deterministas en (0,1), sin depender del generador de la GPU."""
+    """Deterministic uniforms in (0,1), without depending on the GPU's generator."""
     out = List[Scalar[dtype]]()
     x = seed
     for _ in range(n):
@@ -55,11 +55,11 @@ def make_uniforms(n: Int, seed: Int) -> List[Scalar[dtype]]:
 
 
 def test_fraction_zero_is_a_no_op(ctx: DeviceContext) raises:
-    """Con fraction = 0 los logits no se mueven NADA.
+    """With fraction = 0 the logits do not move AT ALL.
 
-    Es el valor por defecto de Stoix, asi que toda la suite anterior (28 ficheros)
-    depende de que esto sea inerte. Si el kernel tocara los logits con fraction=0,
-    habria cambiado silenciosamente todos los resultados medidos hasta ahora.
+    It is Stoix's default, so the whole preceding suite (28 files) depends on this
+    being inert. If the kernel touched the logits with fraction=0, it would have
+    silently changed every result measured so far.
     """
     n_envs = 3
     logits = List[Scalar[dtype]]()
@@ -77,11 +77,11 @@ def test_fraction_zero_is_a_no_op(ctx: DeviceContext) raises:
 
 
 def test_matches_the_rlax_formula(ctx: DeviceContext) raises:
-    """(1-f)*prior + f*noise, con la Dirichlet(1) calculada a mano.
+    """(1-f)*prior + f*noise, with the Dirichlet(1) computed by hand.
 
-    El valor esperado se computa en host con los MISMOS uniformes, asi que si el
-    kernel normalizara mal (por ejemplo dividiendo por n_actions en vez de por la
-    suma) se veria: el ruido dejaria de sumar 1.
+    The expected value is computed on the host with the SAME uniforms, so if the
+    kernel normalised wrongly (by dividing by n_actions instead of by the sum, for
+    instance) it would show: the noise would stop summing to 1.
     """
     n_envs = 2
     fraction = Scalar[dtype](0.25)
@@ -106,19 +106,19 @@ def test_matches_the_rlax_formula(ctx: DeviceContext) raises:
                    + fraction * noise
             assert_close(got[e * N_ACT + a], want, TOL,
                          String("env ", e, " accion ", a))
-        # El ruido es una Dirichlet: sus componentes suman 1.
+        # The noise is a Dirichlet: its components sum to 1.
         assert_close(noise_sum, Scalar[dtype](1), TOL,
                      String("el ruido del env ", e, " deberia sumar 1"))
     print("PASS el ruido coincide con la formula de rlax (Dirichlet alpha=1)")
 
 
 def test_masked_actions_stay_masked(ctx: DeviceContext) raises:
-    """Una casilla tapada sigue efectivamente tapada tras el ruido.
+    """A masked cell stays effectively masked after the noise.
 
-    Si no, la busqueda muestrearia jugadas ilegales, y `ttt_apply` no comprueba
-    legalidad: sobrescribiria la ficha del rival. El argumento es que
-    (1-f)*NEG_INF domina cualquier ruido acotado en [0,1] mientras f < 1, pero eso
-    hay que verlo, no suponerlo.
+    Otherwise the search would sample illegal moves, and `ttt_apply` does not check
+    legality: it would overwrite the rival's mark. The argument is that
+    (1-f)*NEG_INF dominates any noise bounded in [0,1] as long as f < 1, but that
+    has to be seen, not assumed.
     """
     n_envs = 1
     fraction = Scalar[dtype](0.5)
@@ -139,10 +139,11 @@ def test_masked_actions_stay_masked(ctx: DeviceContext) raises:
 
 
 def test_multi_block(ctx: DeviceContext) raises:
-    """70 envs: mas de un bloque con TPB=32, y tamano no redondo.
+    """70 envs: more than one block with TPB=32, and a non-round size.
 
-    El guard `if e >= n_envs` solo se prueba si alguna vez se lanza con un tamano
-    que no cuadra. Es el punto ciego que ya me comi cinco veces en este proyecto.
+    The `if e >= n_envs` guard is only tested if it is ever launched with a size
+    that does not line up. It is the blind spot I have already been bitten by five
+    times in this project.
     """
     n_envs = 70
     fraction = Scalar[dtype](0.3)
@@ -153,7 +154,7 @@ def test_multi_block(ctx: DeviceContext) raises:
     us = make_uniforms(n_envs * N_ACT, 101)
 
     got = run_noise(ctx, logits, us, n_envs, fraction)
-    # Se comprueba el ultimo env, que es el que cae en el bloque parcial.
+    # The last env is checked, which is the one falling in the partial block.
     e = n_envs - 1
     total = Scalar[dtype](0)
     for a in range(N_ACT):
@@ -168,12 +169,13 @@ def test_multi_block(ctx: DeviceContext) raises:
 
 
 def test_noise_flattens_a_peaked_prior(ctx: DeviceContext) raises:
-    """El ruido acerca un prior muy picudo a la uniforme.
+    """The noise brings a very peaked prior closer to uniform.
 
-    Es el efecto por el que se activa: en E2.6 medimos que un prior aprendido muy
-    seguro deja acciones legales con muy pocas particulas. Se comprueba que la
-    diferencia entre el logit mayor y el menor BAJA al aplicar el ruido, que es la
-    definicion operativa de "aplanar".
+    It is the effect it gets switched on for: in E2.6 we measured that a very
+    confident learned prior leaves legal actions with very few particles. It is
+    checked that the difference between the largest and the smallest logit GOES
+    DOWN when the noise is applied, which is the operational definition of
+    "flattening".
     """
     n_envs = 1
     logits = List[Scalar[dtype]]()

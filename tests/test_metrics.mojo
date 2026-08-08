@@ -1,11 +1,11 @@
-"""Las metricas del benchmark: formato, intervalos de Wilson y fila CSV.
+"""The benchmark's metrics: formatting, Wilson intervals and the CSV row.
 
-Sin GPU: es todo aritmetica de host. Importa que sea exacto porque estos numeros
-son los que se comparan contra el MCTS, y un formateo distinto haria que los dos
-CSV no se pudieran leer juntos.
+No GPU: it is all host arithmetic. It matters that it be exact because these
+numbers are the ones compared against the MCTS, and a different formatting would
+make the two CSVs unreadable together.
 
-Los intervalos de Wilson estan contra valores calculados aparte con la formula de
-referencia, no contra lo que devuelve esta misma implementacion.
+The Wilson intervals are checked against values computed separately with the
+reference formula, not against what this same implementation returns.
 """
 
 from std.math import abs
@@ -20,12 +20,12 @@ def check(got: Float64, want: Float64, tol: Float64, what: String) raises:
 
 
 def test_fmt_fixed() raises:
-    """El formateo tiene que coincidir con "%.Nf", incluidos redondeo y negativos."""
+    """The formatting has to match "%.Nf", rounding and negatives included."""
     if fmt_fixed(1.0, 3) != String("1.000"):
         raise Error("1.0 con 3 decimales: ", fmt_fixed(1.0, 3))
     if fmt_fixed(0.5, 2) != String("0.50"):
         raise Error("0.5 con 2 decimales: ", fmt_fixed(0.5, 2))
-    # Ceros a la izquierda en la parte fraccionaria: el fallo clasico.
+    # Leading zeros in the fractional part: the classic bug.
     if fmt_fixed(1.0005, 3) != String("1.001"):
         raise Error("1.0005 con 3 decimales: ", fmt_fixed(1.0005, 3))
     if fmt_fixed(2.03, 2) != String("2.03"):
@@ -38,11 +38,11 @@ def test_fmt_fixed() raises:
 
 
 def test_wilson_reference_values() raises:
-    """Wilson al 95% contra valores calculados con la formula de referencia.
+    """95% Wilson against values computed with the reference formula.
 
-    Los dos casos que importan son los extremos: con 50/50 el intervalo de Wald
-    daria ancho cero, y Wilson da [0.9287, 1.0]. Ese es justo el regimen de un
-    planificador que gana casi siempre, o sea el nuestro.
+    The two cases that matter are the extremes: at 50/50 the Wald interval would
+    give zero width, and Wilson gives [0.9287, 1.0]. That is precisely the regime
+    of a planner that almost always wins, that is, ours.
     """
     tol = 1e-6
     check(wilson_lo(50, 50), 0.928652, tol, "wilson_lo 50/50")
@@ -53,21 +53,21 @@ def test_wilson_reference_values() raises:
     check(wilson_hi(25, 50), 0.633555, tol, "wilson_hi 25/50")
     check(wilson_lo(968, 1000), 0.955175, tol, "wilson_lo 968/1000")
     check(wilson_hi(968, 1000), 0.977243, tol, "wilson_hi 968/1000")
-    # Y el caso degenerado: sin partidas, no hay intervalo.
+    # And the degenerate case: with no games, there is no interval.
     check(wilson_lo(0, 0), 0.0, tol, "wilson_lo sin muestras")
     check(wilson_hi(0, 0), 0.0, tol, "wilson_hi sin muestras")
     print("PASS intervalos de Wilson contra valores de referencia")
 
 
 def test_score_matches_the_exact_scale() raises:
-    """La puntuacion (1 / 0.5 / 0) en la misma escala que las referencias exactas."""
-    # Las proporciones exactas del juego al azar dan 0.6484.
+    """The score (1 / 0.5 / 0) on the same scale as the exact references."""
+    # Random play's exact proportions give 0.6484.
     m = PlannerMetrics(mode="test", games=10000, iterations=64, exploration=0.02,
                        seed=1, total_runtime_s=1.0, total_moves=0, decisions=0,
                        total_simulations=0, x_wins=5849, o_wins=2881, draws=1270)
     check(m.score(), 0.6484, 1e-9, "la puntuacion del azar exacto")
 
-    # Todo victorias -> 1.0; todo empates -> 0.5; todo derrotas -> 0.
+    # All wins -> 1.0; all draws -> 0.5; all losses -> 0.
     allw = PlannerMetrics(mode="t", games=10, iterations=1, exploration=0.0, seed=0,
                           total_runtime_s=1.0, total_moves=0, decisions=0,
                           total_simulations=0, x_wins=10, o_wins=0, draws=0)
@@ -84,10 +84,10 @@ def test_score_matches_the_exact_scale() raises:
 
 
 def test_csv_row_matches_the_shared_schema() raises:
-    """La fila tiene tantas columnas como la cabecera, y en el mismo orden.
+    """The row has as many columns as the header, and in the same order.
 
-    Si esto se descuadra, los CSV del MCTS y de la busqueda dejan de poder leerse
-    juntos, que es el unico motivo de copiar el esquema.
+    If this drifts, the MCTS's and the search's CSVs stop being readable together,
+    which is the only reason for copying the schema.
     """
     m = PlannerMetrics(mode="smc_vs_random", games=1189, iterations=64,
                        exploration=0.02, seed=20260724, total_runtime_s=2.5,
@@ -101,21 +101,21 @@ def test_csv_row_matches_the_shared_schema() raises:
         raise Error("la fila tiene ", got_cols, " columnas y la cabecera ",
                     want_cols)
 
-    # La primera columna distingue plataforma: el MCTS escribe "mojo" (CPU).
+    # The first column distinguishes the platform: the MCTS writes "mojo" (CPU).
     if not row.startswith("mojo-gpu,smc_vs_random,1189,64,"):
         raise Error("el comienzo de la fila no es el esperado: ", row)
     print("PASS la fila CSV cuadra con el esquema comun (", want_cols, "columnas )")
 
 
 def test_derived_rates() raises:
-    """Las columnas derivadas se calculan de las crudas, y sin dividir por cero."""
+    """The derived columns are computed from the raw ones, and without dividing by zero."""
     m = PlannerMetrics(mode="t", games=100, iterations=64, exploration=0.02, seed=1,
                        total_runtime_s=2.0, total_moves=350, decisions=200,
                        total_simulations=76800, x_wins=96, o_wins=2, draws=2)
     check(m.simulations_per_second(), 38400.0, 1e-6, "pasos por segundo")
     check(m.avg_decision_time_s(), 0.01, 1e-9, "tiempo por decision")
 
-    # Sin decisiones ni tiempo, no puede explotar.
+    # With no decisions and no time, it must not blow up.
     z = PlannerMetrics(mode="t", games=0, iterations=1, exploration=0.0, seed=0,
                        total_runtime_s=0.0, total_moves=0, decisions=0,
                        total_simulations=0, x_wins=0, o_wins=0, draws=0)

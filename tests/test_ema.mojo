@@ -1,11 +1,11 @@
-"""La EMA de los target networks: target <- tau*online + (1-tau)*target.
+"""The target networks' EMA: target <- tau*online + (1-tau)*target.
 
-Es el `optax.incremental_update(online, target, tau)` de Stoix, con tau = 0.005.
+It is Stoix's `optax.incremental_update(online, target, tau)`, with tau = 0.005.
 
-Se rompe en silencio de una forma concreta: cambiando el orden de los argumentos.
-Con tau tan pequeno, el target apenas deberia moverse; si se movieran casi del
-todo, el entrenamiento se veria inestable sin que nada fallara. Por eso los tests
-usan numeros exactos y los dos casos limite (tau=1 copia, tau=0 no toca).
+It breaks silently in one specific way: by swapping the argument order. With tau
+this small, the target should barely move; if it moved almost all the way,
+training would look unstable without anything failing. That is why the tests use
+exact numbers and both limiting cases (tau=1 copies, tau=0 touches nothing).
 """
 
 from std.gpu.host import DeviceContext
@@ -22,11 +22,11 @@ comptime TAU = Scalar[dtype](0.005)
 
 
 def test_ema_moves_slowly(ctx: DeviceContext) raises:
-    """La formula: target <- tau*online + (1-tau)*target, con numeros exactos.
+    """The formula: target <- tau*online + (1-tau)*target, with exact numbers.
 
-    Con target=0, online=1 y tau=0.005, tras un paso el target vale exactamente
-    0.005. Que sea TAN pequeno es el punto: si alguien cambiara el orden de los
-    argumentos, el target saltaria a 0.995 y se veria al instante.
+    With target=0, online=1 and tau=0.005, after one step the target is exactly
+    0.005. Its being THAT small is the point: if somebody swapped the argument
+    order, the target would jump to 0.995 and it would show up instantly.
     """
     n = 5
     tgt = List[Scalar[dtype]]()
@@ -45,7 +45,7 @@ def test_ema_moves_slowly(ctx: DeviceContext) raises:
             raise Error("tras un paso el target deberia valer tau (", TAU,
                         "), dio ", got[i])
 
-    # Y tras muchos pasos se acerca a online, sin pasarse.
+    # And after many steps it approaches online, without overshooting.
     for _ in range(200):
         ema_update(ctx, target, online, n, TAU)
     ctx.synchronize()
@@ -58,10 +58,10 @@ def test_ema_moves_slowly(ctx: DeviceContext) raises:
 
 
 def test_ema_with_tau_one_copies(ctx: DeviceContext) raises:
-    """Con tau=1 el target se convierte en una copia exacta del online.
+    """With tau=1 the target becomes an exact copy of the online one.
 
-    Es el caso limite que confirma la orientacion de la formula sin depender de
-    ninguna tolerancia.
+    It is the limiting case that confirms the formula's orientation without
+    depending on any tolerance.
     """
     n = 4
     tgt = List[Scalar[dtype]](); onl = List[Scalar[dtype]]()
@@ -78,7 +78,7 @@ def test_ema_with_tau_one_copies(ctx: DeviceContext) raises:
             raise Error("con tau=1 el target deberia ser el online: ", got[i],
                         " vs ", onl[i])
 
-    # Y con tau=0 no se mueve nada.
+    # And with tau=0 nothing moves.
     target2 = upload[dtype](ctx, tgt)
     ema_update(ctx, target2, upload[dtype](ctx, onl), n, Scalar[dtype](0))
     ctx.synchronize()
@@ -90,18 +90,18 @@ def test_ema_with_tau_one_copies(ctx: DeviceContext) raises:
 
 
 def test_against_optax_multiblock(ctx: DeviceContext) raises:
-    """Contra el `optax.incremental_update` de verdad, y con VARIOS BLOQUES.
+    """Against the real `optax.incremental_update`, and with SEVERAL BLOCKS.
 
-    Tapa dos huecos de la primera version de este test:
+    It plugs two holes in this test's first version:
 
-      1. solo se comparaba contra mi propia lectura de la formula, no contra la
-         libreria que usa Stoix;
-      2. se usaban 4 y 5 elementos, o sea un unico bloque de 256 hilos, asi que
-         la ruta multi-bloque nunca se ejecutaba. Es el mismo punto ciego que
-         aparecio verificando el backward en E1.4.
+      1. it only compared against my own reading of the formula, not against the
+         library Stoix uses;
+      2. it used 4 and 5 elements, that is, a single block of 256 threads, so the
+         multi-block path was never executed. It is the same blind spot that turned
+         up while verifying the backward in E1.4.
 
-    El golden usa n = 1000 (cuatro bloques) y diez pasos encadenados, que ademas
-    comprueba que el estado se arrastra bien de un paso al siguiente.
+    The golden uses n = 1000 (four blocks) and ten chained steps, which also checks
+    that the state carries correctly from one step to the next.
     """
     n = 1000
     target = upload[dtype](ctx, read_f32(GOLDEN + "ema_target0.bin"))
@@ -127,10 +127,10 @@ def test_against_optax_multiblock(ctx: DeviceContext) raises:
 
 
 def test_ema_ragged_size(ctx: DeviceContext) raises:
-    """Un tamano que no es multiplo del bloque: los hilos de mas no escriben.
+    """A size that is not a multiple of the block: the extra threads do not write.
 
-    Con n = 300 y bloques de 256 hay un segundo bloque con 212 hilos sobrantes.
-    Si el guard fallara, escribirian fuera del buffer.
+    With n = 300 and blocks of 256 there is a second block with 212 leftover
+    threads. If the guard failed, they would write outside the buffer.
     """
     n = 300
     tgt = List[Scalar[dtype]]()

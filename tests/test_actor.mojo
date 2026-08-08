@@ -1,15 +1,15 @@
-"""El MLP del actor y su enmascarado, contra el golden de numpy.
+"""The actor's MLP and its masking, against the numpy golden.
 
-El forward en si es el del critico con 9 salidas en vez de 1, y ese ya esta
-verificado desde E1.3. Lo que se prueba de verdad aqui es **el enmascarado**, que
-es la pieza que Stoix no tiene (sus entornos no tienen acciones ilegales) y que hay
-que anadir para llevar SPO a un juego de tablero.
+The forward itself is the critic's with 9 outputs instead of 1, and that has been
+verified since E1.3. What really gets tested here is **the masking**, which is the
+piece Stoix does not have (its environments have no illegal actions) and that has
+to be added to take SPO to a board game.
 
-Por que el enmascarado merece pruebas propias y no vale con "ya se probo en el
-prior de la busqueda": alli los logits legales valian TODOS 0, asi que tapar y
-hacer softmax daba una uniforme, y un error de indexado habria salido igual de
-uniforme. Aqui los logits son numeros distintos entre si salidos de una red, asi
-que tapar la casilla equivocada cambia la distribucion de forma detectable.
+Why the masking deserves its own tests and "it was already tested in the search's
+prior" is not enough: there the legal logits were ALL 0, so masking and taking a
+softmax gave a uniform, and an indexing error would have come out just as uniform.
+Here the logits are numbers different from one another coming out of a network, so
+masking the wrong cell changes the distribution detectably.
 """
 
 from std.gpu.host import DeviceContext
@@ -41,7 +41,7 @@ def board9(c0: Int, c1: Int, c2: Int, c3: Int, c4: Int,
 
 
 def load_actor(ctx: DeviceContext, hidden: Int) raises -> Actor:
-    """Un actor con los pesos del golden de ese ancho."""
+    """An actor with the golden weights for that width."""
     tag = String("actor_h", hidden, "_")
     a = Actor(ctx, 64, hidden)
     write_into[dtype](a.params.w1, read_f32(GOLDEN + tag + "w1.bin"))
@@ -72,8 +72,8 @@ def check_width(ctx: DeviceContext, hidden: Int, m: Int) raises:
     got_probs = download[dtype](probs, m * NUM_ACTIONS)
 
     for i in range(m * NUM_ACTIONS):
-        # Los logits tapados son NEG_INF en los dos lados; comparar su diferencia
-        # no tiene sentido (es 0 o desborda), asi que se comprueba la identidad.
+        # The masked logits are NEG_INF on both sides; comparing their difference
+        # is meaningless (it is 0 or overflows), so identity is checked instead.
         if want_masked[i] == NEG_INF:
             if got_masked[i] != NEG_INF:
                 raise Error("h", hidden, " m", m, " logit ", i,
@@ -88,11 +88,12 @@ def check_width(ctx: DeviceContext, hidden: Int, m: Int) raises:
 
 
 def test_actor_matches_golden(ctx: DeviceContext) raises:
-    """Los tres anchos y los dos batches del golden.
+    """The golden's three widths and two batches.
 
-    m=5 es ragged (no es multiplo del tile de 16) y pisa los guards; m=64 recorre
-    varios tiles en la dimension del batch. Los tres anchos estan porque cuanta red
-    hace falta para tres en raya es algo que se mide, no se supone.
+    m=5 is ragged (not a multiple of the tile of 16) and hits the guards; m=64
+    spans several tiles along the batch dimension. The three widths are there
+    because how much network tic-tac-toe needs is something to be measured, not
+    assumed.
     """
     widths = List[Int]()
     widths.append(32); widths.append(64); widths.append(256)
@@ -102,14 +103,14 @@ def test_actor_matches_golden(ctx: DeviceContext) raises:
 
 
 def test_illegal_cells_get_exactly_zero(ctx: DeviceContext) raises:
-    """Una casilla ocupada sale con probabilidad CERO, no con una muy pequena.
+    """An occupied cell comes out with ZERO probability, not with a very small one.
 
-    Importa que sea cero exacto: si quedara masa residual, la busqueda podria
-    muestrear una jugada imposible, y eso no falla ruidosamente sino que corrompe
-    una particula en silencio.
+    That it be exactly zero matters: if residual mass were left, the search could
+    sample an impossible move, and that does not fail loudly but silently corrupts
+    a particle.
 
-    Y se comprueba tambien que las filas suman 1: tapar sin renormalizar dejaria
-    una distribucion que no lo es.
+    It is also checked that the rows sum to 1: masking without renormalising would
+    leave a distribution that is not one.
     """
     actor = load_actor(ctx, 64)
     boards = List[Scalar[dtype]]()
@@ -142,19 +143,19 @@ def test_illegal_cells_get_exactly_zero(ctx: DeviceContext) raises:
         assert_close(total, Scalar[dtype](1), TOL,
                      String("la fila ", e, " deberia sumar 1"))
 
-    # El segundo tablero solo tiene libre la 8: toda la masa va ahi.
+    # The second board has only cell 8 free: all the mass goes there.
     assert_close(p[NUM_ACTIONS + 8], Scalar[dtype](1), TOL,
                  "con una sola casilla libre, su probabilidad tiene que ser 1")
     print("PASS las casillas ocupadas salen a cero exacto y las filas suman 1")
 
 
 def test_masking_changes_the_ranking(ctx: DeviceContext) raises:
-    """Tapar la casilla que la red PREFERIA cambia de verdad la eleccion.
+    """Masking the cell the network PREFERRED really does change the choice.
 
-    Este es el test que distingue "enmascara" de "no hace nada": se busca cual es
-    la casilla mas probable sin mascara, se tapa solo esa, y se comprueba que la
-    politica pasa a preferir otra. Con logits uniformes (el prior de la busqueda)
-    esta comprobacion seria imposible, porque todas empatan.
+    This is the test that tells "it masks" from "it does nothing": the most likely
+    cell without a mask is found, only that one gets masked, and it is checked that
+    the policy comes to prefer another. With uniform logits (the search's prior)
+    this check would be impossible, because they all tie.
     """
     actor = load_actor(ctx, 64)
     n = 1
@@ -176,7 +177,7 @@ def test_masking_changes_the_ranking(ctx: DeviceContext) raises:
         if p0[c] > p0[best]:
             best = c
 
-    # Ahora se tapa solo la favorita.
+    # Now only the favourite gets masked.
     m2 = List[Scalar[dtype]]()
     for c in range(NUM_ACTIONS):
         m2.append(Scalar[dtype](0) if c == best else Scalar[dtype](1))
@@ -195,29 +196,29 @@ def test_masking_changes_the_ranking(ctx: DeviceContext) raises:
     if best2 == best:
         raise Error("tras tapar la favorita deberia ganar otra casilla")
 
-    # Y las que quedan mantienen sus proporciones relativas: tapar una casilla
-    # renormaliza, no reordena. Si esto fallara, el enmascarado estaria
-    # distorsionando la politica en vez de solo recortarla.
+    # And the remaining ones keep their relative proportions: masking a cell
+    # renormalises, it does not reorder. If this failed, the masking would be
+    # distorting the policy instead of merely trimming it.
     for c in range(NUM_ACTIONS):
         if c == best:
             continue
         for d in range(NUM_ACTIONS):
             if d == best or d == c:
                 continue
-            # p1[c]/p1[d] tiene que ser p0[c]/p0[d]; se compara en producto
-            # cruzado para no dividir.
+            # p1[c]/p1[d] has to be p0[c]/p0[d]; it is compared as a cross
+            # product so as not to divide.
             assert_close(p1[c] * p0[d], p1[d] * p0[c], Scalar[dtype](1e-4),
                          String("proporcion entre ", c, " y ", d))
     print("PASS tapar la favorita cambia la eleccion y solo renormaliza el resto")
 
 
 def test_full_board_does_not_produce_nan(ctx: DeviceContext) raises:
-    """Un tablero lleno (todo tapado) da uniforme, no nan.
+    """A full board (everything masked) gives uniform, not nan.
 
-    No deberia consultarse al actor en una posicion terminal, pero si pasa, el
-    resultado tiene que ser inofensivo. Con -inf de verdad el softmax daria nan y
-    el nan se propagaria callado por todo lo que venga despues; con NEG_INF finito
-    la fila degenera a uniforme. Esta prueba fija esa eleccion de diseno.
+    The actor should not be consulted in a terminal position, but if it happens,
+    the result has to be harmless. With a true -inf the softmax would give nan and
+    the nan would propagate silently through everything downstream; with a finite
+    NEG_INF the row degenerates to uniform. This test pins that design choice down.
     """
     actor = load_actor(ctx, 64)
     n = 1
@@ -244,12 +245,13 @@ def test_full_board_does_not_produce_nan(ctx: DeviceContext) raises:
 
 
 def test_mask_comes_from_the_state(ctx: DeviceContext) raises:
-    """La mascara se deriva del tablero, no se pasa por fuera.
+    """The mask is derived from the board, not passed in from outside.
 
-    Es una invariante que importa: si la legalidad viniera por un canal aparte,
-    podria desincronizarse del estado y la red acabaria jugando sobre fichas
-    puestas. Se comprueba que `mask_from_state` reproduce exactamente las casillas
-    vacias de tres tableros distintos, incluido uno con varios bloques de hilos.
+    It is an invariant that matters: if legality came through a separate channel,
+    it could drift out of sync with the state and the network would end up playing
+    on placed marks. It is checked that `mask_from_state` reproduces exactly the
+    empty cells of three different boards, including one spanning several thread
+    blocks.
     """
     actor = load_actor(ctx, 32)
     boards = List[Scalar[dtype]]()
@@ -272,17 +274,17 @@ def test_mask_comes_from_the_state(ctx: DeviceContext) raises:
 
 
 def test_forward_log_is_consistent_with_forward(ctx: DeviceContext) raises:
-    """`forward_log` da log de lo que da `forward`, y no NaN en las ilegales.
+    """`forward_log` gives the log of what `forward` gives, and no NaN on the illegal ones.
 
-    Este camino se anadio para el M-step (la entropia cruzada trabaja en
-    log-espacio) y hasta ahora no tenia prueba: codigo nuevo sin cobertura, que es
-    justo lo que este proyecto se ha propuesto no hacer.
+    This path was added for the M-step (the cross entropy works in log space) and
+    until now had no test: new code without coverage, which is exactly what this
+    project has set out not to do.
 
-    Se comprueban dos cosas distintas. Que exp(log pi) reproduce pi en las casillas
-    legales -- si el log-softmax usara otro denominador que el softmax, aqui se
-    veria. Y que en las ilegales sale un valor muy negativo y FINITO, no un -inf ni
-    un NaN: la perdida se salta esos terminos, pero un NaN en el buffer se
-    propagaria igual al primer gradiente que lo toque.
+    Two different things get checked. That exp(log pi) reproduces pi on the legal
+    cells -- if the log-softmax used a different denominator from the softmax, it
+    would show here. And that on the illegal ones a very negative, FINITE value
+    comes out, not a -inf nor a NaN: the loss skips those terms, but a NaN in the
+    buffer would propagate all the same to the first gradient that touches it.
     """
     actor = load_actor(ctx, 64)
     boards = List[Scalar[dtype]]()
@@ -321,12 +323,12 @@ def test_forward_log_is_consistent_with_forward(ctx: DeviceContext) raises:
 
 
 def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
-    """Pedir mas tableros de los reservados da error, no corrupcion silenciosa.
+    """Asking for more boards than were allocated raises an error, not silent corruption.
 
-    Los buffers del actor se dimensionan en el constructor. Sin la comprobacion,
-    una llamada con m mayor escribiria fuera y el sintoma saldria mucho despues,
-    en otro buffer y sin relacion aparente con la causa. Es la clase de fallo que
-    mas caro sale de depurar, y evitarlo cuesta una comparacion en host.
+    The actor's buffers are sized in the constructor. Without the check, a call
+    with a larger m would write outside and the symptom would appear much later, in
+    another buffer and with no apparent relation to the cause. It is the class of
+    fault that costs most to debug, and avoiding it costs one host-side comparison.
     """
     small = Actor(ctx, 2, 32)
     state = zero_buffer[dtype](ctx, 8 * STATE_DIM)
@@ -340,30 +342,30 @@ def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
     if not failed:
         raise Error("deberia rechazar 8 tableros con sitio para 2")
 
-    # Y con los que si caben, funciona.
+    # And with the ones that do fit, it works.
     small.forward(ctx, state, obs, 2)
     ctx.synchronize()
     print("PASS el actor rechaza mas tableros de los reservados")
 
 
 def test_argmax_of_masked_policy_is_always_legal(ctx: DeviceContext) raises:
-    """El argmax de pi cae SIEMPRE en una casilla libre. Es una invariante crítica.
+    """The argmax of pi ALWAYS lands on a free cell. It is a critical invariant.
 
-    Por que crítica: `ttt_apply` **no comprueba legalidad** (lo dice su propio
-    docstring). Si el actor eligiera una casilla ocupada, la jugada
-    **sobrescribiría la ficha del rival** con la suya y el score saldría inflado
-    sin que nada fallara. Todo el resultado de "la red jugando sola" (E2.6) depende
-    de esta invariante, así que va con prueba en vez de con razonamiento.
+    Why critical: `ttt_apply` **does not check legality** (its own docstring says
+    so). If the actor chose an occupied cell, the move would **overwrite the
+    rival's mark** with its own and the score would come out inflated without
+    anything failing. The whole "network playing alone" result (E2.6) depends on
+    this invariant, so it comes with a test rather than with an argument.
 
-    El argumento es que el softmax enmascarado da 0 EXACTO a las ocupadas y la fila
-    suma 1, luego alguna libre tiene masa positiva y gana el argmax. Aquí se
-    comprueba sobre 60 tableros variados, incluidos los que dejan una sola casilla
-    libre (el caso más apretado).
+    The argument is that the masked softmax gives EXACTLY 0 to the occupied ones
+    and the row sums to 1, hence some free cell has positive mass and wins the
+    argmax. Here it is checked over 60 varied boards, including those that leave a
+    single free cell (the tightest case).
     """
     n = 60
     actor = load_actor(ctx, 64)
     small = Actor(ctx, n, 64)
-    # Los mismos pesos que el actor cargado, para tener una politica no trivial.
+    # The same weights as the loaded actor, so as to have a non-trivial policy.
     boards = List[Scalar[dtype]]()
     for i in range(n):
         filled_cells = i % 8            # de 0 a 7 casillas ocupadas
@@ -394,8 +396,8 @@ def test_argmax_of_masked_policy_is_always_legal(ctx: DeviceContext) raises:
             raise Error("el argmax del tablero ", e, " cayo en la casilla ",
                         best, ", que esta OCUPADA: ttt_apply pisaria la ficha "
                         "del rival")
-        # Y la masa total sigue en 1: si el softmax hubiera degenerado, el argmax
-        # podria estar eligiendo entre ceros.
+        # And the total mass is still 1: if the softmax had degenerated, the
+        # argmax could be choosing among zeros.
         total = Scalar[dtype](0)
         for c in range(NUM_ACTIONS):
             total += p[e * NUM_ACTIONS + c]

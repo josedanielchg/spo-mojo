@@ -1,11 +1,11 @@
-"""Peso SMC y GAE hacia adelante, con dos profundidades hechas a mano.
+"""SMC weight and forward GAE, with two depths worked out by hand.
 
-Todo lo de aqui se calcula sin GPU en un papel, asi que los valores esperados son
-constantes literales y no una re-implementacion del kernel (que es la trampa
-clasica: si el test repite la formula del codigo, comprueba que el codigo hace lo
-que hace, no que hace lo correcto).
+Everything here can be computed on paper without a GPU, so the expected values are
+literal constants and not a re-implementation of the kernel (which is the classic
+trap: if the test repeats the code's formula, it checks that the code does what it
+does, not that it does the right thing).
 
-Con search_gamma = search_gae_lambda = 1, el factor de la GAE es discount^depth.
+With search_gamma = search_gae_lambda = 1, the GAE's factor is discount^depth.
 """
 
 from std.gpu.host import DeviceContext
@@ -29,7 +29,7 @@ def make_config(num_particles: Int) -> SPOConfig:
 def set_step(outputs: StepOutputs, rewards: List[Scalar[dtype]],
              discounts: List[Scalar[dtype]],
              next_values: List[Scalar[dtype]]) raises:
-    """Dicta el resultado de un paso del modelo, sin ejecutar ningun modelo."""
+    """Dictates the result of a model step, without running any model."""
     write_into[dtype](outputs.reward, rewards)
     write_into[dtype](outputs.discount, discounts)
     write_into[dtype](outputs.next_value, next_values)
@@ -40,14 +40,14 @@ def set_step(outputs: StepOutputs, rewards: List[Scalar[dtype]],
 
 
 def test_two_depths_by_hand(ctx: DeviceContext) raises:
-    """Dos profundidades seguidas de una particula viva.
+    """Two consecutive depths of a live particle.
 
-    Profundidad 0:  V=10, r=1, V'=12  ->  td = 1 + 12 - 10 = 3
-                    peso = 0 + 3 = 3
-                    gae  = 0 + 3 * (1*1*1)^0 = 3 * 1 = 3
-    Profundidad 1:  V=12, r=2, V'=11  ->  td = 2 + 11 - 12 = 1
-                    peso = 3 + 1 = 4
-                    gae  = 3 + 1 * 1^1 = 4
+    Depth 0:  V=10, r=1, V'=12  ->  td = 1 + 12 - 10 = 3
+              weight = 0 + 3 = 3
+              gae    = 0 + 3 * (1*1*1)^0 = 3 * 1 = 3
+    Depth 1:  V=12, r=2, V'=11  ->  td = 2 + 11 - 12 = 1
+              weight = 3 + 1 = 4
+              gae    = 3 + 1 * 1^1 = 4
     """
     cfg = make_config(1)
     particles = Particles(ctx, cfg)
@@ -57,9 +57,9 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
     v0.append(10.0)
     write_into[dtype](particles.value, v0)
 
-    # Profundidad 0.
+    # Depth 0.
     r = List[Scalar[dtype]]();  r.append(1.0)
-    d = List[Scalar[dtype]]();  d.append(1.0)     # sigue viva
+    d = List[Scalar[dtype]]();  d.append(1.0)     # still alive
     nv = List[Scalar[dtype]](); nv.append(12.0)
     set_step(outputs, r, d, nv)
     update_particles(ctx, particles, outputs, cfg)
@@ -74,7 +74,7 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
     assert_eq_int(Int(download[idx_dtype](particles.depth, 1)[0]), 1,
                   "profundidad 0: depth++")
 
-    # Profundidad 1.
+    # Depth 1.
     r2 = List[Scalar[dtype]]();  r2.append(2.0)
     d2 = List[Scalar[dtype]]();  d2.append(1.0)
     nv2 = List[Scalar[dtype]](); nv2.append(11.0)
@@ -92,14 +92,14 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
 
 
 def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
-    """Una particula que muere deja de acumular a partir de la profundidad siguiente.
+    """A particle that dies stops accumulating from the next depth onwards.
 
-    El paso que la mata si cuenta, porque todavia no estaba muerta al entrar, y
-    a partir de ahi su peso queda congelado.
+    The step that kills it does count, because it was not yet dead on entry, and
+    from then on its weight stays frozen.
 
-    Profundidad 0:  V=10, r=1, V'=0, discount=0 (muere)
-                    td = 1 + 0 - 10 = -9 ; peso = -9 ; terminal <- 1
-    Profundidad 1:  lo que sea; la mascara la anula -> peso sigue en -9
+    Depth 0:  V=10, r=1, V'=0, discount=0 (it dies)
+              td = 1 + 0 - 10 = -9 ; weight = -9 ; terminal <- 1
+    Depth 1:  whatever; the mask cancels it -> weight stays at -9
     """
     cfg = make_config(1)
     particles = Particles(ctx, cfg)
@@ -110,7 +110,7 @@ def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
     write_into[dtype](particles.value, v0)
 
     r = List[Scalar[dtype]]();  r.append(1.0)
-    d = List[Scalar[dtype]]();  d.append(0.0)     # discount 0 -> muere
+    d = List[Scalar[dtype]]();  d.append(0.0)     # discount 0 -> it dies
     nv = List[Scalar[dtype]](); nv.append(0.0)
     set_step(outputs, r, d, nv)
     update_particles(ctx, particles, outputs, cfg)
@@ -121,8 +121,8 @@ def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
     assert_eq_int(Int(download[idx_dtype](particles.terminal, 1)[0]), 1,
                   "discount 0 tiene que marcar terminal")
 
-    # Profundidad 1: ya esta muerta, asi que todo lo que venga se ignora.
-    r2 = List[Scalar[dtype]]();  r2.append(100.0)   # recompensa enorme a proposito
+    # Depth 1: it is already dead, so whatever comes gets ignored.
+    r2 = List[Scalar[dtype]]();  r2.append(100.0)   # a huge reward on purpose
     d2 = List[Scalar[dtype]]();  d2.append(0.0)
     nv2 = List[Scalar[dtype]](); nv2.append(50.0)
     set_step(outputs, r2, d2, nv2)
@@ -135,19 +135,20 @@ def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
 
 
 def test_dead_particle_gae_is_frozen_by_the_decay(ctx: DeviceContext) raises:
-    """La GAE de una particula muerta se congela sola, sin mascara.
+    """A dead particle's GAE freezes on its own, with no mask.
 
-    A diferencia del peso, la GAE no lleva mascara terminal (igual que en Stoix).
-    Lo que la congela es que su discount es 0 y el factor es discount^depth: en
-    la profundidad 1 o mayor, 0^depth = 0 y el delta no entra.
+    Unlike the weight, the GAE carries no terminal mask (just as in Stoix). What
+    freezes it is that its discount is 0 and the factor is discount^depth: at depth
+    1 or more, 0^depth = 0 and the delta does not go in.
 
-    Este test existe porque la ausencia de mascara parece un olvido y no lo es.
+    This test exists because the absence of a mask looks like an oversight and is
+    not.
     """
     cfg = make_config(1)
     particles = Particles(ctx, cfg)
     outputs = StepOutputs(ctx, cfg)
 
-    # Arranco ya en profundidad 1 y muerta, con una gae acumulada de 7.
+    # I start already at depth 1 and dead, with an accumulated gae of 7.
     v0 = List[Scalar[dtype]]();  v0.append(10.0)
     g0 = List[Scalar[dtype]]();  g0.append(7.0)
     dep = List[Scalar[idx_dtype]](); dep.append(Scalar[idx_dtype](1))
@@ -158,7 +159,7 @@ def test_dead_particle_gae_is_frozen_by_the_decay(ctx: DeviceContext) raises:
     write_into[idx_dtype](particles.terminal, ter)
 
     r = List[Scalar[dtype]]();  r.append(100.0)
-    d = List[Scalar[dtype]]();  d.append(0.0)      # muerta -> discount 0
+    d = List[Scalar[dtype]]();  d.append(0.0)      # dead -> discount 0
     nv = List[Scalar[dtype]](); nv.append(50.0)
     set_step(outputs, r, d, nv)
     update_particles(ctx, particles, outputs, cfg)
@@ -170,13 +171,13 @@ def test_dead_particle_gae_is_frozen_by_the_decay(ctx: DeviceContext) raises:
 
 
 def test_depth_zero_always_counts(ctx: DeviceContext) raises:
-    """En la profundidad 0 el factor es discount^0 = 1, incluso con discount 0.
+    """At depth 0 the factor is discount^0 = 1, even with discount 0.
 
-    Es el caso limite de 0^0 = 1. Importa porque si se implementara con una
-    exponenciacion que devuelva 0 para 0^0, el primer paso de toda particula que
-    muere de inmediato desapareceria de la GAE.
+    It is the 0^0 = 1 edge case. It matters because if it were implemented with an
+    exponentiation returning 0 for 0^0, the first step of every particle that dies
+    immediately would disappear from the GAE.
 
-    V=10, r=1, V'=0, discount=0 -> td = -9, y la gae tiene que ser -9, no 0.
+    V=10, r=1, V'=0, discount=0 -> td = -9, and the gae has to be -9, not 0.
     """
     cfg = make_config(1)
     particles = Particles(ctx, cfg)
@@ -199,7 +200,7 @@ def test_depth_zero_always_counts(ctx: DeviceContext) raises:
 
 
 def test_many_particles_are_independent(ctx: DeviceContext) raises:
-    """Cada particula lleva su cuenta: el kernel no mezcla vecinas."""
+    """Each particle keeps its own tally: the kernel does not mix neighbours."""
     n = 64
     cfg = make_config(n)
     particles = Particles(ctx, cfg)

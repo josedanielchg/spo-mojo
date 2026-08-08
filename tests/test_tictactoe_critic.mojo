@@ -1,20 +1,20 @@
-"""El modelo de busqueda con critico: que V salga de la red y llegue donde debe.
+"""The search model with a critic: that V comes from the network and reaches where it should.
 
-Aqui no se comprueba si el critico es BUENO — eso lo mide el experimento de E1.11
-jugando partidas. Se comprueba el cableado, que es donde este tipo de codigo se
-rompe en silencio: si `next_value` se quedara a 0, o si el valor se leyera del
-buffer equivocado, la busqueda seguiria funcionando y dando resultados
-razonables, solo que sin usar el critico. Nada fallaria.
+What is checked here is not whether the critic is GOOD -- the E1.11 experiment
+measures that by playing games. What is checked is the wiring, which is where this
+kind of code breaks silently: if `next_value` stayed at 0, or if the value were
+read from the wrong buffer, the search would go on working and giving reasonable
+results, only without using the critic. Nothing would fail.
 
-El truco de todas las pruebas es el mismo: pesos elegidos para que V(s) sea un
-numero CONOCIDO, y comparar contra ese numero. Con w1 = w2 = w3 = 0 y b3 = c:
+The trick in every test is the same: weights chosen so that V(s) is a KNOWN number,
+and comparing against that number. With w1 = w2 = w3 = 0 and b3 = c:
 
     a1 = x@0 + b1 = b1  ->  relu
     a2 = a1@0 + b2 = b2 ->  relu
-    V  = a2@0 + b3 = c              para cualquier tablero
+    V  = a2@0 + b3 = c              for any board
 
-asi que V vale c y no depende de la entrada. Eso permite predecir a mano lo que
-tiene que aparecer en cada buffer.
+so V is c and does not depend on the input. That makes it possible to predict by
+hand what has to appear in each buffer.
 """
 
 from std.gpu.host import DeviceContext
@@ -36,7 +36,7 @@ comptime GAMMA = Scalar[dtype](0.9)
 
 def board9(c0: Int, c1: Int, c2: Int, c3: Int, c4: Int,
            c5: Int, c6: Int, c7: Int, c8: Int) -> List[Scalar[dtype]]:
-    """Un tablero legible: 9 codigos de casilla en el orden 0..8."""
+    """A readable board: 9 cell codes in the order 0..8."""
     out = List[Scalar[dtype]]()
     out.append(Scalar[dtype](c0)); out.append(Scalar[dtype](c1))
     out.append(Scalar[dtype](c2)); out.append(Scalar[dtype](c3))
@@ -55,7 +55,7 @@ def cfg_for(num_envs: Int, num_particles: Int) -> SPOConfig:
 
 def constant_model(ctx: DeviceContext, max_batch: Int,
                    c: Scalar[dtype]) raises -> TicTacToeCritic:
-    """Un modelo cuyo critico devuelve siempre `c`, sea cual sea el tablero."""
+    """A model whose critic always returns `c`, whatever the board."""
     model = TicTacToeCritic(ctx, max_batch, HIDDEN, Scalar[dtype](1))
     b3 = List[Scalar[dtype]](); b3.append(c)
     write_into[dtype](model.params.b3, b3)      # el resto ya esta a cero
@@ -64,10 +64,10 @@ def constant_model(ctx: DeviceContext, max_batch: Int,
 
 
 def test_eval_root_uses_the_network(ctx: DeviceContext) raises:
-    """`eval_root` escribe V(s) de la red, no 0 y no lo que hubiera antes.
+    """`eval_root` writes the network's V(s), not 0 and not whatever was there before.
 
-    El buffer de salida se rellena a 99 aposta: si el modelo no escribiera nada,
-    el test veria 99 y fallaria. Con `TicTacToe` (sin critico) aqui saldria 0.
+    The output buffer is filled with 99 on purpose: if the model wrote nothing, the
+    test would see 99 and fail. With `TicTacToe` (no critic) 0 would come out here.
     """
     num_envs = 3
     cfg = cfg_for(num_envs, 4)
@@ -89,8 +89,8 @@ def test_eval_root_uses_the_network(ctx: DeviceContext) raises:
     for e in range(num_envs):
         assert_close(got_value[e], Scalar[dtype](0.375), TOL,
                      String("V de la raiz del env ", e))
-        # Y el prior sigue enmascarado igual que sin critico: anadir el valor no
-        # puede haber roto la parte que ya funcionaba.
+        # And the prior is still masked just as without a critic: adding the
+        # value cannot have broken the part that already worked.
         for c in range(NUM_ACTIONS):
             want = Scalar[dtype](0) if boards[e * NUM_CELLS + c] == CELL_EMPTY \
                    else NEG_INF
@@ -103,7 +103,7 @@ def run_step(ctx: DeviceContext, model: TicTacToeCritic, cfg: SPOConfig,
              boards: List[Scalar[dtype]], actions: List[Int],
              uniforms: List[Scalar[dtype]],
              depths: List[Int] = List[Int]()) raises -> List[Scalar[dtype]]:
-    """Un step del modelo; devuelve [next_value..., discount...] concatenados."""
+    """One model step; returns [next_value..., discount...] concatenated."""
     p_total = cfg.num_search_particles()
     particles = Particles(ctx, cfg)
     outputs = StepOutputs(ctx, cfg)
@@ -117,7 +117,7 @@ def run_step(ctx: DeviceContext, model: TicTacToeCritic, cfg: SPOConfig,
     acts = List[Scalar[idx_dtype]]()
     for a in actions: acts.append(Scalar[idx_dtype](a))
     write_into[idx_dtype](outputs.next_action, acts)
-    # next_value marcado: si el modelo no lo escribiera, se veria el -7.
+    # next_value marked: if the model did not write it, the -7 would show.
     outputs.next_value.enqueue_fill(Scalar[dtype](-7))
     step_us = upload[dtype](ctx, uniforms)
 
@@ -130,22 +130,22 @@ def run_step(ctx: DeviceContext, model: TicTacToeCritic, cfg: SPOConfig,
 
 
 def test_bootstrap_formula(ctx: DeviceContext) raises:
-    """El bootstrap vale discount * search_gamma * V(s'), acabe o no la partida.
+    """The bootstrap is discount * search_gamma * V(s'), whether the game ends or not.
 
-    Dos particulas a proposito:
-      - la 0 sigue viva  -> discount 1 -> next_value = gamma * c
-      - la 1 gana y acaba -> discount 0 -> next_value = 0, aunque V valga c
+    Two particles on purpose:
+      - number 0 stays alive -> discount 1 -> next_value = gamma * c
+      - number 1 wins and ends -> discount 0 -> next_value = 0, even though V is c
 
-    El segundo caso es el que importa de verdad: si el discount no se plegara, una
-    particula terminal arrastraria valor futuro que no existe y la busqueda
-    sobrevaloraria las lineas que acaban.
+    The second case is the one that really matters: if the discount were not folded
+    in, a terminal particle would carry future value that does not exist and the
+    search would overvalue the lines that end.
     """
     cfg = cfg_for(1, 2)
     c = Scalar[dtype](0.5)
     model = constant_model(ctx, cfg.num_search_particles(), c)
 
     boards = List[Scalar[dtype]]()
-    # p0: tablero vacio, juega la 0 -> no gana, el rival responde, sigue.
+    # p0: empty board, plays 0 -> no win, the rival answers, it goes on.
     for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
     # p1: X en 0 y 1, juega la 2 -> linea 0-1-2 -> victoria, terminal.
     for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
@@ -166,16 +166,16 @@ def test_bootstrap_formula(ctx: DeviceContext) raises:
 
 
 def test_depth_discounted_bootstrap(ctx: DeviceContext) raises:
-    """En el modo coherente el bootstrap lleva gamma_r^(d+1), no `search_gamma`.
+    """In the coherent mode the bootstrap carries gamma_r^(d+1), not `search_gamma`.
 
-    Es el modo que arregla el desajuste de escalas: la recompensa que produce la
-    dinamica ya viene con gamma_r^d, asi que el valor tiene que traer gamma_r^(d+1)
-    para que sumarlos signifique algo. Se comprueba en varias profundidades a la
-    vez porque el fallo tipico es equivocarse en uno: usar d en vez de d+1.
+    It is the mode that fixes the scale mismatch: the reward the dynamics produces
+    already comes with gamma_r^d, so the value has to bring gamma_r^(d+1) for
+    summing them to mean anything. It is checked at several depths at once because
+    the typical fault is getting one wrong: using d instead of d+1.
 
-    Ojo con lo que NO tiene que pasar: `search_gamma` (0.9 en estas pruebas) no
-    puede aparecer en el resultado. Si apareciera, el modelo estaria usando el
-    kernel de siempre y el modo nuevo seria decorativo.
+    Mind what must NOT happen: `search_gamma` (0.9 in these tests) cannot appear in
+    the result. If it did, the model would be using the usual kernel and the new
+    mode would be decorative.
     """
     n_p = 4
     cfg = cfg_for(1, n_p)
@@ -205,32 +205,32 @@ def test_depth_discounted_bootstrap(ctx: DeviceContext) raises:
             want *= gamma_r
         assert_close(got[p], want, TOL,
                      String("bootstrap en la profundidad ", p))
-    # 0.7^1*0.5 = 0.35, y no 0.9*0.5 = 0.45: el search_gamma no se ha colado.
+    # 0.7^1*0.5 = 0.35, and not 0.9*0.5 = 0.45: search_gamma has not slipped in.
     assert_close(got[0], Scalar[dtype](0.35), TOL,
                  "en la profundidad 0 el factor deberia ser gamma_r, no search_gamma")
     print("PASS el bootstrap coherente descuenta por profundidad con gamma_r^(d+1)")
 
 
 def test_value_depends_on_the_board(ctx: DeviceContext) raises:
-    """Con pesos de verdad, dos tableros distintos dan V distintos.
+    """With real weights, two different boards give different Vs.
 
-    Es lo que la prueba del valor constante no puede ver: si `eval_root` codificara
-    siempre el mismo tablero (por leer mal el buffer, o por no reescribir `obs`),
-    V saldria identico para todos los envs y con b3 constante nadie lo notaria.
-    Aqui la red SI mira la entrada, asi que un V repetido delata el fallo.
+    It is what the constant-value test cannot see: if `eval_root` always encoded the
+    same board (by misreading the buffer, or by not rewriting `obs`), V would come
+    out identical for every env and with a constant b3 nobody would notice. Here the
+    network DOES look at the input, so a repeated V gives the fault away.
 
-    Los pesos son a mano y sencillos: w1 lleva cada casilla del plano "mias" a una
-    neurona distinta, y w3 las suma. Con eso V(s) = numero de fichas mias, que se
-    puede contar mirando el tablero.
+    The weights are hand-made and simple: w1 takes each cell of the "mine" plane to
+    a different neuron, and w3 sums them. With that, V(s) = number of my marks,
+    which can be counted by looking at the board.
     """
     num_envs = 2
     cfg = cfg_for(num_envs, 2)
     model = TicTacToeCritic(ctx, cfg.num_search_particles(), HIDDEN,
                             Scalar[dtype](1))
 
-    # w1 es [OBS_DIM, HIDDEN]: la casilla i del plano "mias" activa la neurona i.
-    # Solo hay HIDDEN=8 neuronas para 9 casillas, asi que la 8 se queda fuera; da
-    # igual, los tableros de la prueba no la usan.
+    # w1 is [OBS_DIM, HIDDEN]: cell i of the "mine" plane activates neuron i.
+    # There are only HIDDEN=8 neurons for 9 cells, so cell 8 is left out; it does
+    # not matter, the test's boards do not use it.
     w1 = List[Scalar[dtype]]()
     for i in range(OBS_DIM):
         for h in range(HIDDEN):
@@ -238,14 +238,14 @@ def test_value_depends_on_the_board(ctx: DeviceContext) raises:
                       else Scalar[dtype](0))
     write_into[dtype](model.params.w1, w1)
 
-    # w2 = identidad, para que las activaciones pasen intactas a la segunda capa.
+    # w2 = identity, so that the activations pass intact into the second layer.
     w2 = List[Scalar[dtype]]()
     for i in range(HIDDEN):
         for h in range(HIDDEN):
             w2.append(Scalar[dtype](1) if i == h else Scalar[dtype](0))
     write_into[dtype](model.params.w2, w2)
 
-    # w3 = todo unos: V = suma de las activaciones = numero de fichas mias.
+    # w3 = all ones: V = sum of the activations = number of my marks.
     w3 = List[Scalar[dtype]]()
     for _ in range(HIDDEN): w3.append(Scalar[dtype](1))
     write_into[dtype](model.params.w3, w3)
@@ -268,11 +268,11 @@ def test_value_depends_on_the_board(ctx: DeviceContext) raises:
 
 
 def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
-    """`sync_from` trae los pesos de otro critico y cambia lo que predice el modelo.
+    """`sync_from` brings in another critic's weights and changes what the model predicts.
 
-    Sin esto no habria forma de meter el critico ENTRENADO en la busqueda: el
-    modelo se quedaria con los ceros del constructor y V seria 0, o sea el
-    planificador de siempre disfrazado.
+    Without this there would be no way to get the TRAINED critic into the search:
+    the model would keep the constructor's zeros and V would be 0, that is, the
+    usual planner in disguise.
     """
     cfg = cfg_for(1, 2)
     model = constant_model(ctx, cfg.num_search_particles(), Scalar[dtype](0.1))
@@ -296,7 +296,7 @@ def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
     assert_close(got[0], Scalar[dtype](0.8), TOL,
                  "tras sync_from, V deberia venir de los pesos copiados")
 
-    # Y la copia es independiente: tocar el origen despues no mueve al modelo.
+    # And the copy is independent: touching the source afterwards does not move the model.
     b3b = List[Scalar[dtype]](); b3b.append(Scalar[dtype](-0.4))
     write_into[dtype](src.b3, b3b)
     ctx.synchronize()
@@ -306,7 +306,7 @@ def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
     assert_close(got2[0], Scalar[dtype](0.8), TOL,
                  "el modelo tiene su propia copia; el origen ya no le afecta")
 
-    # Y una forma incompatible se rechaza en vez de copiar basura.
+    # And an incompatible shape is rejected instead of copying garbage.
     bad = zero_critic_params(ctx, OBS_DIM, HIDDEN + 1, 1)
     failed = False
     try:
@@ -319,12 +319,12 @@ def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
 
 
 def test_many_particles_multi_block(ctx: DeviceContext) raises:
-    """Mas de un bloque y un tamano no redondo: 5 envs x 13 particulas = 65.
+    """More than one block and a non-round size: 5 envs x 13 particles = 65.
 
-    Los kernels de este fichero llevan guard, pero el guard solo se ejerce si
-    alguna vez se lanza con un tamano que no cuadra con el bloque. Todas las
-    pruebas de arriba usan tamanos minusculos que caben en un bloque, asi que sin
-    este caso el `if p < n` nunca se probaria de verdad.
+    The kernels in this file carry guards, but a guard is only exercised if it is
+    ever launched with a size that does not line up with the block. Every test above
+    uses tiny sizes that fit in one block, so without this case the `if p < n` would
+    never really be tested.
     """
     cfg = cfg_for(5, 13)
     p_total = cfg.num_search_particles()          # 65
@@ -335,8 +335,8 @@ def test_many_particles_multi_block(ctx: DeviceContext) raises:
     actions = List[Int]()
     us = List[Scalar[dtype]]()
     for p in range(p_total):
-        # Tableros vacios: ninguno acaba en un turno, asi que discount = 1 en
-        # todos y next_value tiene que ser gamma*c en los 65.
+        # Empty boards: none ends in one turn, so discount = 1 in all of them and
+        # next_value has to be gamma*c across all 65.
         for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
         actions.append(p % 9)
         us.append(Scalar[dtype](0.1))

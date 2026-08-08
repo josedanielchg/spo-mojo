@@ -1,28 +1,29 @@
-"""El backward de la capa lineal, verificado por DIFERENCIAS FINITAS.
+"""The linear layer's backward, verified by FINITE DIFFERENCES.
 
-Es el test mas importante del M-step. Mojo no tiene autodiff, asi que los tres
-gradientes estan escritos a mano; si uno esta mal, nada falla: el entrenamiento
-simplemente no converge, semanas despues y sin decir por que. La unica defensa es
-comprobarlos numericamente.
+It is the M-step's most important test. Mojo has no autodiff, so the three
+gradients are written by hand; if one is wrong, nothing fails: training simply does
+not converge, weeks later and without saying why. The only defence is checking them
+numerically.
 
-La idea, sin matematicas: un gradiente dice cuanto cambia la perdida si muevo un
-peso un poquito. Eso se puede MEDIR directamente — mover el peso, ver cuanto
-cambia — y comparar con lo que dice la formula.
+The idea, without maths: a gradient says how much the loss changes if I move a
+weight a little. That can be MEASURED directly -- move the weight, see how much it
+changes -- and compared against what the formula says.
 
-    gradiente medido (diferencia central):   (L(w + e) - L(w - e)) / (2e)
-    gradiente analitico:                     lo que devuelve el kernel
+    measured gradient (central difference):  (L(w + e) - L(w - e)) / (2e)
+    analytic gradient:                       what the kernel returns
 
-Se usa la diferencia CENTRAL y no la de un lado ((L(w+e) - L(w))/e) porque su
-error es proporcional a e^2 en vez de a e: con el mismo e da dos ordenes de
-magnitud mas de precision, y aqui hace falta.
+The CENTRAL difference is used and not the one-sided one ((L(w+e) - L(w))/e)
+because its error is proportional to e^2 rather than to e: with the same e it gives
+two orders of magnitude more precision, and that is needed here.
 
-Sobre e = 1e-3: en float32 no se puede bajar mucho mas. Con e muy pequeno los dos
-valores de L son casi iguales y al restarlos se pierden casi todas las cifras
-significativas (cancelacion), asi que el resultado es ruido. Con e muy grande, la
-diferencia deja de aproximar la derivada. 1e-3 es el compromiso.
+On e = 1e-3: in float32 it cannot go much lower. With a very small e the two values
+of L are nearly equal and subtracting them loses almost every significant figure
+(cancellation), so the result is noise. With a very large e, the difference stops
+approximating the derivative. 1e-3 is the compromise.
 
-La red de prueba es minima (M=3, K=4, N=8) a proposito: son 3*4 + 4*8 + 8 = 52
-parametros, o sea 104 forwards. Sobre la red real serian decenas de miles.
+The test network is minimal (M=3, K=4, N=8) on purpose: that is 3*4 + 4*8 + 8 = 52
+parameters, that is, 104 forwards. On the real network it would be tens of
+thousands.
 """
 
 from std.gpu.host import DeviceContext
@@ -40,13 +41,13 @@ comptime K = 4
 comptime N = 8
 comptime EPS = Scalar[dtype](1e-3)
 comptime TOL = Scalar[dtype](2e-2)
-"""Tolerancia RELATIVA. Es floja a proposito: la comparacion no busca precision
-sino cazar un gradiente equivocado, y esos suelen fallar por un factor entero (2,
--1, el batch) o por estar traspuestos, no por un 1%."""
+"""A RELATIVE tolerance. It is loose on purpose: the comparison does not seek
+precision but catching a wrong gradient, and those usually fail by an integer factor
+(2, -1, the batch) or by being transposed, not by 1%."""
 
 
 def make_inputs() -> List[Scalar[dtype]]:
-    """La entrada x [M, K], con valores deterministas y de signos mezclados."""
+    """The input x [M, K], with deterministic values and mixed signs."""
     out = List[Scalar[dtype]]()
     for i in range(M * K):
         out.append(Scalar[dtype](((i * 37) % 13) - 6) * Scalar[dtype](0.25))
@@ -69,10 +70,10 @@ def make_bias() -> List[Scalar[dtype]]:
 
 
 def make_dy() -> List[Scalar[dtype]]:
-    """El gradiente dL/dy, o sea los pesos de la perdida escalar L = suma(g * y).
+    """The gradient dL/dy, that is, the weights of the scalar loss L = sum(g * y).
 
-    Que sean todos distintos importa: con g uniforme, confundir una traspuesta o
-    sumar por el eje equivocado puede dar el mismo numero por casualidad.
+    That they all differ matters: with a uniform g, confusing a transpose or
+    summing along the wrong axis can give the same number by coincidence.
     """
     out = List[Scalar[dtype]]()
     for i in range(M * N):
@@ -82,10 +83,10 @@ def make_dy() -> List[Scalar[dtype]]:
 
 def loss(ctx: DeviceContext, x: List[Scalar[dtype]], w: List[Scalar[dtype]],
          b: List[Scalar[dtype]], g: List[Scalar[dtype]]) raises -> Scalar[dtype]:
-    """L = suma_{m,n} g[m,n] * y[m,n], con y = x @ W + b.
+    """L = sum_{m,n} g[m,n] * y[m,n], with y = x @ W + b.
 
-    Una perdida escalar cualquiera sirve; lo unico que importa es que su gradiente
-    respecto a y sea exactamente `g`, que es lo que se le pasara al backward.
+    Any scalar loss will do; the only thing that matters is that its gradient with
+    respect to y be exactly `g`, which is what will be passed to the backward.
     """
     yd = zeros[dtype](ctx, M * N)
     linear_forward(ctx, yd, upload[dtype](ctx, x), upload[dtype](ctx, w),
@@ -103,9 +104,10 @@ def numeric_grad(ctx: DeviceContext, x: List[Scalar[dtype]],
                  w: List[Scalar[dtype]], b: List[Scalar[dtype]],
                  g: List[Scalar[dtype]], which: Int,
                  idx: Int) raises -> Scalar[dtype]:
-    """Derivada de L respecto al parametro `idx` de `which` (0=x, 1=W, 2=b).
+    """Derivative of L with respect to parameter `idx` of `which` (0=x, 1=W, 2=b).
 
-    Diferencia central: se evalua L moviendo el parametro a un lado y al otro.
+    Central difference: L is evaluated moving the parameter to one side and to the
+    other.
     """
     xs = x.copy()
     ws = w.copy()
@@ -137,13 +139,13 @@ def compare_grads(got: List[Scalar[dtype]], n: Int, ctx: DeviceContext,
                   x: List[Scalar[dtype]], w: List[Scalar[dtype]],
                   b: List[Scalar[dtype]], g: List[Scalar[dtype]],
                   which: Int, name: String) raises:
-    """Compara el gradiente analitico con el medido, parametro a parametro."""
+    """Compares the analytic gradient against the measured one, parameter by parameter."""
     worst = Scalar[dtype](0)
     worst_at = 0
     for i in range(n):
         num = numeric_grad(ctx, x, w, b, g, which, i)
-        # Error relativo, con un suelo para no dividir por casi-cero cuando el
-        # gradiente de verdad es 0.
+        # Relative error, with a floor so as not to divide by near-zero when the
+        # true gradient is 0.
         scale = abs(num)
         if scale < Scalar[dtype](1):
             scale = Scalar[dtype](1)
@@ -159,7 +161,7 @@ def compare_grads(got: List[Scalar[dtype]], n: Int, ctx: DeviceContext,
 
 
 def test_all_three_gradients(ctx: DeviceContext) raises:
-    """Los tres gradientes de la capa contra diferencias finitas."""
+    """The layer's three gradients against finite differences."""
     x = make_inputs()
     w = make_weights()
     b = make_bias()
@@ -183,10 +185,11 @@ def test_all_three_gradients(ctx: DeviceContext) raises:
 
 
 def test_db_is_the_column_sum(ctx: DeviceContext) raises:
-    """El gradiente db, comprobado a mano: es la suma de dy por columnas.
+    """The db gradient, checked by hand: it is the column-wise sum of dy.
 
-    Es el gradiente mas facil de verificar sin derivar nada, y el que delata que
-    el bias se haya sumado dos veces en el forward (saldria el doble).
+    It is the easiest gradient to verify without differentiating anything, and the
+    one that gives away the bias having been added twice in the forward (it would
+    come out double).
     """
     g = make_dy()
     dw = zeros[dtype](ctx, K * N)
@@ -211,8 +214,8 @@ def test_db_is_the_column_sum(ctx: DeviceContext) raises:
 def grads_with(ctx: DeviceContext, x: List[Scalar[dtype]],
                ws: List[Scalar[dtype]],
                g: List[Scalar[dtype]]) raises -> List[Scalar[dtype]]:
-    """Devuelve dW seguido de dx, en una sola lista. A nivel de modulo y no anidada: en
-    1.0.0b1 una funcion anidada no puede capturar el DeviceContext."""
+    """Returns dW followed by dx, in a single list. At module level and not nested: in
+    1.0.0b1 a nested function cannot capture the DeviceContext."""
     dw = zeros[dtype](ctx, K * N)
     db = zeros[dtype](ctx, N)
     dx = zeros[dtype](ctx, M * K)
@@ -226,11 +229,11 @@ def grads_with(ctx: DeviceContext, x: List[Scalar[dtype]],
 
 
 def test_gradients_depend_on_the_right_things(ctx: DeviceContext) raises:
-    """El gradiente dW no puede depender de W, y dx si. Caza argumentos cruzados.
+    """The dW gradient cannot depend on W, and dx must. It catches crossed arguments.
 
-    Es una comprobacion estructural: si en `dw = x^T @ dy` alguien escribiera `w`
-    en vez de `x`, las diferencias finitas lo cazarian, pero este test lo dice mas
-    claro. Se cambia W y se comprueba que dW no se mueve (y que dx SI).
+    It is a structural check: if in `dw = x^T @ dy` somebody wrote `w` instead of
+    `x`, the finite differences would catch it, but this test says it more clearly.
+    W is changed and it is checked that dW does not move (and that dx DOES).
     """
     x = make_inputs()
     w = make_weights()
@@ -256,7 +259,7 @@ def test_gradients_depend_on_the_right_things(ctx: DeviceContext) raises:
 
 def check_against_jax(ctx: DeviceContext, which: Int, m: Int, k: Int,
                       n: Int) raises:
-    """Un caso del golden de JAX: los tres gradientes contra autodiff exacto."""
+    """One JAX golden case: the three gradients against exact autodiff."""
     tag = GOLDEN + "linbwd" + String(which) + "_"
     x = read_f32(tag + "x.bin")
     w = read_f32(tag + "w.bin")
@@ -281,9 +284,9 @@ def check_against_jax(ctx: DeviceContext, which: Int, m: Int, k: Int,
     got_db = download[dtype](db, n)
     got_dx = download[dtype](dx, m * k)
 
-    # Tolerancia mucho mas dura que la de diferencias finitas: aqui la referencia
-    # es EXACTA, asi que lo unico que puede diferir es el redondeo de float32 al
-    # sumar en otro orden. Escala con la dimension que se reduce en cada caso.
+    # A far harder tolerance than the finite differences': here the reference is
+    # EXACT, so the only thing that can differ is float32 rounding from summing in
+    # a different order. It scales with the dimension being reduced in each case.
     tw = Scalar[dtype](1e-5) * sqrt(Scalar[dtype](m))
     tb = Scalar[dtype](1e-5) * sqrt(Scalar[dtype](m))
     tx = Scalar[dtype](1e-5) * sqrt(Scalar[dtype](n))
@@ -297,7 +300,7 @@ def check_against_jax(ctx: DeviceContext, which: Int, m: Int, k: Int,
 
 def worst_abs(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
               tol: Scalar[dtype], what: String) raises -> Scalar[dtype]:
-    """Mayor diferencia absoluta; revienta si pasa de la tolerancia."""
+    """Largest absolute difference; blows up if it exceeds the tolerance."""
     worst = Scalar[dtype](0)
     at = 0
     for i in range(n):
@@ -312,12 +315,12 @@ def worst_abs(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
 
 
 def test_against_jax_autodiff(ctx: DeviceContext) raises:
-    """Los gradientes contra JAX, que es lo que usa Stoix (autodiff exacto).
+    """The gradients against JAX, which is what Stoix uses (exact autodiff).
 
-    Es la verificacion fuerte, y tapa el punto ciego del test de diferencias
-    finitas: aquel usa M=3, K=4, N=8, o sea TODO menor que el tile de 16, asi que
-    el bucle de tiles del forward corre una sola vez. Aqui hay casos con varios
-    tiles en las tres dimensiones y un caso degenerado de 1x1x1.
+    It is the strong check, and it plugs the finite-difference test's blind spot:
+    that one uses M=3, K=4, N=8, that is, EVERYTHING smaller than the tile of 16, so
+    the forward's tile loop runs exactly once. Here there are cases with several
+    tiles across all three dimensions and a degenerate 1x1x1 case.
     """
     check_against_jax(ctx, 0, 3, 4, 8)       # la red mini, para cruzar con las FD
     check_against_jax(ctx, 1, 20, 18, 64)    # la primera capa real, batch ragged

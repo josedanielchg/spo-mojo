@@ -1,8 +1,9 @@
-"""Lector de los goldens.
+"""Reader for the goldens.
 
-Formato: float32 crudo, tal cual lo escribe numpy con .tofile(). Elegi binario
-en vez de CSV porque el decimal redondea y entonces ya no se sabe si una
-diferencia viene del kernel o del texto; el .txt de al lado guarda las shapes.
+Format: raw float32, exactly as numpy writes it with .tofile(). I chose binary
+rather than CSV because decimal rounds and then there is no telling whether a
+difference comes from the kernel or from the text; the .txt next to it stores the
+shapes.
 """
 
 from ops.common import dtype

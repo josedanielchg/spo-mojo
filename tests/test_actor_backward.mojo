@@ -1,22 +1,22 @@
-"""El backward del actor, verificado por dos caminos independientes.
+"""The actor's backward, verified along two independent routes.
 
-  1. Contra el **autodiff de JAX** sobre la cadena entera (red + enmascarado +
-     log_softmax + entropia cruzada). Es la verificacion exacta: el mismo grafo
-     derivado por una herramienta que no comparte una linea con la nuestra.
-  2. Contra **diferencias finitas centrales** calculadas aqui, sin golden. Si los
-     dos coinciden, o los dos estan mal de la misma forma (improbable) o el
-     backward es correcto.
+  1. Against **JAX's autodiff** over the whole chain (network + masking +
+     log_softmax + cross entropy). It is the exact check: the same graph
+     differentiated by a tool that shares not one line with ours.
+  2. Against **central finite differences** computed here, with no golden. If the
+     two agree, either both are wrong in the same way (unlikely) or the backward is
+     correct.
 
-El gradiente respecto a los logits sale limpio:
+The gradient with respect to the logits comes out clean:
 
     dL/dz = (pi - q) / batch
 
-o sea "lo que la red dice menos lo que la busqueda dice". Lo que hace de esto algo
-mas que aplicar la formula es el **enmascarado**: ese logit no es un parametro,
-porque el forward lo pisa con NEG_INF, asi que su derivada tiene que ser 0 **por
-construccion**. Numericamente ya saldria 0 (pi = 0 y q = 0 en las ilegales), pero
-depender de un desbordamiento a cero para que un gradiente sea correcto es fragil,
-y el golden comprueba que JAX tambien da 0 exacto ahi.
+that is, "what the network says minus what the search says". What makes this more
+than applying a formula is the **masking**: that logit is not a parameter, because
+the forward overwrites it with NEG_INF, so its derivative has to be 0 **by
+construction**. Numerically it would already come out 0 (pi = 0 and q = 0 on the
+illegal ones), but relying on an underflow to zero for a gradient to be correct is
+fragile, and the golden checks that JAX also gives exactly 0 there.
 """
 
 from std.gpu.host import DeviceContext
@@ -58,7 +58,7 @@ def load_params(ctx: DeviceContext, name: String,
 
 def worst_rel(got: List[Scalar[dtype]], want: List[Scalar[dtype]],
               n: Int) -> Scalar[dtype]:
-    """Peor error relativo, con la escala del mayor |want| para no dividir por 0."""
+    """Worst relative error, scaled by the largest |want| so as not to divide by 0."""
     scale = Scalar[dtype](1e-6)
     for i in range(n):
         if abs(want[i]) > scale:
@@ -73,7 +73,7 @@ def worst_rel(got: List[Scalar[dtype]], want: List[Scalar[dtype]],
 
 def check_case(ctx: DeviceContext, name: String, batch: Int,
                hidden: Int) raises:
-    """Un caso del golden: pi, dz y los seis gradientes contra JAX."""
+    """One golden case: pi, dz and the six gradients against JAX."""
     tag = GOLDEN + name + "_"
     params = load_params(ctx, name, hidden)
     cache = CriticCache(ctx, batch, hidden, NUM_ACTIONS)
@@ -85,8 +85,8 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
     q = upload[dtype](ctx, read_f32(tag + "q.bin"))
     pi = zero_buffer[dtype](ctx, batch * NUM_ACTIONS)
 
-    # 1. El forward, y su pi contra el golden. Si esto ya fallara, el backward
-    #    estaria comparandose partiendo de otro sitio.
+    # 1. The forward, and its pi against the golden. If this already failed, the
+    #    backward would be comparing from a different starting point.
     actor_probs(ctx, params, cache, x, mask, pi, batch)
     ctx.synchronize()
     got_pi = download[dtype](pi, batch * NUM_ACTIONS)
@@ -95,7 +95,7 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
         assert_close(got_pi[i], want_pi[i], Scalar[dtype](2e-5),
                      String(name, " pi ", i))
 
-    # 2. La perdida, para confirmar que derivamos LA MISMA funcion.
+    # 2. The loss, to confirm we are differentiating THE SAME function.
     log_pi = zero_buffer[dtype](ctx, batch * NUM_ACTIONS)
     per_state = zero_buffer[dtype](ctx, batch)
     ctx.enqueue_function[log_softmax_rows[TPB_ROW], log_softmax_rows[TPB_ROW]](
@@ -112,9 +112,9 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
                  String(name, " la perdida no coincide: no estamos derivando la "
                         "misma funcion"))
 
-    # 3. dL/dz por separado. Separarlo importa para localizar un fallo: si dz
-    #    cuadra pero dW1 no, el problema esta en la red; si dz ya falla, en la
-    #    perdida.
+    # 3. dL/dz separately. Separating it matters for localising a fault: if dz
+    #    lines up but dW1 does not, the problem is in the network; if dz already
+    #    fails, it is in the loss.
     n_out = batch * NUM_ACTIONS
     ctx.enqueue_function[logits_grad_kernel, logits_grad_kernel](
         scratch.dvalue.unsafe_ptr(), pi.unsafe_ptr(), q.unsafe_ptr(),
@@ -131,7 +131,7 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
             raise Error(name, ": el gradiente se cuela por la casilla "
                         "enmascarada ", i, ": ", got_dz[i])
 
-    # 4. Y los seis tensores, tras el backward completo.
+    # 4. And the six tensors, after the full backward.
     actor_backward(ctx, params, cache, grads, scratch, x, pi, q, mask, batch)
     ctx.synchronize()
 
@@ -143,8 +143,8 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
     names.append("dw1"); names.append("db1"); names.append("dw2")
     names.append("db2"); names.append("dw3"); names.append("db3")
 
-    # Se bajan los seis de una vez: asignar dentro de un if/elif obligaria a
-    # inicializar la lista antes con un valor que no se usa.
+    # The six are downloaded at once: assigning inside an if/elif would force
+    # initialising the list beforehand with a value that goes unused.
     all_got = List[List[Scalar[dtype]]]()
     all_got.append(download[dtype](grads.dw1, sizes[0]))
     all_got.append(download[dtype](grads.db1, sizes[1]))
@@ -167,8 +167,9 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
 
 
 def test_against_jax_autodiff(ctx: DeviceContext) raises:
-    """Los dos casos del golden. `bw_big` con B=40 pasa de un bloque en los
-    kernels por fila, que es el punto ciego que ya me comi cuatro veces."""
+    """The golden's two cases. `bw_big` with B=40 goes past one block in the
+    row-wise kernels, which is the blind spot I have already been bitten by four
+    times."""
     check_case(ctx, "bw_small", 5, 32)
     check_case(ctx, "bw_big", 40, 64)
 
@@ -176,7 +177,7 @@ def test_against_jax_autodiff(ctx: DeviceContext) raises:
 def loss_with_weights(ctx: DeviceContext, w3: List[Scalar[dtype]],
                       b3: List[Scalar[dtype]], name: String, batch: Int,
                       hidden: Int) raises -> Scalar[dtype]:
-    """La perdida con la ultima capa sustituida. Para diferencias finitas."""
+    """The loss with the last layer substituted. For finite differences."""
     params = load_params(ctx, name, hidden)
     write_into[dtype](params.w3, w3)
     write_into[dtype](params.b3, b3)
@@ -206,27 +207,28 @@ def loss_with_weights(ctx: DeviceContext, w3: List[Scalar[dtype]],
 
 
 def test_finite_differences(ctx: DeviceContext) raises:
-    """Diferencias finitas centrales sobre la ultima capa, sin golden de por medio.
+    """Central finite differences over the last layer, with no golden in between.
 
-    Se mueve cada peso +-eps y se mide cuanto cambia la perdida: el gradiente
-    numerico es (L(w+eps) - L(w-eps)) / (2 eps). Comparar contra el analitico es
-    una verificacion que no comparte NADA con el autodiff, asi que si los dos
-    coinciden es muy improbable que ambos estan mal igual.
+    Each weight is moved +-eps and the change in the loss measured: the numerical
+    gradient is (L(w+eps) - L(w-eps)) / (2 eps). Comparing against the analytic one
+    is a check that shares NOTHING with the autodiff, so if the two agree it is
+    very unlikely that both are wrong in the same way.
 
-    Se limita a w3 y b3 (la capa de salida) porque ahi la senal es mayor y la
-    prueba corre en segundos; el resto de la cadena ya lo cubre el autodiff, y el
-    backward de las capas de abajo esta verificado desde E1.5.
+    It is limited to w3 and b3 (the output layer) because the signal is larger
+    there and the test runs in seconds; the rest of the chain is already covered by
+    the autodiff, and the lower layers' backward has been verified since E1.5.
 
-    Lo de FD_MIN_SIGNAL viene de E1.5 y es la leccion de aquella sesion: en
-    float32, si |L(w+e) - L(w-e)| es diminuto, la resta es cancelacion catastrofica
-    y la medida no verifica nada. Esos parametros se saltan y se dice cuantos.
+    The FD_MIN_SIGNAL business comes from E1.5 and is that session's lesson: in
+    float32, if |L(w+e) - L(w-e)| is tiny, the subtraction is catastrophic
+    cancellation and the measurement verifies nothing. Those parameters get skipped
+    and the count is reported.
     """
     name = String("bw_small")
     batch = 5
     hidden = 32
     tag = GOLDEN + name + "_"
 
-    # El gradiente analitico, del backward.
+    # The analytic gradient, from the backward.
     params = load_params(ctx, name, hidden)
     cache = CriticCache(ctx, batch, hidden, NUM_ACTIONS)
     grads = CriticGrads(ctx, IN_DIM, hidden, NUM_ACTIONS)
@@ -247,7 +249,7 @@ def test_finite_differences(ctx: DeviceContext) raises:
     checked = 0
     skipped = 0
     worst = Scalar[dtype](0)
-    # Una muestra de w3 (uno de cada siete) y todos los b3.
+    # A sample of w3 (one in every seven) and all of b3.
     for j in range(0, hidden * NUM_ACTIONS, 7):
         up = base_w3.copy(); up[j] = up[j] + FD_EPS
         dn = base_w3.copy(); dn[j] = dn[j] - FD_EPS
@@ -289,11 +291,11 @@ def test_finite_differences(ctx: DeviceContext) raises:
 
 
 def test_gradient_vanishes_when_pi_equals_q(ctx: DeviceContext) raises:
-    """Si pi ya es q, el gradiente de los logits es cero.
+    """If pi already is q, the logits' gradient is zero.
 
-    Es la comprobacion de que el gradiente empuja hacia donde debe: la ecuacion 11
-    proyecta q sobre la red, asi que en el optimo no puede quedar fuerza. Un signo
-    invertido pasaria los goldens (compara un punto) pero fallaria aqui.
+    It is the check that the gradient pushes where it should: equation 11 projects
+    q onto the network, so at the optimum no force can be left. An inverted sign
+    would pass the goldens (which compare one point) but would fail here.
     """
     n = 4
     vals = List[Scalar[dtype]]()

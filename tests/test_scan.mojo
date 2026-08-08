@@ -1,10 +1,10 @@
-"""Prefix sum contra el acumulado en host.
+"""Prefix sum against the host-side accumulation.
 
-Ademas del caso general, dos comprobaciones con intencion:
-  - el ultimo del inclusivo tiene que ser la suma de la fila (si no, el scan se
-    ha dejado elementos por el camino),
-  - el exclusivo da posiciones de escritura sin huecos ni solapes, que es para
-    lo que se usa de verdad.
+Besides the general case, two checks with intent:
+  - the last element of the inclusive scan has to be the row's sum (otherwise the
+    scan has dropped elements along the way),
+  - the exclusive one gives write positions with no gaps and no overlaps, which is
+    what it is actually used for.
 """
 
 from std.gpu.host import DeviceContext
@@ -18,8 +18,8 @@ comptime TOL = Scalar[dtype](1e-4)
 
 
 def make_data(rows: Int, row_size: Int) -> List[Scalar[dtype]]:
-    """Valores en 1..7. Todos positivos a proposito: asi el acumulado es
-    estrictamente creciente y un error de un puesto salta a la vista."""
+    """Values in 1..7. All positive on purpose: that way the running total is
+    strictly increasing and an off-by-one jumps out."""
     data = List[Scalar[dtype]]()
     for r in range(rows):
         for c in range(row_size):
@@ -46,11 +46,11 @@ def check_scans(ctx: DeviceContext, rows: Int, row_size: Int) raises:
         running = Scalar[dtype](0)
         for c in range(row_size):
             i = r * row_size + c
-            # el exclusivo es lo acumulado antes de este elemento
+            # the exclusive one is what was accumulated before this element
             assert_close(got_exc[i], running, TOL,
                          String("exclusive fila=", r, " col=", c))
             running += data[i]
-            # y el inclusivo lo acumulado despues
+            # and the inclusive one what was accumulated afterwards
             assert_close(got_inc[i], running, TOL,
                          String("inclusive fila=", r, " col=", c))
         assert_close(got_inc[r * row_size + row_size - 1], running, TOL,
@@ -59,12 +59,12 @@ def check_scans(ctx: DeviceContext, rows: Int, row_size: Int) raises:
 
 
 def check_histogram_positions(ctx: DeviceContext) raises:
-    """El uso clasico del exclusivo: conteos -> offsets de escritura.
+    """The exclusive scan's classic use: counts -> write offsets.
 
-    Con conteos [3, 0, 2, 1] los offsets tienen que ser [0, 3, 3, 5]: cada bucket
-    sabe donde empieza su tramo y no pisa al vecino. El 0 del segundo bucket es
-    lo interesante, porque deja dos offsets repetidos (3 y 3) -- correcto, ese
-    bucket no escribe nada.
+    With counts [3, 0, 2, 1] the offsets have to be [0, 3, 3, 5]: each bucket knows
+    where its stretch begins and does not overwrite its neighbour. The 0 in the
+    second bucket is the interesting bit, because it leaves two repeated offsets
+    (3 and 3) -- correct, that bucket writes nothing.
     """
     counts = List[Scalar[dtype]]()
     counts.append(3.0)
@@ -94,8 +94,8 @@ def check_histogram_positions(ctx: DeviceContext) raises:
 
 def main() raises:
     with DeviceContext() as ctx:
-        # row_size=1 comprueba que el scan no se cae con una fila trivial, y
-        # 17 que los hilos sobrantes (que cargan 0) no aportan nada.
+        # row_size=1 checks that the scan does not fall over on a trivial row, and
+        # 17 that the leftover threads (which load 0) contribute nothing.
         for row_size in [1, 4, 16, 17, 32]:
             check_scans(ctx, 4, row_size)
         check_histogram_positions(ctx)
