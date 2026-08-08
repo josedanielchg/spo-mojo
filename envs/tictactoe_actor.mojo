@@ -1,47 +1,47 @@
-"""Tic-Tac-Toe con el PRIOR del actor. Aqui se cierra el bucle EM.
+"""Tic-Tac-Toe with the actor's PRIOR. This is where the EM loop closes.
 
-Hasta ahora la busqueda partia de un prior uniforme sobre las casillas legales: no
-tenia ninguna opinion sobre por donde mirar. Este modelo lo sustituye por lo que
-diga la red, y con eso el bucle del paper se cierra:
+Until now the search started from a uniform prior over the legal cells: it had no
+opinion at all about where to look. This model replaces that with whatever the
+network says, and with it the paper's loop closes:
 
-    E-step   la busqueda planifica partiendo de pi y produce q, mejor que pi
-    M-step   el actor aprende a imitar q, o sea pi se acerca a q
-    y la vuelta siguiente la busqueda parte de un pi mejor
+    E-step   the search plans starting from pi and produces q, better than pi
+    M-step   the actor learns to imitate q, that is, pi moves towards q
+    and on the next round the search starts from a better pi
 
-Sin esta pieza el M-step entrena una red que nadie usa. Con ella, cada iteracion
-mejora el punto de partida de la siguiente, que es de donde sale la mejora
-compuesta del metodo.
+Without this piece the M-step trains a network nobody uses. With it, each
+iteration improves the next one's starting point, which is where the method's
+compounding improvement comes from.
 
-**Como entra el prior, exactamente.** Se comprobo en `weighting.mojo:83`: los
-`prior_logits` solo se RELEVAN de una profundidad a la siguiente, nunca aparecen en
-el peso SMC. O sea que el prior no cambia como se puntua una particula, solo QUE
-ACCIONES se muestrean. Es la simplificacion de la ecuacion 10 del paper: cuando la
-distribucion propuesta es la propia politica, el cociente pi/pi se cancela y queda
-`w propto w * exp(A/eta)`. Y es exactamente el papel que juega el prior de
-AlphaZero: dirigir la busqueda, no valorarla.
+**How the prior comes in, exactly.** It was checked in `weighting.mojo:83`: the
+`prior_logits` are only HANDED OVER from one depth to the next, they never appear
+in the SMC weight. That is, the prior does not change how a particle is scored,
+only WHICH ACTIONS get sampled. It is equation 10's simplification in the paper:
+when the proposal distribution is the policy itself, the ratio pi/pi cancels and
+what is left is `w propto w * exp(A/eta)`. And it is exactly the role AlphaZero's
+prior plays: steering the search, not valuing it.
 
-Los pesos son una copia congelada con `sync_from`, igual que en
-`tictactoe_critic.mojo` y por la misma razon: dos duenos del mismo `DeviceBuffer`
-en Mojo es un lio, y la copia deja claro en que momento la busqueda empieza a ver
-al actor nuevo.
+The weights are a frozen copy via `sync_from`, just as in `tictactoe_critic.mojo`
+and for the same reason: two owners of the same `DeviceBuffer` in Mojo is a mess,
+and the copy makes it clear at which moment the search starts seeing the new
+actor.
 
-**El critico es opcional pero por defecto ENTRA**, y eso es una correccion respecto
-a la primera version de este fichero. V esta en la ecuacion 10 del paper
+**The critic is optional but is ON by default**, and that is a correction with
+respect to this file's first version. V is in equation 10 of the paper
 
     A(s_t,a_t) = r_t + V(s_{t+1}) - V(s_t)
 
-y en `_critic_loss_fn` de Stoix, asi que tenerlo desconectado era una desviacion
-nuestra, no una eleccion del metodo. E1.11 midio que no ayudaba, pero lo midio con
-un critico entrenado con datos de un PLANIFICADOR que perdia el 2% y partia de
-prior uniforme. Ahora los datos vienen de un agente mucho mas fuerte que visita
-otras posiciones, asi que la medida vieja no aplica y hay que repetirla.
+and in Stoix's `_critic_loss_fn`, so having it disconnected was a deviation of
+ours, not a choice of the method. E1.11 measured that it did not help, but it
+measured it with a critic trained on data from a PLANNER that lost 2% and started
+from a uniform prior. Now the data comes from a much stronger agent that visits
+other positions, so the old measurement does not apply and has to be repeated.
 
-Los dos modos de bootstrap del critico son los de E1.11:
-  - `discount * search_gamma * V(s')`, el contrato literal del SearchModel y de
-    Stoix;
-  - `discount * gamma_r^(d+1) * V(s')`, que hace falta si `reward_gamma` < 1 porque
-    entonces la recompensa lleva gamma_r^d plegado y el valor tiene que estar en la
-    misma escala (ver `bootstrap_depth_kernel`).
+The critic's two bootstrap modes are E1.11's:
+  - `discount * search_gamma * V(s')`, the literal contract of the SearchModel and
+    of Stoix;
+  - `discount * gamma_r^(d+1) * V(s')`, which is needed if `reward_gamma` < 1
+    because then the reward carries gamma_r^d folded in and the value has to be on
+    the same scale (see `bootstrap_depth_kernel`).
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -62,36 +62,36 @@ from systems.spo.spo_types import SPOConfig
 
 
 struct TicTacToeActor(SearchModel, Movable):
-    """TTT donde el prior de la busqueda lo pone una red entrenada."""
+    """TTT where the search's prior is set by a trained network."""
 
     var reward_gamma: Scalar[dtype]
     var loss_penalty: Scalar[dtype]
 
     var params: ActorParams
-    """Copia congelada de los pesos del actor. Se refresca con `sync_from`."""
+    """Frozen copy of the actor's weights. Refreshed with `sync_from`."""
     var cache: ActorCache
     var obs: DeviceBuffer[dtype]
-    """[max_batch, OBS_DIM] el tablero codificado."""
+    """[max_batch, OBS_DIM] the encoded board."""
     var mask: DeviceBuffer[dtype]
-    """[max_batch, NUM_ACTIONS] 1 legal, 0 ocupada."""
+    """[max_batch, NUM_ACTIONS] 1 legal, 0 occupied."""
     var hidden: Int
     var max_batch: Int
 
     var critic: CriticParams
-    """Los pesos del critico, tambien en copia congelada."""
+    """The critic's weights, also as a frozen copy."""
     var ccache: CriticCache
     var use_critic: Bool
-    """Si V sale de la red o se queda en 0."""
+    """Whether V comes from the network or stays at 0."""
     var depth_discounted: Bool
-    """Si el bootstrap lleva gamma_r^(d+1) en vez de solo `search_gamma`. Hace
-    falta cuando reward_gamma < 1; ver `bootstrap_depth_kernel`."""
+    """Whether the bootstrap carries gamma_r^(d+1) instead of only `search_gamma`.
+    It is needed when reward_gamma < 1; see `bootstrap_depth_kernel`."""
 
     def __init__(out self, ctx: DeviceContext, max_batch: Int, hidden: Int,
                  reward_gamma: Scalar[dtype],
                  loss_penalty: Scalar[dtype] = 0,
                  use_critic: Bool = False,
                  depth_discounted: Bool = False) raises:
-        """`max_batch` tiene que cubrir el uso mayor: num_envs * num_particles."""
+        """`max_batch` has to cover the largest use: num_envs * num_particles."""
         self.reward_gamma = reward_gamma
         self.loss_penalty = loss_penalty
         self.hidden = hidden
@@ -106,7 +106,7 @@ struct TicTacToeActor(SearchModel, Movable):
         self.ccache = CriticCache(ctx, max_batch, hidden, 1)
 
     def sync_critic_from(self, ctx: DeviceContext, src: CriticParams) raises:
-        """Trae los pesos del critico que se esta entrenando."""
+        """Brings in the weights of the critic being trained."""
         if src.in_dim != OBS_DIM or src.hidden != self.hidden or src.out_dim != 1:
             raise Error("el critico no tiene la forma del modelo: ", src.in_dim,
                         "x", src.hidden, "x", src.out_dim)
@@ -119,12 +119,12 @@ struct TicTacToeActor(SearchModel, Movable):
         self._copy(ctx, self.critic.b3, src.b3, 1)
 
     def sync_from(self, ctx: DeviceContext, src: CriticParams) raises:
-        """Trae los pesos del actor que se esta entrenando.
+        """Brings in the weights of the actor being trained.
 
-        Llamarlo entre iteraciones del bucle EM es justo lo que hace que el
-        siguiente E-step parta de una politica mejor. Si no se llamara, la busqueda
-        se quedaria con los ceros del constructor -- prior uniforme disfrazado, y
-        el bucle no se cerraria.
+        Calling it between iterations of the EM loop is precisely what makes the
+        next E-step start from a better policy. If it were not called, the search
+        would keep the constructor's zeros -- a uniform prior in disguise, and the
+        loop would not close.
         """
         if src.in_dim != OBS_DIM or src.hidden != self.hidden \
                 or src.out_dim != NUM_ACTIONS:
@@ -147,10 +147,10 @@ struct TicTacToeActor(SearchModel, Movable):
 
     def _prior(self, ctx: DeviceContext, state: DeviceBuffer[dtype],
                out_logits: DeviceBuffer[dtype], m: Int) raises:
-        """Los logits del actor sobre m tableros, enmascarados, en `out_logits`.
+        """The actor's logits over m boards, masked, into `out_logits`.
 
-        Tres pasos: la mascara y la observacion salen del ESTADO (la unica fuente
-        de verdad sobre que es legal), y la red pone los logits.
+        Three steps: the mask and the observation come out of the STATE (the only
+        source of truth about what is legal), and the network sets the logits.
         """
         if m > self.max_batch:
             raise Error("el modelo se reservo para ", self.max_batch,
@@ -174,15 +174,15 @@ struct TicTacToeActor(SearchModel, Movable):
                   root_state: DeviceBuffer[dtype],
                   logits_out: DeviceBuffer[dtype],
                   value_out: DeviceBuffer[dtype]) raises:
-        """El prior de la RED en los estados raiz, y V del critico (o 0)."""
+        """The NETWORK's prior at the root states, and V from the critic (or 0)."""
         self._prior(ctx, root_state, logits_out, cfg.num_envs)
         if not self.use_critic:
-            # Se pisa explicitamente porque el workspace se reutiliza entre
-            # busquedas y podria traer valores viejos (el bug de A6).
+            # It is overwritten explicitly because the workspace is reused between
+            # searches and could carry stale values (the A6 bug).
             value_out.enqueue_fill(0)
             return
-        # `_prior` ya dejo la observacion codificada en self.obs, asi que no hace
-        # falta recalcularla.
+        # `_prior` already left the encoded observation in self.obs, so there is no
+        # need to recompute it.
         critic_forward(ctx, self.critic, self.ccache, self.obs, cfg.num_envs)
         n = cfg.num_envs
         ctx.enqueue_function[copy_kernel[dtype], copy_kernel[dtype]](
@@ -191,7 +191,7 @@ struct TicTacToeActor(SearchModel, Movable):
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
              outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
-        """Avanza las particulas y evalua el prior de la red en el estado NUEVO."""
+        """Advances the particles and evaluates the network's prior at the NEW state."""
         p_total = cfg.num_search_particles()
         blocks = (p_total + TPB_TTT - 1) // TPB_TTT
 
@@ -205,7 +205,7 @@ struct TicTacToeActor(SearchModel, Movable):
         self._prior(ctx, particles.state, outputs.action_logits, p_total)
 
         if self.use_critic:
-            # self.obs ya tiene el estado NUEVO codificado, de `_prior`.
+            # self.obs already holds the NEW state encoded, from `_prior`.
             critic_forward(ctx, self.critic, self.ccache, self.obs, p_total)
             if self.depth_discounted:
                 ctx.enqueue_function[bootstrap_depth_kernel,

@@ -1,31 +1,30 @@
-"""Tic-Tac-Toe como modelo de busqueda, pero con un CRITICO en vez de V = 0.
+"""Tic-Tac-Toe as a search model, but with a CRITIC instead of V = 0.
 
-Mismo entorno que `tictactoe.mojo` — mismas reglas, mismos kernels — con la unica
-diferencia de donde sale el valor:
+The same environment as `tictactoe.mojo` -- same rules, same kernels -- with the
+only difference being where the value comes from:
 
-    TicTacToe        V(s) = 0 siempre           el planificador puro
-    TicTacToeCritic  V(s) = lo que diga la red   <- esto
+    TicTacToe        V(s) = 0 always            the pure planner
+    TicTacToeCritic  V(s) = whatever the net says   <- this one
 
-Por que importa: con V = 0 la busqueda solo ve algo si la partida TERMINA dentro de
-su profundidad. Si no termina, todas las particulas pesan igual y la busqueda esta
-ciega. Un critico pone valor a las posiciones intermedias, asi que en principio
-deberia distinguir "esto pinta mal" antes de que la partida acabe.
+Why it matters: with V = 0 the search only sees anything if the game ENDS within
+its depth. If it does not end, every particle weighs the same and the search is
+blind. A critic puts a value on the intermediate positions, so in principle it
+should be able to tell "this looks bad" before the game is over.
 
-Va en su propio fichero para no tocar `TicTacToe`, que ya esta probado y sigue
-siendo util: la comparacion entre los dos ES el experimento de E1.11.
+It gets its own file so as not to touch `TicTacToe`, which is already tested and
+still useful: the comparison between the two IS the E1.11 experiment.
 
-El bootstrap sigue el contrato del SearchModel, igual que el `recurrent_fn` de
-Stoix:
+The bootstrap follows the SearchModel contract, just like Stoix's `recurrent_fn`:
 
     next_value = discount_real * search_gamma * V(s')
 
-o sea que una particula que acaba de morir no arrastra valor futuro (su discount es
-0) y una que sigue viva si.
+that is, a particle that has just died carries no future value (its discount is 0)
+and one that is still alive does.
 
-Los pesos son una COPIA congelada, no una referencia a los del entrenamiento: el
-modelo es dueno de sus buffers y se refresca con `sync_from`. Cuesta seis copias de
-unos miles de floats, se hace una vez, y a cambio no hay dos duenos del mismo
-buffer ni dudas sobre si la busqueda esta usando pesos a medio actualizar.
+The weights are a frozen COPY, not a reference to the training ones: the model
+owns its buffers and refreshes them with `sync_from`. It costs six copies of a few
+thousand floats, it happens once, and in exchange there are no two owners of the
+same buffer and no doubt about whether the search is using half-updated weights.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -45,11 +44,11 @@ from systems.spo.spo_types import SPOConfig
 
 def bootstrap_kernel(next_value: GlobalF32, discount: GlobalF32,
                      value: GlobalF32, n: Int, search_gamma: Scalar[dtype]):
-    """El bootstrap: next_value = discount * search_gamma * V(s'), un hilo por
-    particula.
+    """The bootstrap: next_value = discount * search_gamma * V(s'), one thread per
+    particle.
 
-    El discount ya trae plegado si la particula murio, asi que multiplicar por el
-    basta para que un estado terminal no arrastre futuro.
+    The discount already carries whether the particle died folded in, so
+    multiplying by it is enough for a terminal state to carry no future.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n:
@@ -59,33 +58,33 @@ def bootstrap_kernel(next_value: GlobalF32, discount: GlobalF32,
 def bootstrap_depth_kernel(next_value: GlobalF32, discount: GlobalF32,
                            value: GlobalF32, depth: GlobalI32, n: Int,
                            reward_gamma: Scalar[dtype]):
-    """El bootstrap descontado por PROFUNDIDAD: discount * gamma^(d+1) * V(s').
+    """The bootstrap discounted by DEPTH: discount * gamma^(d+1) * V(s').
 
-    Existe por un desajuste de escalas que se ve sumando los pesos de la busqueda.
-    El nucleo hace `weights += r_d + next_value_d - value_d` y despues
-    `value_d+1 = next_value_d`, asi que la suma telescopa:
+    It exists because of a scale mismatch that shows up when the search's weights
+    are summed. The core does `weights += r_d + next_value_d - value_d` and then
+    `value_d+1 = next_value_d`, so the sum telescopes:
 
-        peso total = SUMA_d r_d  +  (bootstrap final)  -  V(s_raiz)
+        total weight = SUM_d r_d  +  (final bootstrap)  -  V(s_root)
 
-    La recompensa que produce `ttt_dynamics_kernel` ya viene multiplicada por
-    gamma^d. Si el bootstrap NO lleva el mismo factor, las dos mitades de esa suma
-    estan en escalas distintas: con gamma=0.7 una victoria en la profundidad 3
-    vale 0.343 mientras que una particula que sigue viva arrastra V ~ 0.93. La
-    busqueda concluye entonces que ganar es peor que no resolver la partida, que
-    es exactamente lo contrario de lo que se quiere.
+    The reward `ttt_dynamics_kernel` produces already comes multiplied by gamma^d.
+    If the bootstrap does NOT carry the same factor, the two halves of that sum
+    are on different scales: with gamma=0.7 a win at depth 3 is worth 0.343 while
+    a particle that is still alive carries V ~ 0.93. The search then concludes
+    that winning is worse than not settling the game, which is exactly the
+    opposite of what we want.
 
-    Con gamma^(d+1) las dos mitades vuelven a la misma escala y el peso pasa a ser
-    el retorno descontado a D pasos con bootstrap, menos una constante:
+    With gamma^(d+1) the two halves are back on the same scale and the weight
+    becomes the D-step discounted return with bootstrap, minus a constant:
 
-        ganar en d      ->  gamma^d - V(s_raiz)
-        seguir vivo     ->  gamma^D * V(s_D) - V(s_raiz)
-        perder en d     ->  0 - V(s_raiz)
+        win at d        ->  gamma^d - V(s_root)
+        stay alive      ->  gamma^D * V(s_D) - V(s_root)
+        lose at d       ->  0 - V(s_root)
 
-    o sea ganar pronto > ganar tarde > sobrevivir > perder, que es el orden
-    correcto.
+    that is, winning early > winning late > surviving > losing, which is the right
+    order.
 
-    `depth[p]` es la profundidad ACTUAL (el nucleo la incrementa despues), asi que
-    el estado al que se salta esta en d+1: de ahi el exponente.
+    `depth[p]` is the CURRENT depth (the core increments it afterwards), so the
+    state being jumped to is at d+1: hence the exponent.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n:
@@ -97,42 +96,43 @@ def bootstrap_depth_kernel(next_value: GlobalF32, discount: GlobalF32,
 
 
 struct TicTacToeCritic(SearchModel, Movable):
-    """TTT con el valor que da una red entrenada.
+    """TTT with the value a trained network gives.
 
-    Lleva dentro los pesos y sus buffers de trabajo. El struct vive en el host; lo
-    que baja a la GPU son los buffers, igual que el juguete bajaba sus tres numeros.
+    It carries the weights and their working buffers inside. The struct lives on
+    the host; what goes down to the GPU are the buffers, just as the toy problem
+    sent down its three numbers.
 
-    NO es `Copyable` (posee `DeviceBuffer`), a diferencia de `TicTacToe`. La
-    busqueda generica lo acepta igual porque solo lo lee.
+    It is NOT `Copyable` (it owns `DeviceBuffer`s), unlike `TicTacToe`. The generic
+    search accepts it all the same because it only reads it.
     """
 
     var reward_gamma: Scalar[dtype]
-    """Descuento de la recompensa por profundidad, como en TicTacToe."""
+    """Depth discount on the reward, as in TicTacToe."""
 
     var params: CriticParams
-    """La copia congelada de los pesos. Se refresca con `sync_from`."""
+    """The frozen copy of the weights. Refreshed with `sync_from`."""
     var cache: CriticCache
-    """Activaciones del forward. Reservadas para el mayor uso (P particulas)."""
+    """The forward's activations. Allocated for the largest use (P particles)."""
     var obs: DeviceBuffer[dtype]
-    """[max_batch, OBS_DIM] el tablero codificado, reutilizado en cada llamada."""
+    """[max_batch, OBS_DIM] the encoded board, reused on every call."""
     var hidden: Int
 
     var loss_penalty: Scalar[dtype]
-    """Lo que vale perder, en negativo. Ver `TicTacToe.loss_penalty`."""
+    """What losing is worth, negated. See `TicTacToe.loss_penalty`."""
 
     var depth_discounted: Bool
-    """Si el bootstrap lleva gamma^(d+1) (escala coherente con la recompensa) o
-    solo `search_gamma` (el contrato literal del SearchModel, como Stoix). Ver
-    `bootstrap_depth_kernel` para por que hay dos."""
+    """Whether the bootstrap carries gamma^(d+1) (a scale consistent with the
+    reward) or only `search_gamma` (the SearchModel's literal contract, like
+    Stoix). See `bootstrap_depth_kernel` for why there are two."""
 
     def __init__(out self, ctx: DeviceContext, max_batch: Int, hidden: Int,
                  reward_gamma: Scalar[dtype],
                  depth_discounted: Bool = False,
                  loss_penalty: Scalar[dtype] = 0) raises:
-        """Reserva todo para `max_batch` tableros a la vez.
+        """Allocates everything for `max_batch` boards at a time.
 
-        `max_batch` tiene que cubrir el uso mayor de los dos: `num_envs` en la raiz
-        y `num_envs * num_particles` en el step. O sea, el segundo.
+        `max_batch` has to cover the larger of the two uses: `num_envs` at the
+        root and `num_envs * num_particles` in the step. That is, the second.
         """
         self.reward_gamma = reward_gamma
         self.hidden = hidden
@@ -143,11 +143,11 @@ struct TicTacToeCritic(SearchModel, Movable):
         self.obs = zero_buffer[dtype](ctx, max_batch * OBS_DIM)
 
     def sync_from(self, ctx: DeviceContext, src: CriticParams) raises:
-        """Copia los seis tensores de `src` a los pesos del modelo, en la GPU.
+        """Copies `src`'s six tensors into the model's weights, on the GPU.
 
-        Se llama cuando se quiere que la busqueda vea al critico actual. En E1.11
-        basta una vez, despues de entrenar; en el bucle completo del M-step se
-        llamaria cada iteracion.
+        It is called when the search should see the current critic. In E1.11 once
+        is enough, after training; in the full M-step loop it would be called
+        every iteration.
         """
         if src.in_dim != OBS_DIM or src.hidden != self.hidden or src.out_dim != 1:
             raise Error("el critico que se intenta copiar no tiene la forma del "
@@ -171,31 +171,33 @@ struct TicTacToeCritic(SearchModel, Movable):
                   root_state: DeviceBuffer[dtype],
                   logits_out: DeviceBuffer[dtype],
                   value_out: DeviceBuffer[dtype]) raises:
-        """Prior enmascarado (igual que sin critico) y V(s) de la red."""
+        """Masked prior (same as without a critic) and V(s) from the network."""
         blocks = (cfg.num_envs + TPB_TTT - 1) // TPB_TTT
 
         ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
             logits_out.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
             grid_dim=blocks, block_dim=TPB_TTT)
 
-        # El tablero en el formato que come la red, y su valor.
+        # The board in the format the network eats, and its value.
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
             self.obs.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
             grid_dim=blocks, block_dim=TPB_TTT)
         critic_forward(ctx, self.params, self.cache, self.obs, cfg.num_envs)
 
-        # V(s_raiz) va tal cual a la salida: aqui no hay discount que plegar.
+        # V(s_root) goes straight to the output: there is no discount to fold in
+        # here.
         ctx.enqueue_function[copy_kernel[dtype], copy_kernel[dtype]](
             value_out.unsafe_ptr(), self.cache.value.unsafe_ptr(), cfg.num_envs,
             grid_dim=blocks, block_dim=TPB_TTT)
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
              outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
-        """Avanza las particulas y pone el bootstrap con el valor de la red."""
+        """Advances the particles and sets the bootstrap with the network's value."""
         p_total = cfg.num_search_particles()
         blocks = (p_total + TPB_TTT - 1) // TPB_TTT
 
-        # 1. La dinamica de siempre. Deja next_value a 0; se pisa en el paso 3.
+        # 1. The usual dynamics. It leaves next_value at 0; it is overwritten in
+        # step 3.
         ctx.enqueue_function[ttt_dynamics_kernel, ttt_dynamics_kernel](
             particles.state.unsafe_ptr(), outputs.next_action.unsafe_ptr(),
             step_uniforms.unsafe_ptr(), particles.depth.unsafe_ptr(),
@@ -203,13 +205,14 @@ struct TicTacToeCritic(SearchModel, Movable):
             outputs.next_value.unsafe_ptr(), p_total, self.reward_gamma,
             self.loss_penalty, grid_dim=blocks, block_dim=TPB_TTT)
 
-        # 2. V(s') sobre el estado NUEVO.
+        # 2. V(s') over the NEW state.
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
             self.obs.unsafe_ptr(), particles.state.unsafe_ptr(), p_total,
             grid_dim=blocks, block_dim=TPB_TTT)
         critic_forward(ctx, self.params, self.cache, self.obs, p_total)
 
-        # 3. El bootstrap, con el discount ya plegado y el gamma que toque.
+        # 3. The bootstrap, with the discount already folded in and whichever
+        # gamma applies.
         if self.depth_discounted:
             ctx.enqueue_function[bootstrap_depth_kernel, bootstrap_depth_kernel](
                 outputs.next_value.unsafe_ptr(), outputs.discount.unsafe_ptr(),
@@ -222,7 +225,8 @@ struct TicTacToeCritic(SearchModel, Movable):
                 self.cache.value.unsafe_ptr(), p_total, cfg.search_gamma,
                 grid_dim=blocks, block_dim=TPB_TTT)
 
-        # 4. Y el prior en el estado nuevo, de donde se muestrea la accion.
+        # 4. And the prior at the new state, which is where the action is sampled
+        # from.
         ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
             outputs.action_logits.unsafe_ptr(), particles.state.unsafe_ptr(),
             p_total, grid_dim=blocks, block_dim=TPB_TTT)

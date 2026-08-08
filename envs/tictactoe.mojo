@@ -1,23 +1,23 @@
-"""Tic-Tac-Toe como entorno para la busqueda SMC.
+"""Tic-Tac-Toe as an environment for the SMC search.
 
-El tablero 3x3 se guarda como 9 floats, uno por casilla (STATE_DIM = 9):
+The 3x3 board is stored as 9 floats, one per cell (STATE_DIM = 9):
 
-    indices          codigo de cada casilla:
-    0 1 2              0.0  = vacia
-    3 4 5              1.0  = ficha del AGENTE (X, juega primero)
-    6 7 8             -1.0  = ficha del RIVAL  (O, jugara al azar)
+    indices          code of each cell:
+    0 1 2              0.0  = empty
+    3 4 5              1.0  = AGENT's mark (X, moves first)
+    6 7 8             -1.0  = RIVAL's mark (O, will play at random)
 
-Por que 9 floats sueltos y no un bitboard empaquetado como en el MCTS: aqui no
-hay un arbol que acumule miles de tableros -- la busqueda pisa las particulas en
-el sitio en cada profundidad -- asi que empaquetar no ahorra nada que importe, y
-ademas la red de la fase M querra el tablero justo asi, como numeros sueltos.
+Why 9 loose floats instead of a packed bitboard like in the MCTS: there is no
+tree here accumulating thousands of boards -- the search overwrites the particles
+in place at every depth -- so packing saves nothing that matters, and besides the
+M-phase network will want the board exactly like this, as loose numbers.
 
-El agente es SIEMPRE X, y (fase A3) un "step" del modelo sera jugada del agente +
-jugada aleatoria del rival, de modo que cada vez que la busqueda mira el estado le
-toca a X: no hace falta guardar de quien es el turno.
+The agent is ALWAYS X, and (phase A3) one model "step" will be agent move +
+random rival move, so that every time the search looks at the state it is X's
+turn: there is no need to store whose turn it is.
 
-Este fichero, como toy_chain, no importa la busqueda: solo los tipos y (mas
-adelante) el contrato SearchModel. El E-step no sabe que hay TTT detras.
+This file, like toy_chain, does not import the search: only the types and (later)
+the SearchModel contract. The E-step does not know there is TTT behind it.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -28,45 +28,46 @@ from systems.spo.particles import Particles, StepOutputs
 from systems.spo.search_model import SearchModel
 from systems.spo.spo_types import SPOConfig
 
-# El tablero son 9 casillas: 9 floats de estado, 9 acciones (una por casilla).
+# The board is 9 cells: 9 state floats, 9 actions (one per cell).
 comptime NUM_CELLS = 9
 comptime STATE_DIM = 9
 comptime NUM_ACTIONS = 9
 
-# Codigo de cada casilla. El agente (X) es +1 y el rival (O) es -1 a proposito:
-# quedan simetricos respecto al 0 (la casilla vacia), lo que le viene bien a la
-# red de la fase M.
+# Code of each cell. The agent (X) is +1 and the rival (O) is -1 on purpose:
+# they end up symmetric about 0 (the empty cell), which suits the M-phase
+# network.
 comptime CELL_EMPTY = Scalar[dtype](0)
 comptime CELL_AGENT = Scalar[dtype](1)
 comptime CELL_RIVAL = Scalar[dtype](-1)
 
 comptime TPB_TTT = 32
 
-# Lo que ve la RED (no la busqueda): dos planos de 9, primero las fichas propias y
-# despues las del rival. Es la codificacion que usa pgx para tres en raya
-# (`observation.shape == (3, 3, 2)`), y la usamos igual aqui para que la red de
-# Mojo y la de Stoix reciban exactamente lo mismo y la comparacion sea limpia.
+# What the NETWORK sees (not the search): two planes of 9, own marks first and
+# the rival's afterwards. It is the encoding pgx uses for tic-tac-toe
+# (`observation.shape == (3, 3, 2)`), and we use the same one here so that the
+# Mojo network and the Stoix one receive exactly the same thing and the
+# comparison stays clean.
 comptime NUM_PLANES = 2
 comptime OBS_DIM = NUM_PLANES * NUM_CELLS   # 18
 
 
 def ttt_cell(state: GlobalF32, p: Int, c: Int) -> Scalar[dtype]:
-    """La casilla c (0..8) de la particula p.
+    """Cell c (0..8) of particle p.
 
-    Fija en un solo sitio la convencion de layout: las 9 casillas de una
-    particula van seguidas, con paso STATE_DIM, para que un kernel por-particula
-    lea las suyas y no las de la vecina.
+    Pins the layout convention down in a single place: the 9 cells of one
+    particle are contiguous, with stride STATE_DIM, so that a per-particle kernel
+    reads its own cells and not its neighbour's.
     """
     return state[p * STATE_DIM + c]
 
 
 def ttt_three(state: GlobalF32, p: Int, a: Int, b: Int, c: Int,
               player: Scalar[dtype]) -> Bool:
-    """True si `player` ocupa las tres casillas a, b, c de la particula p.
+    """True if `player` occupies all three cells a, b, c of particle p.
 
-    Comparo casilla != player y salgo en cuanto falla, en vez de encadenar tres
-    `and` sobre comparaciones de SIMD-bool, que es lo que se traga sin dudas el
-    compilador de kernels."""
+    I compare cell != player and bail out as soon as one fails, instead of
+    chaining three `and`s over SIMD-bool comparisons, which is what the kernel
+    compiler swallows without complaint."""
     if ttt_cell(state, p, a) != player:
         return False
     if ttt_cell(state, p, b) != player:
@@ -77,28 +78,28 @@ def ttt_three(state: GlobalF32, p: Int, a: Int, b: Int, c: Int,
 
 
 def ttt_has_won(state: GlobalF32, p: Int, player: Scalar[dtype]) -> Bool:
-    """True si `player` (CELL_AGENT o CELL_RIVAL) completa alguna de las 8 lineas.
+    """True if `player` (CELL_AGENT or CELL_RIVAL) completes any of the 8 lines.
 
-    Son las mismas 8 lineas que WIN_MASKS en el MCTS (3 filas, 3 columnas, 2
-    diagonales), aqui como ternas de indices porque el tablero son 9 floats y no
-    un bitboard. El paralelismo esta en los hilos (una particula por hilo), asi
-    que dentro del hilo un simple OR de las 8 lineas es lo natural -- no hace
-    falta el truco SIMD-sobre-lineas que usa el MCTS en CPU.
+    These are the same 8 lines as WIN_MASKS in the MCTS (3 rows, 3 columns, 2
+    diagonals), here as index triples because the board is 9 floats and not a
+    bitboard. The parallelism lives in the threads (one particle per thread), so
+    inside the thread a plain OR over the 8 lines is the natural thing -- the
+    SIMD-over-lines trick the CPU MCTS uses is not needed.
     """
-    return (ttt_three(state, p, 0, 1, 2, player)      # filas
+    return (ttt_three(state, p, 0, 1, 2, player)      # rows
             or ttt_three(state, p, 3, 4, 5, player)
             or ttt_three(state, p, 6, 7, 8, player)
-            or ttt_three(state, p, 0, 3, 6, player)    # columnas
+            or ttt_three(state, p, 0, 3, 6, player)    # columns
             or ttt_three(state, p, 1, 4, 7, player)
             or ttt_three(state, p, 2, 5, 8, player)
-            or ttt_three(state, p, 0, 4, 8, player)    # diagonales
+            or ttt_three(state, p, 0, 4, 8, player)    # diagonals
             or ttt_three(state, p, 2, 4, 6, player))
 
 
 def ttt_has_won_kernel(won_out: GlobalF32, state: GlobalF32, n_particles: Int,
                        player: Scalar[dtype]):
-    """1.0 si `player` gano en el tablero de su particula, 0.0 si no. Un hilo por
-    particula."""
+    """1.0 if `player` won on its particle's board, 0.0 otherwise. One thread per
+    particle."""
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n_particles:
         won_out[p] = Scalar[dtype](1) if ttt_has_won(state, p, player) \
@@ -106,7 +107,7 @@ def ttt_has_won_kernel(won_out: GlobalF32, state: GlobalF32, n_particles: Int,
 
 
 def ttt_is_legal(state: GlobalF32, p: Int, c: Int) -> Bool:
-    """True si la casilla c de la particula p esta vacia (jugada legal)."""
+    """True if cell c of particle p is empty (legal move)."""
     if ttt_cell(state, p, c) == CELL_EMPTY:
         return True
     return False
@@ -114,11 +115,11 @@ def ttt_is_legal(state: GlobalF32, p: Int, c: Int) -> Bool:
 
 def ttt_legal_mask_kernel(mask_out: GlobalF32, state: GlobalF32,
                           n_particles: Int):
-    """Mascara de acciones legales [n_particles, NUM_ACTIONS]: 1.0 si la casilla
-    esta libre, 0.0 si esta ocupada. Un hilo por particula.
+    """Legal-action mask [n_particles, NUM_ACTIONS]: 1.0 if the cell is free,
+    0.0 if it is taken. One thread per particle.
 
-    La usara la busqueda para tapar las acciones ilegales del prior (metiendo
-    -inf en las ocupadas) y el rival aleatorio para sortear solo entre libres.
+    The search will use it to mask the prior's illegal actions (putting -inf on
+    the occupied ones) and the random rival to draw only among free cells.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n_particles:
@@ -128,26 +129,26 @@ def ttt_legal_mask_kernel(mask_out: GlobalF32, state: GlobalF32,
 
 
 def ttt_apply(state: GlobalF32, p: Int, cell: Int, player: Scalar[dtype]):
-    """Pone la ficha de `player` en la casilla `cell` de la particula p, in-place.
+    """Puts `player`'s mark on cell `cell` of particle p, in place.
 
-    No comprueba legalidad: da por hecho que quien llama ya eligio una casilla
-    libre (via la mascara legal). Es la primitiva que usara el step de la fase A3
-    para la jugada del agente y la del rival.
+    Does not check legality: it assumes the caller already picked a free cell
+    (via the legal mask). It is the primitive the phase-A3 step will use for both
+    the agent's move and the rival's.
     """
     state[p * STATE_DIM + cell] = player
 
 
 def ttt_apply_kernel(state: GlobalF32, action: GlobalI32, n_particles: Int,
                      player: Scalar[dtype]):
-    """Cada particula pone una ficha de `player` en la casilla que dice su accion.
-    Un hilo por particula, modifica el estado in-place."""
+    """Each particle puts a `player` mark on the cell its action names.
+    One thread per particle, modifies the state in place."""
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n_particles:
         ttt_apply(state, p, Int(action[p]), player)
 
 
 def ttt_is_full(state: GlobalF32, p: Int) -> Bool:
-    """True si no queda ninguna casilla vacia (no hay jugadas legales)."""
+    """True if no empty cell is left (no legal moves)."""
     for c in range(NUM_CELLS):
         if ttt_cell(state, p, c) == CELL_EMPTY:
             return False
@@ -155,7 +156,7 @@ def ttt_is_full(state: GlobalF32, p: Int) -> Bool:
 
 
 def ttt_is_terminal(state: GlobalF32, p: Int) -> Bool:
-    """True si la partida acabo: gano alguien o el tablero esta lleno (empate)."""
+    """True if the game is over: somebody won or the board is full (draw)."""
     if ttt_has_won(state, p, CELL_AGENT):
         return True
     if ttt_has_won(state, p, CELL_RIVAL):
@@ -166,16 +167,16 @@ def ttt_is_terminal(state: GlobalF32, p: Int) -> Bool:
 
 
 def ttt_reward(state: GlobalF32, p: Int) -> Scalar[dtype]:
-    """Recompensa del tablero desde la vista del AGENTE (X):
+    """Reward of the board from the AGENT's point of view (X):
 
-        gana X       -> +1.0
-        empate       -> +0.5   (tablero lleno sin linea)
-        gana O       ->  0.0   (derrota)
-        no terminal  ->  0.0   (recompensa de paso: el juego sigue)
+        X wins       -> +1.0
+        draw         -> +0.5   (full board with no line)
+        O wins       ->  0.0   (loss)
+        non-terminal ->  0.0   (step reward: the game goes on)
 
-    Gana-X se comprueba antes que lleno: una jugada ganadora que ademas llena el
-    tablero es victoria, no empate. `terminal` y `reward` son salidas separadas:
-    una derrota y un paso intermedio dan 0 los dos, y se distinguen por terminal.
+    X-wins is checked before full: a winning move that also fills the board is a
+    win, not a draw. `terminal` and `reward` are separate outputs: a loss and an
+    intermediate step both give 0, and they are told apart by terminal.
     """
     if ttt_has_won(state, p, CELL_AGENT):
         return Scalar[dtype](1)
@@ -188,8 +189,8 @@ def ttt_reward(state: GlobalF32, p: Int) -> Scalar[dtype]:
 
 def ttt_outcome_kernel(terminal_out: GlobalF32, reward_out: GlobalF32,
                        state: GlobalF32, n_particles: Int):
-    """Por particula: terminal (1.0/0.0) y recompensa del agente. Un hilo por
-    particula."""
+    """Per particle: terminal (1.0/0.0) and the agent's reward. One thread per
+    particle."""
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n_particles:
         terminal_out[p] = Scalar[dtype](1) if ttt_is_terminal(state, p) \
@@ -199,17 +200,17 @@ def ttt_outcome_kernel(terminal_out: GlobalF32, reward_out: GlobalF32,
 
 def ttt_prior_logits_kernel(logits_out: GlobalF32, state: GlobalF32,
                             n_envs: Int):
-    """Prior de la busqueda en los estados raiz: [n_envs, NUM_ACTIONS].
+    """The search prior at the root states: [n_envs, NUM_ACTIONS].
 
-    Uniforme sobre las casillas LEGALES (logit 0) y tapado en las ocupadas
-    (NEG_INF), de modo que el softmax da probabilidad 0 a jugar sobre una ficha ya
-    puesta. Es el analogo del prior uniforme del juguete, pero enmascarado porque
-    en TTT no todas las acciones son legales.
+    Uniform over the LEGAL cells (logit 0) and masked on the occupied ones
+    (NEG_INF), so that the softmax gives probability 0 to playing on a mark that
+    is already there. It is the analogue of the toy problem's uniform prior, but
+    masked, because in TTT not every action is legal.
 
-    Uso NEG_INF (MIN_FINITE) y no -inf de verdad: si un tablero no tuviera ninguna
-    casilla legal (no deberia pasar en una raiz, pero por si acaso), una fila
-    entera de -inf daria nan en el softmax; con MIN_FINITE degenera a uniforme,
-    que es inofensivo. Un hilo por env.
+    I use NEG_INF (MIN_FINITE) and not a true -inf: if a board had no legal cell
+    at all (should not happen at a root, but just in case), a whole row of -inf
+    would give nan in the softmax; with MIN_FINITE it degenerates to uniform,
+    which is harmless. One thread per env.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs:
@@ -219,12 +220,12 @@ def ttt_prior_logits_kernel(logits_out: GlobalF32, state: GlobalF32,
 
 
 def ttt_random_legal_cell(state: GlobalF32, p: Int, u: Scalar[dtype]) -> Int:
-    """La casilla vacia numero floor(u*m) (m = nº de vacias), contando desde 0.
+    """The empty cell number floor(u*m) (m = number of empties), counting from 0.
 
-    Uniforme sobre las casillas libres, sin listas: cuenta cuantas hay y devuelve
-    la k-esima. Es el analogo del random_set_bit del MCTS, aqui sobre floats. u en
-    [0,1). Devuelve -1 si no hay ninguna, cosa que no ocurre en el step (solo se
-    llama cuando el tablero no esta lleno).
+    Uniform over the free cells, without lists: count how many there are and
+    return the k-th. It is the analogue of the MCTS's random_set_bit, here over
+    floats. u in [0,1). Returns -1 if there is none, which does not happen in the
+    step (it is only called when the board is not full).
     """
     m = 0
     for c in range(NUM_CELLS):
@@ -233,7 +234,7 @@ def ttt_random_legal_cell(state: GlobalF32, p: Int, u: Scalar[dtype]) -> Int:
     if m == 0:
         return -1
     k = Int(u * Scalar[dtype](m))
-    if k >= m:            # guarda por si u redondeara justo a m
+    if k >= m:            # guard in case u rounds exactly up to m
         k = m - 1
     j = 0
     for c in range(NUM_CELLS):
@@ -241,51 +242,51 @@ def ttt_random_legal_cell(state: GlobalF32, p: Int, u: Scalar[dtype]) -> Int:
             if j == k:
                 return c
             j += 1
-    return -1             # inalcanzable con m > 0
+    return -1             # unreachable with m > 0
 
 
 @fieldwise_init
 struct TTTOutcome(Copyable, Movable):
-    """Lo que sale de avanzar un tablero un turno completo. Struct de escalares,
-    que una funcion de device si puede devolver (ver docs/api_notes.md)."""
+    """What comes out of advancing a board by one full turn. A struct of scalars,
+    which a device function can indeed return (see docs/api_notes.md)."""
     var reward: Scalar[dtype]
-    """Vista del AGENTE: 1 gana, 0.5 empate, 0 pierde o sigue."""
+    """AGENT's view: 1 win, 0.5 draw, 0 loss or still going."""
     var terminal: Scalar[dtype]
-    """1.0 si la partida acabo, 0.0 si sigue."""
+    """1.0 if the game ended, 0.0 if it goes on."""
 
 
 def ttt_advance(state: GlobalF32, p: Int, action: Int,
                 u: Scalar[dtype]) -> TTTOutcome:
-    """Un turno completo: juega el agente (X) y responde el rival al azar.
+    """One full turn: the agent (X) plays and the rival answers at random.
 
-    Modifica el tablero de p in-place y devuelve recompensa y terminal:
-      1. El agente juega `action`.
-      2. Si X gana o el tablero se llena -> terminal (el rival no llega a jugar).
-      3. Si no, el rival (O) juega una casilla legal al azar, elegida con `u`.
-      4. Si O gana o se llena -> terminal.
-    Cada has_won/is_full se calcula UNA vez, en el orden del juego.
+    Modifies p's board in place and returns reward and terminal:
+      1. The agent plays `action`.
+      2. If X wins or the board fills up -> terminal (the rival never plays).
+      3. Otherwise the rival (O) plays a random legal cell, drawn with `u`.
+      4. If O wins or the board fills up -> terminal.
+    Each has_won/is_full is computed ONCE, in game order.
 
-    Es la dinamica compartida entre la busqueda (ttt_dynamics_kernel) y el entorno
-    real (ttt_env_step_kernel), igual que cartpole_advance compartia la fisica: asi
-    las reglas viven en un solo sitio y no pueden desincronizarse.
+    This is the dynamics shared between the search (ttt_dynamics_kernel) and the
+    real environment (ttt_env_step_kernel), just as cartpole_advance shared the
+    physics: that way the rules live in a single place and cannot drift apart.
 
-    Memory-safe por construccion: `action` viene acotada a [0,9) y el rival solo
-    juega cuando el tablero NO esta lleno, asi que random_legal_cell siempre
-    encuentra hueco y nunca devuelve -1.
+    Memory-safe by construction: `action` comes bounded to [0,9) and the rival
+    only plays when the board is NOT full, so random_legal_cell always finds a
+    free cell and never returns -1.
     """
     ttt_apply(state, p, action, CELL_AGENT)
     if ttt_has_won(state, p, CELL_AGENT):
-        return TTTOutcome(Scalar[dtype](1), Scalar[dtype](1))     # gana el agente
+        return TTTOutcome(Scalar[dtype](1), Scalar[dtype](1))     # agent wins
     if ttt_is_full(state, p):
-        return TTTOutcome(Scalar[dtype](0.5), Scalar[dtype](1))   # empate
+        return TTTOutcome(Scalar[dtype](0.5), Scalar[dtype](1))   # draw
 
     cell = ttt_random_legal_cell(state, p, u)
     ttt_apply(state, p, cell, CELL_RIVAL)
     if ttt_has_won(state, p, CELL_RIVAL):
-        return TTTOutcome(Scalar[dtype](0), Scalar[dtype](1))     # derrota
+        return TTTOutcome(Scalar[dtype](0), Scalar[dtype](1))     # loss
     if ttt_is_full(state, p):
-        return TTTOutcome(Scalar[dtype](0.5), Scalar[dtype](1))   # empate
-    return TTTOutcome(Scalar[dtype](0), Scalar[dtype](0))         # sigue
+        return TTTOutcome(Scalar[dtype](0.5), Scalar[dtype](1))   # draw
+    return TTTOutcome(Scalar[dtype](0), Scalar[dtype](0))         # goes on
 
 
 def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
@@ -294,34 +295,34 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
                         next_value_out: GlobalF32, n_particles: Int,
                         reward_gamma: Scalar[dtype],
                         loss_penalty: Scalar[dtype]):
-    """El step estocastico de TTT para la BUSQUEDA: un turno + gamma plegada.
+    """The stochastic TTT step for the SEARCH: one turn + gamma folded in.
 
-    Avanza con `ttt_advance` y traduce el resultado al contrato del nucleo SMC:
-    discount (0 si terminal, 1 si sigue) y next_value (0: sin critico todavia).
+    Advances with `ttt_advance` and translates the result into the SMC core's
+    contract: discount (0 if terminal, 1 if it goes on) and next_value (0: no
+    critic yet).
 
-    Como el juguete, NO comprueba si la particula ya estaba muerta: una particula
-    terminal se vuelve a pisar y da igual, porque su peso ya lo congelo el nucleo
-    SMC. Un hilo por particula.
+    Like the toy problem, it does NOT check whether the particle was already
+    dead: a terminal particle gets overwritten and it does not matter, because
+    the SMC core already froze its weight. One thread per particle.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n_particles:
         return
 
     out = ttt_advance(state, p, Int(action[p]), step_uniforms[p])
-    # Descuento por profundidad: ganar YA vale mas que ganar despues. Sin esto, y
-    # con V=0, el peso SMC es la suma de recompensas sin descontar, asi que una
-    # particula que gana en el paso 0 empata con otra que gana en el paso 3 -- y el
-    # softmax no puede distinguir "gane seguro" de "gane con suerte".
+    # Discount by depth: winning NOW is worth more than winning later. Without
+    # this, and with V=0, the SMC weight is the sum of undiscounted rewards, so a
+    # particle that wins at step 0 ties with one that wins at step 3 -- and the
+    # softmax cannot tell "I win for sure" from "I won by luck".
     g = Scalar[dtype](1)
     for _ in range(Int(depth[p])):
         g *= reward_gamma
 
-    # Castigo por derrota. Sin el, `ttt_advance` devuelve 0 tanto si la partida se
-    # PIERDE como si simplemente SIGUE, asi que el peso SMC no puede distinguir
-    # las dos cosas y la busqueda no tiene ningun motivo para bloquear una
-    # amenaza. Con loss_penalty > 0 una derrota pasa a valer -loss_penalty, que es
-    # el convenio habitual de los juegos (+1 / 0 / -1). Con 0 se recupera el
-    # comportamiento original.
+    # Loss penalty. Without it, `ttt_advance` returns 0 whether the game is LOST
+    # or simply GOES ON, so the SMC weight cannot tell the two apart and the
+    # search has no reason whatsoever to block a threat. With loss_penalty > 0 a
+    # loss becomes worth -loss_penalty, which is the usual game convention
+    # (+1 / 0 / -1). With 0 the original behaviour is recovered.
     r = out.reward
     if loss_penalty != 0 and out.terminal != 0 and out.reward == 0:
         r = -loss_penalty
@@ -332,28 +333,28 @@ def ttt_dynamics_kernel(state: GlobalF32, action: GlobalI32,
 
 
 def ttt_seat_opens_first(e: Int) -> Bool:
-    """Los entornos PARES los abre el agente; los IMPARES los abre el rival.
+    """EVEN environments are opened by the agent; ODD ones by the rival.
 
-    El reparto va por indice y no por sorteo. Con un numero par de entornos, la
-    mitad exacta juega de cada lado en cada tanda: no hay varianza de reparto que
-    se sume a la de la medida, y los dos asientos se pueden separar al agregar
-    porque el indice del env dice cual es cual.
+    The assignment goes by index and not by a draw. With an even number of
+    environments, exactly half plays each side in every batch: there is no
+    assignment variance adding to the measurement variance, and the two seats can
+    be separated when aggregating because the env index says which is which.
 
-    Jugar segundo NO es el mismo problema que jugar primero, y las referencias
-    exactas lo prueban: contra el mismo rival uniforme, el juego que maximiza el
-    score saca 0.9974 abriendo y 0.9624 respondiendo, y sobre todo pierde 0.00%
-    en el primer caso contra 0.42% en el segundo. Respondiendo, maximizar el score
-    EXIGE aceptar derrotas; abriendo, no.
+    Playing second is NOT the same problem as playing first, and the exact
+    references prove it: against the same uniform rival, score-maximising play
+    scores 0.9974 opening and 0.9624 answering, and above all loses 0.00% in the
+    first case against 0.42% in the second. When answering, maximising the score
+    REQUIRES accepting losses; when opening, it does not.
     """
     return e % 2 == 0
 
 
 def ttt_reset_kernel(state: GlobalF32, n_envs: Int):
-    """Empieza partida nueva: tablero vacio, abre el agente. Un hilo por env.
+    """Starts a new game: empty board, agent opens. One thread per env.
 
-    Variante de asiento fijo, conservada telle quelle: la usan los demos y los
-    tests de las fases anteriores, cuyas cifras se midieron con ella. Para la
-    comparacion final se usa `ttt_reset_alt_kernel`.
+    Fixed-seat variant, kept as is: it is used by the demos and by the tests of
+    the earlier phases, whose figures were measured with it. For the final
+    comparison `ttt_reset_alt_kernel` is used instead.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs:
@@ -362,12 +363,13 @@ def ttt_reset_kernel(state: GlobalF32, n_envs: Int):
 
 
 def ttt_reset_alt_kernel(state: GlobalF32, u_open: GlobalF32, n_envs: Int):
-    """Empieza partida nueva con el asiento que le toca al env.
+    """Starts a new game with whichever seat the env is assigned.
 
-    Si abre el rival, juega su casilla aqui mismo. El resto del sistema no cambia
-    en absoluto: `ttt_advance` sigue haciendo "juega el agente, responde el rival",
-    la codificacion de dos planos ya sabe representar un tablero con una ficha
-    rival, y ni la busqueda ni las redes se enteran de nada. Un hilo por env.
+    If the rival opens, it plays its cell right here. The rest of the system does
+    not change at all: `ttt_advance` still does "the agent plays, the rival
+    answers", the two-plane encoding already knows how to represent a board with
+    a rival mark on it, and neither the search nor the networks notice anything.
+    One thread per env.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs:
@@ -381,12 +383,12 @@ def ttt_reset_alt_kernel(state: GlobalF32, u_open: GlobalF32, n_envs: Int):
 def ttt_env_step_kernel(state: GlobalF32, action: GlobalI32,
                         u_rival: GlobalF32, reward_out: GlobalF32,
                         done_out: GlobalI32, n_envs: Int):
-    """Un turno en el entorno REAL: como el de la busqueda pero sin gamma.
+    """One turn in the REAL environment: like the search's, but without gamma.
 
-    Comparte `ttt_advance` con el kernel de la busqueda, asi que las reglas son
-    literalmente las mismas; lo unico que cambia es la salida: aqui interesa
-    `done` (para reiniciar la partida y contar el resultado) en vez del discount
-    y el bootstrap. Un hilo por env.
+    It shares `ttt_advance` with the search kernel, so the rules are literally
+    the same; the only thing that changes is the output: here what matters is
+    `done` (to restart the game and count the result) instead of the discount and
+    the bootstrap. One thread per env.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs:
@@ -397,14 +399,15 @@ def ttt_env_step_kernel(state: GlobalF32, action: GlobalI32,
 
 
 def ttt_auto_reset_kernel(state: GlobalF32, done: GlobalI32, n_envs: Int):
-    """Los envs que acaban de terminar empiezan partida nueva; los demas siguen.
+    """Envs that have just finished start a new game; the rest go on.
 
-    Va DESPUES de que el host haya leido reward y done: el tablero se limpia, pero
-    el resultado de la partida ya esta anotado en sus buffers. Es el auto-reset del
-    entorno REAL; dentro de la busqueda no existe (una particula terminal se queda
-    quieta y su peso lo congela la mascara terminal). Un hilo por env.
+    It runs AFTER the host has read reward and done: the board is cleared, but
+    the game's result is already recorded in its buffers. This is the REAL
+    environment's auto-reset; inside the search there is no such thing (a
+    terminal particle stays put and its weight is frozen by the terminal mask).
+    One thread per env.
 
-    Variante de asiento fijo. Ver `ttt_auto_reset_alt_kernel`.
+    Fixed-seat variant. See `ttt_auto_reset_alt_kernel`.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs and Int(done[e]) != 0:
@@ -414,12 +417,12 @@ def ttt_auto_reset_kernel(state: GlobalF32, done: GlobalI32, n_envs: Int):
 
 def ttt_auto_reset_alt_kernel(state: GlobalF32, done: GlobalI32,
                               u_open: GlobalF32, n_envs: Int):
-    """Auto-reset con alternancia de asiento.
+    """Auto-reset with seat alternation.
 
-    El asiento del env NO cambia entre partidas: el env 3 responde siempre. Es lo
-    que hace del reparto una estratificacion exacta en vez de un sorteo, y lo que
-    permite separar los dos asientos al agregar: basta con mirar la paridad del
-    indice. Un hilo por env.
+    The env's seat does NOT change between games: env 3 always answers. That is
+    what makes the assignment an exact stratification instead of a draw, and what
+    lets the two seats be separated when aggregating: it is enough to look at the
+    parity of the index. One thread per env.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs and Int(done[e]) != 0:
@@ -432,10 +435,10 @@ def ttt_auto_reset_alt_kernel(state: GlobalF32, done: GlobalI32,
 
 def ttt_random_policy_kernel(action_out: GlobalI32, state: GlobalF32,
                              uniforms: GlobalF32, n_envs: Int):
-    """La politica ALEATORIA del agente: una casilla legal al azar por env.
+    """The agent's RANDOM policy: one random legal cell per env.
 
-    Es la linea base contra la que se compara la busqueda: si planificar no gana
-    mas partidas que esto, la busqueda no esta aportando nada. Un hilo por env.
+    It is the baseline the search is compared against: if planning does not win
+    more games than this, the search is contributing nothing. One thread per env.
     """
     e = Int(block_dim.x * block_idx.x + thread_idx.x)
     if e < n_envs:
@@ -444,24 +447,25 @@ def ttt_random_policy_kernel(action_out: GlobalI32, state: GlobalF32,
 
 
 def ttt_encode_obs_kernel(obs_out: GlobalF32, state: GlobalF32, n: Int):
-    """Traduce el tablero al formato que come la red: [n, 9] -> [n, OBS_DIM].
+    """Translates the board into the format the network eats: [n, 9] -> [n, OBS_DIM].
 
-    De 9 casillas con codigo (+1 mia / -1 suya / 0 vacia) a dos planos binarios
-    puestos uno detras del otro:
+    From 9 coded cells (+1 mine / -1 theirs / 0 empty) to two binary planes laid
+    one after the other:
 
-        obs[0 .. 8]   1 si la casilla es MIA,    0 si no
-        obs[9 .. 17]  1 si la casilla es SUYA,   0 si no
+        obs[0 .. 8]   1 if the cell is MINE,   0 otherwise
+        obs[9 .. 17]  1 if the cell is THEIRS, 0 otherwise
 
-    Una casilla vacia queda a 0 en LOS DOS planos, asi que "vacia" se codifica por
-    ausencia y no hace falta un tercer plano.
+    An empty cell stays 0 in BOTH planes, so "empty" is encoded by absence and no
+    third plane is needed.
 
-    Por que dos planos y no los 9 floats tal cual: con un solo numero la red
-    tendria que deducir sola que -1, 0 y +1 son tres CATEGORIAS y no una escala
-    donde el 0 esta en medio. Y sobre todo, es la codificacion que usa pgx, que es
-    lo que vera la implementacion de Stoix: las dos redes reciben lo mismo.
+    Why two planes and not the 9 floats as they are: with a single number the
+    network would have to work out on its own that -1, 0 and +1 are three
+    CATEGORIES and not a scale with 0 in the middle. And above all, it is the
+    encoding pgx uses, which is what the Stoix implementation will see: both
+    networks receive the same thing.
 
-    Sirve igual para particulas (durante la busqueda) que para envs (en el bucle
-    real): solo cambia `n`. Un hilo por tablero.
+    It serves equally for particles (during the search) and for envs (in the real
+    loop): only `n` changes. One thread per board.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p >= n:
@@ -478,11 +482,11 @@ def ttt_encode_obs_kernel(obs_out: GlobalF32, state: GlobalF32, n: Int):
 
 def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
                           n_particles: Int):
-    """Copia las 9 casillas de cada particula a la salida usando ttt_cell.
+    """Copies the 9 cells of each particle to the output using ttt_cell.
 
-    Todavia no hace logica de juego: existe para comprobar que el accesor indexa
-    la casilla correcta de la particula correcta (que el paso STATE_DIM es el que
-    toca y las particulas no se solapan). Un hilo por particula.
+    It does no game logic yet: it exists to check that the accessor indexes the
+    right cell of the right particle (that the STATE_DIM stride is the correct
+    one and the particles do not overlap). One thread per particle.
     """
     p = Int(block_dim.x * block_idx.x + thread_idx.x)
     if p < n_particles:
@@ -491,27 +495,27 @@ def ttt_read_cells_kernel(cells_out: GlobalF32, state: GlobalF32,
 
 
 struct TicTacToe(SearchModel, Copyable, Movable):
-    """Tic-Tac-Toe como modelo de busqueda: el agente (X) contra un rival aleatorio.
+    """Tic-Tac-Toe as a search model: the agent (X) against a random rival.
 
-    La regla es fija y el agente siempre es X; no hay critico todavia (V=0), asi que
-    la busqueda mejora un prior uniforme enmascarado partiendo de valor cero -- el
-    modo "planificador" del Milestone 1.
+    The rule is fixed and the agent is always X; there is no critic yet (V=0), so
+    the search improves a masked uniform prior starting from zero value -- the
+    "planner" mode of Milestone 1.
 
-    Como toy_chain, no importa la busqueda: solo el contrato SearchModel y los
-    tipos. Los kernels que usa (prior de A3a, dinamica de A3b) estan probados por
-    separado; aqui solo se cablean en los dos metodos del contrato.
+    Like toy_chain, it does not import the search: only the SearchModel contract
+    and the types. The kernels it uses (A3a's prior, A3b's dynamics) are tested
+    separately; here they are merely wired into the contract's two methods.
     """
 
     var reward_gamma: Scalar[dtype]
-    """Descuento de la recompensa por profundidad. 1.0 = sin descuento (ganar ya
-    vale igual que ganar despues, que en un juego con premio terminal deja el peso
-    SMC casi ciego); <1 premia ganar rapido."""
+    """Depth discount on the reward. 1.0 = no discount (winning now is worth the
+    same as winning later, which in a game with a terminal prize leaves the SMC
+    weight nearly blind); <1 rewards winning fast."""
 
     var loss_penalty: Scalar[dtype]
-    """Lo que vale perder, en negativo. 0 = el convenio original (perder vale 0,
-    lo mismo que no haber resuelto la partida); 1 = el convenio de juegos
-    +1/0/-1. Es MODELADO de recompensa dentro de la busqueda: la recompensa del
-    entorno real, la que cuenta el marcador, no se toca."""
+    """What losing is worth, negated. 0 = the original convention (losing is
+    worth 0, the same as not having settled the game); 1 = the game convention
+    +1/0/-1. This is reward SHAPING inside the search: the real environment's
+    reward, the one the scoreboard counts, is left untouched."""
 
     def __init__(out self, reward_gamma: Scalar[dtype],
                  loss_penalty: Scalar[dtype] = 0):
@@ -522,19 +526,19 @@ struct TicTacToe(SearchModel, Copyable, Movable):
                   root_state: DeviceBuffer[dtype],
                   logits_out: DeviceBuffer[dtype],
                   value_out: DeviceBuffer[dtype]) raises:
-        """El prior enmascarado sobre los estados raiz, y V=0 (sin critico)."""
+        """The masked prior over the root states, and V=0 (no critic)."""
         blocks = (cfg.num_envs + TPB_TTT - 1) // TPB_TTT
         ctx.enqueue_function[ttt_prior_logits_kernel, ttt_prior_logits_kernel](
             logits_out.unsafe_ptr(), root_state.unsafe_ptr(), cfg.num_envs,
             grid_dim=blocks, block_dim=TPB_TTT)
-        # V = 0: modo planificador. Se pisa explicitamente porque el workspace se
-        # reutiliza entre busquedas y podria traer valores viejos.
+        # V = 0: planner mode. It is overwritten explicitly because the workspace
+        # is reused between searches and could carry stale values.
         value_out.enqueue_fill(0)
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
              outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
-        """Avanza las P particulas (agente + rival al azar) y evalua el prior en el
-        estado NUEVO, que es de donde se muestreara la accion siguiente."""
+        """Advances the P particles (agent + random rival) and evaluates the prior
+        at the NEW state, which is where the next action will be sampled from."""
         p_total = cfg.num_search_particles()
         blocks = (p_total + TPB_TTT - 1) // TPB_TTT
 
@@ -551,36 +555,37 @@ struct TicTacToe(SearchModel, Copyable, Movable):
 
 
 def default_tictactoe() -> TicTacToe:
-    """El modelo de TTT **fiel a SPO**: sin descuento por profundidad.
+    """The TTT model **faithful to SPO**: no depth discount.
 
-    Antes esto devolvia `reward_gamma = 0.7`, y eso estaba mal como DEFECTO. El
-    0.7 es un apano nuestro de A6 (plegar gamma^d dentro de la recompensa) que
-    Stoix no hace: su `recurrent_fn` pasa la recompensa cruda del entorno
-    (`reward=next_timestep.reward`, ff_spo.py:341). Tenerlo como valor por defecto
-    hacia que nuestra desviacion PARECIERA el metodo.
+    This used to return `reward_gamma = 0.7`, and that was wrong as a DEFAULT.
+    The 0.7 is a patch of ours from A6 (folding gamma^d into the reward) that
+    Stoix does not apply: its `recurrent_fn` passes the environment's raw reward
+    (`reward=next_timestep.reward`, ff_spo.py:341). Having it as the default made
+    our deviation LOOK LIKE the method.
 
-    Y ademas resulto ser danina: con el actor conectado, gamma_r = 1.0 da 0.62% de
-    derrotas y gamma_r = 0.7 da 2.65%. El apano existia para compensar la falta de
-    politica; cuando la politica llega, estorba.
+    And it turned out to be harmful as well: with the actor wired in,
+    gamma_r = 1.0 gives 0.62% losses and gamma_r = 0.7 gives 2.65%. The patch
+    existed to compensate for the missing policy; once the policy arrives, it
+    gets in the way.
 
-    Se conserva el parametro para poder reproducir las medidas de A6 y E1.11, pero
-    hay que pasarlo a mano y a la vista.
+    The parameter is kept so that the A6 and E1.11 measurements can be
+    reproduced, but it has to be passed by hand and in plain sight.
     """
     return TicTacToe(reward_gamma=1.0)
 
 
 def ttt_legal_mask_from_obs_kernel(mask_out: GlobalF32, obs: GlobalF32,
                                    n: Int):
-    """Mascara de legales leyendo la OBSERVACION en vez del tablero.
+    """Legal mask read from the OBSERVATION instead of from the board.
 
-    Existe porque el buffer de entrenamiento guarda observaciones (18 floats), no
-    estados (9). Se podria guardar tambien el estado, pero seria duplicar
-    informacion que ya esta ahi: en la codificacion de dos planos una casilla esta
-    libre si y solo si vale 0 en LOS DOS.
+    It exists because the training buffer stores observations (18 floats), not
+    states (9). The state could be stored too, but that would duplicate
+    information that is already there: in the two-plane encoding a cell is free
+    if and only if it is 0 in BOTH.
 
-    Que la mascara salga siempre del mismo sitio que ve la red importa: si viniera
-    por un canal aparte podria desincronizarse y el actor acabaria poniendo
-    probabilidad sobre fichas ya puestas. Un hilo por fila.
+    That the mask always comes from the same place the network sees matters: if
+    it came through a separate channel it could drift out of sync and the actor
+    would end up putting probability on marks already placed. One thread per row.
     """
     r = Int(block_dim.x * block_idx.x + thread_idx.x)
     if r >= n:

@@ -1,35 +1,36 @@
-"""MDP de juguete: un pasillo con dos acciones. El primer SearchModel.
+"""Toy MDP: a corridor with two actions. The first SearchModel.
 
-Sirve para validar la busqueda SMC antes de que existan las redes o CartPole. Es
-deterministico y su politica optima se sabe de memoria, asi que los tests pueden
-comprobar numeros exactos en vez de tolerancias.
+It serves to validate the SMC search before the networks or CartPole exist. It is
+deterministic and its optimal policy is known by heart, so the tests can check
+exact numbers instead of tolerances.
 
-    posiciones:   0 --> 1 --> 2 --> ... --> L
-    accion GOOD (1): avanza una casilla y da recompensa 1
-    accion BAD  (0): mata el episodio ahi mismo, recompensa 0
+    positions:    0 --> 1 --> 2 --> ... --> L
+    action GOOD (1): advances one cell and gives reward 1
+    action BAD  (0): kills the episode right there, reward 0
 
-Dos formas distintas de que un episodio acabe, y esa es justo la gracia:
+Two different ways for an episode to end, and that is precisely the point:
 
-  * TERMINAL de verdad (accion BAD): no hay futuro. discount real = 0, asi que el
-    bootstrap_value tambien es 0.
-  * TRUNCACION (llegar al horizonte): el episodio se corta por un limite de
-    tiempo, pero el estado si tenia futuro. El discount real es 1, el `rec_discount`
-    que ve la busqueda es 0 (la particula deja de simular) pero el
-    bootstrap_value no es 0: arrastra search_gamma * V(s').
+  * A true TERMINAL (action BAD): there is no future. The real discount is 0, so
+    the bootstrap_value is 0 too.
+  * TRUNCATION (reaching the horizon): the episode is cut off by a time limit, but
+    the state did have a future. The real discount is 1, the `rec_discount` the
+    search sees is 0 (the particle stops simulating) but the bootstrap_value is
+    not 0: it carries search_gamma * V(s').
 
-Confundir esos dos casos es el bug silencioso clasico de RL, y es la razon de que
-el juguete tenga los dos caminos desde el primer dia. Por eso el horizonte
-(`horizon`) es MENOR que el largo del pasillo (`chain_length`): al truncar en la
-casilla `horizon` todavia quedan casillas por delante y V(s') sale distinto de
-cero, que es lo que hace que el test note la diferencia.
+Confusing those two cases is RL's classic silent bug, and it is the reason the toy
+problem has both paths from day one. That is why the horizon (`horizon`) is
+SMALLER than the corridor's length (`chain_length`): when truncating at cell
+`horizon` there are still cells ahead and V(s') comes out non-zero, which is what
+lets the test notice the difference.
 
-Valor analitico: quedan (L - pos) casillas buenas, cada una con recompensa 1, y
-search_gamma es 1, asi que V(pos) = value_scale * (L - pos). Con value_scale = 0
-se obtiene V == 0, que es el caso "sin critico" que usara la demo de CartPole.
+Analytic value: (L - pos) good cells remain, each with reward 1, and search_gamma
+is 1, so V(pos) = value_scale * (L - pos). With value_scale = 0 one gets V == 0,
+which is the "no critic" case the CartPole demo will use.
 
-Este fichero NO importa la busqueda: solo los tipos y el contrato `SearchModel`.
-El entorno no tiene por que saber que existe SPO, igual que en Stoix, donde
-`envs/` no conoce el algoritmo y es `ff_spo.py` quien monta la busqueda encima.
+This file does NOT import the search: only the types and the `SearchModel`
+contract. The environment has no reason to know SPO exists, just as in Stoix,
+where `envs/` does not know the algorithm and it is `ff_spo.py` that builds the
+search on top.
 """
 
 from std.gpu import block_dim, block_idx, thread_idx
@@ -40,12 +41,12 @@ from systems.spo.particles import Particles, StepOutputs
 from systems.spo.search_model import SearchModel
 from systems.spo.spo_types import SPOConfig
 
-# Las dos acciones. El orden importa para los tests: BAD es la 0.
+# The two actions. The order matters for the tests: BAD is 0.
 comptime ACTION_BAD = 0
 comptime ACTION_GOOD = 1
 comptime NUM_ACTIONS = 2
 
-# El pasillo es unidimensional: el estado es solo la posicion.
+# The corridor is one-dimensional: the state is just the position.
 comptime STATE_DIM = 1
 
 comptime TPB_TOY = 32
@@ -53,8 +54,8 @@ comptime TPB_TOY = 32
 
 def toy_value(pos: Scalar[dtype], chain_length: Int,
               value_scale: Scalar[dtype]) -> Scalar[dtype]:
-    """V(pos) = value_scale * casillas que quedan. Funcion de device: la llaman
-    tanto el kernel de valor como el recurrente."""
+    """V(pos) = value_scale * cells remaining. A device function: it is called
+    both by the value kernel and by the recurrent one."""
     remaining = Scalar[dtype](chain_length) - pos
     if remaining < 0.0:
         remaining = 0.0
@@ -63,7 +64,7 @@ def toy_value(pos: Scalar[dtype], chain_length: Int,
 
 def toy_value_kernel(value_out: GlobalF32, state: GlobalF32, n_particles: Int,
                      chain_length: Int, value_scale: Scalar[dtype]):
-    """V(s) de cada particula. Un hilo por particula."""
+    """V(s) of each particle. One thread per particle."""
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n_particles:
         value_out[i] = toy_value(state[i * STATE_DIM], chain_length, value_scale)
@@ -71,12 +72,12 @@ def toy_value_kernel(value_out: GlobalF32, state: GlobalF32, n_particles: Int,
 
 def toy_policy_logits_kernel(logits_out: GlobalF32, state: GlobalF32,
                              n_particles: Int):
-    """El prior en el estado de cada particula.
+    """The prior at each particle's state.
 
-    El prior del juguete es UNIFORME, y eso es deliberado: si la busqueda mejora
-    una politica que no sabe nada, la mejora viene de la busqueda y de nada mas.
-    Logits todos iguales -> softmax uniforme (da igual el valor, el softmax es
-    invariante a sumar una constante).
+    The toy problem's prior is UNIFORM, and that is deliberate: if the search
+    improves a policy that knows nothing, the improvement comes from the search
+    and from nothing else. All logits equal -> uniform softmax (the value does not
+    matter, the softmax is invariant to adding a constant).
     """
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i < n_particles:
@@ -89,18 +90,18 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
                          next_value_out: GlobalF32,
                          n_particles: Int, chain_length: Int, horizon: Int,
                          value_scale: Scalar[dtype], search_gamma: Scalar[dtype]):
-    """Avanza una casilla y pliega gamma. La dinamica del modelo.
+    """Advances one cell and folds in gamma. The model's dynamics.
 
-    Es el equivalente del `recurrent_fn` de Stoix para este modelo, incluyendo las
-    dos lineas que mas cuesta acertar:
+    It is the equivalent of Stoix's `recurrent_fn` for this model, including the
+    two lines that are hardest to get right:
 
         rec_discount    = discount * (1 - truncated)
         bootstrap_value = discount * search_gamma * V(s')
 
-    El estado se actualiza in-place. Las particulas muertas se quedan quietas: no
-    hay auto-reset dentro de la busqueda, porque una particula terminal ya no
-    vuelve a contar (la mascara terminal del nucleo SMC congela su peso) y
-    dejarla quieta hace los tests deterministas.
+    The state is updated in place. Dead particles stay put: there is no auto-reset
+    inside the search, because a terminal particle no longer counts (the SMC
+    core's terminal mask freezes its weight) and leaving it still makes the tests
+    deterministic.
     """
     i = Int(block_dim.x * block_idx.x + thread_idx.x)
     if i >= n_particles:
@@ -109,36 +110,36 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
     pos = state[i * STATE_DIM]
     a = Int(action[i])
 
-    # Primero la dinamica del entorno.
+    # First the environment's dynamics.
     reward = Scalar[dtype](0)
     next_pos = pos
-    discount_real = Scalar[dtype](1)   # el discount "de verdad" del entorno
-    last = False                       # el timestep.last() de Stoix
+    discount_real = Scalar[dtype](1)   # the environment's "real" discount
+    last = False                       # Stoix's timestep.last()
 
     if a == ACTION_GOOD:
         next_pos = pos + 1.0
         reward = 1.0
-        # Truncacion: se acabo el tiempo, pero el estado tenia futuro.
+        # Truncation: time ran out, but the state had a future.
         if next_pos >= Scalar[dtype](horizon):
             last = True
             discount_real = 1.0
     else:
-        # Terminal de verdad: no hay futuro que valorar. reward se queda en 0.
+        # A true terminal: there is no future to value. reward stays at 0.
         last = True
         discount_real = 0.0
 
-    # Y ahora lo mismo que hace Stoix con el timestep: algo esta truncado si
-    # termino pero su discount real no es 0. Un terminal de verdad trae discount
-    # 0, asi que nunca cuenta como truncado.
+    # And now the same thing Stoix does with the timestep: something is truncated
+    # if it ended but its real discount is not 0. A true terminal comes with
+    # discount 0, so it never counts as truncated.
     truncated = last and discount_real != 0.0
 
-    # El discount que ve la busqueda: 0 en cuanto la particula deja de simular,
-    # sea por muerte o por truncacion. El nucleo SMC lo usa para marcar terminal.
-    # Es el `discount * (1 - truncated)` de Stoix.
+    # The discount the search sees: 0 as soon as the particle stops simulating,
+    # whether by death or by truncation. The SMC core uses it to mark terminal. It
+    # is Stoix's `discount * (1 - truncated)`.
     rec_discount = discount_real * (Scalar[dtype](0) if truncated else Scalar[dtype](1))
 
-    # El valor para bootstrapping usa el discount REAL, no el de arriba: por eso
-    # una truncacion conserva su valor y un terminal no.
+    # The bootstrapping value uses the REAL discount, not the one above: that is
+    # why a truncation keeps its value and a terminal does not.
     bootstrap_value = discount_real * search_gamma * toy_value(
         next_pos, chain_length, value_scale)
 
@@ -150,29 +151,29 @@ def toy_recurrent_kernel(state: GlobalF32, action: GlobalI32,
 
 @fieldwise_init
 struct ToyChain(SearchModel, Copyable, Movable):
-    """El pasillo como modelo de busqueda.
+    """The corridor as a search model.
 
-    El struct se queda SIEMPRE en el host: lo que baja a la GPU son sus tres
-    numeros sueltos, dentro de los `enqueue_function` de sus propios metodos. Por
-    eso la busqueda puede ser generica sobre el modelo sin que ningun kernel
-    cruce la frontera (ver el contrato en search_model.mojo).
+    The struct stays on the host ALWAYS: what goes down to the GPU are its three
+    loose numbers, inside the `enqueue_function` calls of its own methods. That is
+    why the search can be generic over the model without any kernel crossing the
+    boundary (see the contract in search_model.mojo).
     """
 
     var chain_length: Int
-    """Cuantas casillas buenas hay en total. Define el valor analitico."""
+    """How many good cells there are in total. It defines the analytic value."""
 
     var horizon: Int
-    """En que casilla se trunca el episodio. Menor que chain_length para que la
-    truncacion deje valor futuro sin recoger."""
+    """At which cell the episode is truncated. Smaller than chain_length so that
+    truncation leaves future value uncollected."""
 
     var value_scale: Scalar[dtype]
-    """1.0 = valor analitico exacto, 0.0 = V==0 (el caso sin critico)."""
+    """1.0 = exact analytic value, 0.0 = V==0 (the no-critic case)."""
 
     def eval_root(self, ctx: DeviceContext, cfg: SPOConfig,
                   root_state: DeviceBuffer[dtype],
                   logits_out: DeviceBuffer[dtype],
                   value_out: DeviceBuffer[dtype]) raises:
-        """El prior y V(s) sobre los estados raiz, uno por entorno."""
+        """The prior and V(s) over the root states, one per environment."""
         blocks = (cfg.num_envs + TPB_TOY - 1) // TPB_TOY
 
         ctx.enqueue_function[toy_policy_logits_kernel, toy_policy_logits_kernel](
@@ -186,18 +187,20 @@ struct ToyChain(SearchModel, Copyable, Movable):
 
     def step(self, ctx: DeviceContext, cfg: SPOConfig, particles: Particles,
              outputs: StepOutputs, step_uniforms: DeviceBuffer[dtype]) raises:
-        """Avanza las P particulas una profundidad.
+        """Advances the P particles by one depth.
 
-        Dos kernels: la dinamica (que ya pliega gamma y la truncacion) y el prior
-        evaluado en el estado NUEVO. Sortear la accion siguiente no es cosa del
-        modelo: de eso se encarga `sample_next_actions`, que es generico.
+        Two kernels: the dynamics (which already folds in gamma and the
+        truncation) and the prior evaluated at the NEW state. Drawing the next
+        action is not the model's business: that is handled by
+        `sample_next_actions`, which is generic.
 
-        No toca `particles.value`, y eso importa: el error TD de la actualizacion
-        de pesos necesita el V(s) viejo, y el nuevo se queda en
-        `outputs.next_value` hasta que update_particles lo mueva.
+        It does not touch `particles.value`, and that matters: the TD error of the
+        weight update needs the old V(s), and the new one stays in
+        `outputs.next_value` until update_particles moves it.
 
-        El juguete es determinista: recibe `step_uniforms` por el contrato pero los
-        ignora (solo los usan los modelos con transicion estocastica).
+        The toy problem is deterministic: it receives `step_uniforms` because of
+        the contract but ignores them (only models with a stochastic transition
+        use them).
         """
         p_total = cfg.num_search_particles()
         blocks = (p_total + TPB_TOY - 1) // TPB_TOY
@@ -215,5 +218,5 @@ struct ToyChain(SearchModel, Copyable, Movable):
 
 
 def default_toy_chain() -> ToyChain:
-    """L=8, truncacion en 4: al truncar quedan 4 casillas, o sea V(4) = 4 != 0."""
+    """L=8, truncation at 4: on truncating 4 cells remain, that is V(4) = 4 != 0."""
     return ToyChain(chain_length=8, horizon=4, value_scale=1.0)
