@@ -1,34 +1,36 @@
-"""Golden del backward del actor: la ecuacion 11 derivada con el autodiff de JAX.
+"""Golden for the actor's backward: equation 11 differentiated with JAX's autodiff.
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_actor_backward.py
 
-Sin autodiff en Mojo, el gradiente se escribe a mano, y a mano uno se equivoca.
-Aqui se deriva la MISMA funcion con `jax.grad`, que es lo que usa Stoix, y se
-comparan los seis tensores de pesos mas el gradiente respecto a los logits.
+With no autodiff in Mojo, the gradient is written by hand, and by hand one makes
+mistakes. Here the SAME function is differentiated with `jax.grad`, which is what
+Stoix uses, and the six weight tensors plus the gradient with respect to the logits
+are compared.
 
-La cadena completa que se deriva es:
+The full chain being differentiated is:
 
     x -> linear -> relu -> linear -> relu -> linear -> logits
-      -> enmascarar con NEG_INF -> log_softmax -> -SUM_a q(a) log pi(a) -> media
+      -> mask with NEG_INF -> log_softmax -> -SUM_a q(a) log pi(a) -> mean
 
-El gradiente respecto a los logits sale analiticamente
+The gradient with respect to the logits comes out analytically as
 
     dL/dz = (pi - q) / batch
 
-y el golden lo guarda por separado para poder localizar un fallo: si `dz` cuadra
-pero `dW1` no, el problema esta en la red; si `dz` ya falla, esta en la perdida.
+and the golden stores it separately so as to localise a fault: if `dz` lines up but
+`dW1` does not, the problem is in the network; if `dz` already fails, it is in the
+loss.
 
-Dos detalles que hay que reproducir exactamente o la comparacion no vale:
+Two details that have to be reproduced exactly or the comparison is worthless:
 
-1. **El enmascarado va DENTRO de lo que se deriva.** La mascara pisa los logits
-   con una constante, asi que el gradiente respecto a esos logits tiene que ser 0
-   y no debe llegar nada a los pesos por esa via. Se implementa con
-   `jnp.where(mask, z, NEG_INF)`, que es lo que hace el kernel.
+1. **The masking goes INSIDE what is differentiated.** The mask overwrites the
+   logits with a constant, so the gradient with respect to those logits has to be 0
+   and nothing must reach the weights that way. It is implemented with
+   `jnp.where(mask, z, NEG_INF)`, which is what the kernel does.
 
-2. **La media es sobre el BATCH**, no sobre batch*acciones. El factor 1/m tiene
-   que ser el mismo en los dos lados o los gradientes difieren en una constante y
-   el test lo achacaria a un bug del backward.
+2. **The mean is over the BATCH**, not over batch*actions. The 1/m factor has to be
+   the same on both sides or the gradients differ by a constant and the test would
+   blame it on a bug in the backward.
 """
 
 import os
@@ -37,8 +39,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-# Sin esto JAX usaria TF32 en las matmuls y el golden saldria MENOS preciso que
-# el kernel que pretende verificar. Nos paso en E1.4 y costo una sesion.
+# Without this JAX would use TF32 for the matmuls and the golden would come out
+# LESS precise than the kernel it is meant to verify. It happened to us in E1.4 and
+# cost a session.
 jax.config.update("jax_default_matmul_precision", "highest")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +51,7 @@ IN_DIM = 18
 NUM_ACTIONS = 9
 NEG_INF = np.float32(np.finfo(np.float32).min)
 
-CASES = [("bw_small", 5, 32), ("bw_big", 40, 64)]   # (nombre, batch, hidden)
+CASES = [("bw_small", 5, 32), ("bw_big", 40, 64)]   # (name, batch, hidden)
 
 rng = np.random.default_rng(7)
 
@@ -59,7 +62,7 @@ def he(fan_in, fan_out):
 
 
 def make_inputs(batch):
-    """Tableros en formato de red, su mascara de legales, y una q coherente."""
+    """Boards in network format, their legal mask, and a consistent q."""
     x = np.zeros((batch, IN_DIM), dtype=np.float32)
     mask = np.zeros((batch, NUM_ACTIONS), dtype=np.float32)
     q = np.zeros((batch, NUM_ACTIONS), dtype=np.float32)
@@ -76,9 +79,9 @@ def make_inputs(batch):
             if free.sum() >= 2:
                 mask[b] = free
                 break
-        # q solo pone masa en las legales, como la que sale de la busqueda. Se
-        # deja alguna legal a cero a proposito: es el caso q(a)=0 con log pi
-        # finito, distinto del de las ilegales.
+        # q only puts mass on the legal ones, like the one coming out of the
+        # search. Some legal cell is deliberately left at zero: it is the q(a)=0
+        # case with a finite log pi, different from the illegal one.
         legal = np.flatnonzero(mask[b])
         w = rng.gamma(1.0, 1.0, size=len(legal))
         if len(legal) > 2:
@@ -88,16 +91,16 @@ def make_inputs(batch):
 
 
 def loss_fn(params, x, mask, q):
-    """La ecuacion 11, tal cual la calcula Mojo."""
+    """Equation 11, exactly as Mojo computes it."""
     w1, b1, w2, b2, w3, b3 = params
     a1 = jnp.maximum(x @ w1 + b1, 0.0)
     a2 = jnp.maximum(a1 @ w2 + b2, 0.0)
     z = a2 @ w3 + b3
     z = jnp.where(mask > 0, z, NEG_INF)
     log_pi = z - jax.scipy.special.logsumexp(z, axis=-1, keepdims=True)
-    # Los terminos con q = 0 se saltan: 0 * (-inf) es NaN. `jnp.where` sobre el
-    # PRODUCTO no basta (el NaN se cuela por el gradiente), asi que se limpia el
-    # log_pi antes de multiplicar.
+    # The terms with q = 0 are skipped: 0 * (-inf) is NaN. A `jnp.where` over the
+    # PRODUCT is not enough (the NaN sneaks in through the gradient), so log_pi is
+    # cleaned before multiplying.
     safe_log_pi = jnp.where(q > 0, log_pi, 0.0)
     per_state = -jnp.sum(q * safe_log_pi, axis=-1)
     return jnp.mean(per_state)
@@ -119,7 +122,7 @@ for name, batch, hidden in CASES:
     loss = float(loss_fn(jp, jx, jm, jq))
     grads = jax.grad(loss_fn)(jp, jx, jm, jq)
 
-    # El gradiente respecto a los logits, por separado.
+    # The gradient with respect to the logits, separately.
     def loss_from_z(z):
         z = jnp.where(jm > 0, z, NEG_INF)
         log_pi = z - jax.scipy.special.logsumexp(z, axis=-1, keepdims=True)
@@ -131,14 +134,14 @@ for name, batch, hidden in CASES:
     z_raw = (a2 @ params[4] + params[5]).astype(np.float32)
     dz = np.asarray(jax.grad(loss_from_z)(jnp.asarray(z_raw)), dtype=np.float32)
 
-    # Y la forma analitica, (pi - q)/batch, para comprobar que coinciden.
+    # And the analytic form, (pi - q)/batch, to check they agree.
     zm = np.where(mask > 0, z_raw, NEG_INF)
     e = np.exp((zm - zm.max(axis=1, keepdims=True)).astype(np.float64))
     pi = (e / e.sum(axis=1, keepdims=True)).astype(np.float32)
     dz_analytic = np.where(mask > 0, (pi - q) / batch, 0.0).astype(np.float32)
     dz_diff = float(np.abs(dz - dz_analytic).max())
     assert dz_diff < 1e-7, f"{name}: (pi-q)/m no coincide con autodiff: {dz_diff}"
-    # Y en las ilegales el autodiff tiene que dar 0 exacto.
+    # And on the illegal ones the autodiff has to give exactly 0.
     assert (np.abs(dz[mask == 0]) == 0.0).all(), \
         f"{name}: el gradiente se cuela por una casilla enmascarada"
 

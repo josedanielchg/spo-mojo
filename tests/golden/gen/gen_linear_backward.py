@@ -1,28 +1,28 @@
-"""Golden de los gradientes de la capa lineal, calculados con JAX (autodiff).
+"""Golden for the linear layer's gradients, computed with JAX (autodiff).
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_linear_backward.py
 
-Por que JAX y no solo diferencias finitas: Stoix no escribe ningun backward a
-mano, deriva con `jax.grad`, y eso da el gradiente EXACTO (autodiff, no una
-aproximacion numerica). Comparar contra el es mas fuerte que comparar contra
-diferencias finitas, que tienen error de truncamiento y de cancelacion.
+Why JAX and not just finite differences: Stoix writes no backward by hand, it
+differentiates with `jax.grad`, and that gives the EXACT gradient (autodiff, not a
+numerical approximation). Comparing against it is stronger than comparing against
+finite differences, which carry truncation and cancellation error.
 
-OJO con la precision: hay que forzar `jax_default_matmul_precision=highest` (ver
-abajo), o JAX calcula las matmuls en TF32 y el golden sale con solo ~3 digitos
-buenos.
+MIND the precision: `jax_default_matmul_precision=highest` has to be forced (see
+below), or JAX computes the matmuls in TF32 and the golden comes out with only ~3
+good digits.
 
-Cuatro casos, elegidos para tapar el punto ciego del primer test (que usaba
-M=3, K=4, N=8: TODO menor que el tile de 16, asi que el bucle de tiles corria una
-sola vez y la ruta multi-tile no se probaba):
+Four cases, chosen to plug the first test's blind spot (it used M=3, K=4, N=8:
+EVERYTHING smaller than the tile of 16, so the tile loop ran exactly once and the
+multi-tile path was never tested):
 
-    caso 0   M=3  K=4  N=8      la red mini de las diferencias finitas
-    caso 1   M=20 K=18 N=64     la PRIMERA capa real del critico, batch ragged
-    caso 2   M=64 K=64 N=64     varios tiles en las tres dimensiones
-    caso 3   M=1  K=1  N=1      degenerado: una sola fila, un solo peso
+    case 0   M=3  K=4  N=8      the mini network of the finite differences
+    case 1   M=20 K=18 N=64     the critic's FIRST real layer, ragged batch
+    case 2   M=64 K=64 N=64     several tiles across all three dimensions
+    case 3   M=1  K=1  N=1      degenerate: a single row, a single weight
 
-Se guarda tambien `dy` (el gradiente que entra) porque el backward lo necesita
-como input, y `y` para poder comprobar de paso el forward con las mismas shapes.
+`dy` (the incoming gradient) is stored too because the backward needs it as input,
+and `y` so that the forward can be checked along the way with the same shapes.
 """
 
 import os
@@ -31,12 +31,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-# CRITICO: por defecto JAX usa TF32 en GPUs NVIDIA para las matmuls, que solo
-# tiene 10 bits de mantisa (~3 digitos decimales). Un golden generado asi es
-# MENOS preciso que el kernel que pretende verificar: medido, el error de TF32
-# contra float64 es 1.3e-2, mientras que float32 de verdad da 2.3e-6. Sin esta
-# linea, el test falla y parece un bug del backward cuando el problema esta en la
-# referencia.
+# CRITICAL: by default JAX uses TF32 on NVIDIA GPUs for matmuls, which has only 10
+# mantissa bits (~3 decimal digits). A golden generated that way is LESS precise
+# than the kernel it is meant to verify: measured, TF32's error against float64 is
+# 1.3e-2, whereas true float32 gives 2.3e-6. Without this line, the test fails and
+# looks like a bug in the backward when the problem is in the reference.
 jax.config.update("jax_default_matmul_precision", "highest")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,16 +55,16 @@ for i, (M, K, N) in enumerate(CASES):
     x = rng.normal(0.0, 1.0, size=(M, K)).astype(np.float32)
     w = rng.normal(0.0, 1.0 / np.sqrt(K), size=(K, N)).astype(np.float32)
     b = rng.normal(0.0, 0.1, size=(N,)).astype(np.float32)
-    # dy con valores TODOS distintos: con un dy uniforme, confundir una traspuesta
-    # o reducir por el eje equivocado puede dar el mismo numero por casualidad.
+    # dy with ALL different values: with a uniform dy, confusing a transpose or
+    # reducing along the wrong axis can give the same number by coincidence.
     g = rng.normal(0.0, 1.0, size=(M, N)).astype(np.float32)
 
     def loss(x_, w_, b_):
-        # L = suma(g * y) tiene exactamente dL/dy = g, que es lo que se le pasa
-        # al backward de Mojo. Asi los dos calculan lo mismo.
+        # L = sum(g * y) has exactly dL/dy = g, which is what gets passed to Mojo's
+        # backward. That way both compute the same thing.
         return jnp.sum(g * (x_ @ w_ + b_))
 
-    # Autodiff exacto respecto a los tres argumentos.
+    # Exact autodiff with respect to all three arguments.
     dx, dw, db = jax.grad(loss, argnums=(0, 1, 2))(
         jnp.asarray(x), jnp.asarray(w), jnp.asarray(b))
     y = np.asarray(jnp.asarray(x) @ jnp.asarray(w) + jnp.asarray(b), dtype=np.float32)

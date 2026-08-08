@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Corre todos los tests/test_*.mojo. Sale con 1 si alguno falla.
+# Runs every tests/test_*.mojo. Exits with 1 if any of them fails.
 #
-# Va con ASSERTS=1 a proposito: los debug_assert de las precondiciones
-# (block_dim == TPB, row_size <= TPB...) solo existen si se compilan con ellos,
-# y este es el sitio donde quiero que existan.
+# It goes with ASSERTS=1 on purpose: the precondition debug_asserts
+# (block_dim == TPB, row_size <= TPB...) only exist if compiled in, and this is
+# the place where I want them to exist.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

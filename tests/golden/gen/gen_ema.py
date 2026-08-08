@@ -1,19 +1,19 @@
-"""Golden de la EMA de los target networks, con OPTAX (el de Stoix).
+"""Golden for the target networks' EMA, with OPTAX (Stoix's).
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_ema.py
 
-Stoix usa `optax.incremental_update(online, target, tau)` con tau = 0.005
-(verificado en ff_spo.py, lineas 1517-1522). Se genera con la libreria de verdad
-en vez de reimplementar la formula, para que el test compruebe que hacemos lo
-mismo y no que sabemos copiar una ecuacion.
+Stoix uses `optax.incremental_update(online, target, tau)` with tau = 0.005
+(verified in ff_spo.py, lines 1517-1522). It is generated with the real library
+rather than reimplementing the formula, so that the test checks that we do the
+same thing and not that we can copy an equation.
 
-Tamano a proposito MAYOR que un bloque (1000 > 256 hilos): el test anterior solo
-usaba 4 y 5 elementos, o sea un unico bloque, y la ruta multi-bloque no se
-ejercitaba. Es el mismo punto ciego que aparecio en E1.4.
+The size is deliberately LARGER than one block (1000 > 256 threads): the previous
+test only used 4 and 5 elements, that is, a single block, and the multi-block path
+was not exercised. It is the same blind spot that turned up in E1.4.
 
-Diez pasos, para ver la convergencia lenta: tras k pasos el target vale
-1 - (1-tau)^k del camino hacia el online.
+Ten steps, to see the slow convergence: after k steps the target has covered
+1 - (1-tau)^k of the way towards the online one.
 """
 
 import os
@@ -25,8 +25,8 @@ import optax
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.abspath(os.path.join(HERE, ".."))
 
-N = 1000          # > TPB_OPT (256): varios bloques
-TAU = 0.005       # config de Stoix
+N = 1000          # > TPB_OPT (256): several blocks
+TAU = 0.005       # Stoix's config
 STEPS = 10
 
 rng = np.random.default_rng(67)

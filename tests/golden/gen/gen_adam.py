@@ -1,33 +1,33 @@
-"""Golden de Adam + clip por norma global, generado con OPTAX (el de Stoix).
+"""Golden for Adam + global-norm clip, generated with OPTAX (Stoix's).
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_adam.py
 
-Se usa la libreria de verdad, no una reimplementacion de las formulas: asi el
-golden verifica que nuestro kernel hace lo MISMO que hara Stoix, incluidos los
-detalles que se olvidan (la correccion de sesgo de los dos momentos, y el orden
-exacto de las operaciones).
+The real library is used, not a reimplementation of the formulas: that way the
+golden verifies that our kernel does the SAME thing Stoix will do, including the
+details that get forgotten (the bias correction of both moments, and the exact
+order of the operations).
 
-La configuracion es la de Stoix, verificada en ff_spo.py:
+The configuration is Stoix's, verified in ff_spo.py:
 
     optax.chain(
-        optax.clip_by_global_norm(max_grad_norm),   # PRIMERO el clip
-        optax.adam(lr, eps=1e-5),                   # y DESPUES adam
+        optax.clip_by_global_norm(max_grad_norm),   # the clip FIRST
+        optax.adam(lr, eps=1e-5),                   # and adam AFTERWARDS
     )
 
-Ojo con eps: Stoix pone 1e-5 explicitamente, no el 1e-8 que trae optax por
-defecto. Con gradientes pequenos la diferencia se nota.
+Mind eps: Stoix sets 1e-5 explicitly, not the 1e-8 optax ships by default. With
+small gradients the difference shows.
 
-La norma es GLOBAL: se suma sobre TODOS los tensores juntos, no tensor a tensor.
-Ese es el error tipico al reimplementarlo.
+The norm is GLOBAL: it is summed over ALL the tensors together, not tensor by
+tensor. That is the typical mistake when reimplementing it.
 
-Dos casos, para cubrir las dos ramas del clip:
-    caso 0   gradientes pequenos -> la norma no llega al limite, el clip no actua
-    caso 1   gradientes grandes  -> el clip SI recorta
+Two cases, to cover the clip's two branches:
+    case 0   small gradients -> the norm does not reach the limit, the clip does nothing
+    case 1   large gradients -> the clip DOES bite
 
-Tres pasos en cada uno, porque la correccion de sesgo de Adam depende del numero
-de paso: un solo paso no distinguiria una implementacion con correccion de una sin
-ella.
+Three steps in each, because Adam's bias correction depends on the step number: a
+single step would not tell an implementation with the correction from one without
+it.
 """
 
 import os
@@ -42,9 +42,9 @@ jax.config.update("jax_default_matmul_precision", "highest")
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.abspath(os.path.join(HERE, ".."))
 
-# Una red mini con la misma FORMA que el critico (6 tensores), para que el test
-# ejercite el caso real de una norma global sobre varios tensores de tamanos
-# distintos.
+# A mini network with the same SHAPE as the critic (6 tensors), so that the test
+# exercises the real case of a global norm over several tensors of different
+# sizes.
 IN_DIM, HIDDEN, OUT_DIM = 4, 5, 1
 SHAPES = [
     ("w1", (IN_DIM, HIDDEN)),
@@ -55,9 +55,9 @@ SHAPES = [
     ("b3", (OUT_DIM,)),
 ]
 
-LR = 3e-4          # config de Stoix: actor_lr = critic_lr = 3e-4
-MAX_NORM = 0.5     # config de Stoix: max_grad_norm = 0.5
-EPS = 1e-5         # Stoix lo pone explicito
+LR = 3e-4          # Stoix's config: actor_lr = critic_lr = 3e-4
+MAX_NORM = 0.5     # Stoix's config: max_grad_norm = 0.5
+EPS = 1e-5         # Stoix sets it explicitly
 STEPS = 3
 
 rng = np.random.default_rng(41)
@@ -66,9 +66,9 @@ lines = []
 for case, grad_scale in enumerate([0.05, 5.0]):
     params = {name: rng.normal(0, 0.3, shape).astype(np.float32)
               for name, shape in SHAPES}
-    # Gradientes FIJOS a lo largo de los tres pasos: asi lo unico que cambia
-    # entre pasos es el estado interno de Adam, que es justo lo que se quiere
-    # verificar.
+    # Gradients held FIXED across the three steps: that way the only thing that
+    # changes between steps is Adam's internal state, which is exactly what we
+    # want to verify.
     grads = {name: (rng.normal(0, grad_scale, shape)).astype(np.float32)
              for name, shape in SHAPES}
 

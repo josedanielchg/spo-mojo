@@ -1,33 +1,35 @@
-"""Golden de la GAE truncada, con la funcion REAL de Stoix.
+"""Golden for the truncated GAE, with Stoix's REAL function.
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_gae.py
 
-Se importa `batch_truncated_generalized_advantage_estimation` de Stoix en vez de
-reimplementar la formula: asi el golden verifica que calculamos lo MISMO que la
-referencia, incluidos los detalles que se escapan al leer el paper.
+`batch_truncated_generalized_advantage_estimation` is imported from Stoix rather
+than reimplementing the formula: that way the golden verifies that we compute the
+SAME thing as the reference, including the details that slip past when reading the
+paper.
 
-Que hace, en corto:
+What it does, in short:
 
-    delta_t = r + gamma*v_t - v_tm1                (error TD de un paso)
-    acc     = delta + gamma*lambda*acc*(1 - trunc) (acumulado hacia ATRAS)
-    target  = v_tm1 + acc                          (lo que aprende el critico)
+    delta_t = r + gamma*v_t - v_tm1                (one-step TD error)
+    acc     = delta + gamma*lambda*acc*(1 - trunc) (accumulated BACKWARDS)
+    target  = v_tm1 + acc                          (what the critic learns)
 
-El detalle fino esta en el comentario del propio Stoix: en un punto de truncacion
-el acumulador se resetea PERO el delta de ese paso si se usa. O sea que truncar no
-borra la informacion del paso, corta la propagacion hacia atras.
+The fine detail is in Stoix's own comment: at a truncation point the accumulator
+resets BUT that step's delta is still used. That is, truncating does not erase the
+step's information, it cuts the backwards propagation.
 
-Como lo llama SPO (ff_spo.py, _critic_loss_fn):
+How SPO calls it (ff_spo.py, _critic_loss_fn):
     discount_t = (1 - done) * gamma
-    v_tm1      = critico TARGET sobre las observaciones
-    v_t        = critico TARGET sobre las bootstrap_obs
+    v_tm1      = TARGET critic over the observations
+    v_t        = TARGET critic over the bootstrap_obs
     truncation = seq.truncated
 
-Tres casos:
-    caso 0   sin truncacion, con episodios que terminan (done) en medio
-    caso 1   con truncacion en varios sitios: la rama que casi nunca se prueba
-    caso 2   como el tres en raya de verdad: partidas cortas (3-5 pasos) que
-             siempre terminan solas, nunca truncadas
+Three cases:
+    case 0   no truncation, with episodes that end (done) midway
+    case 1   with truncation in several places: the branch that almost never gets
+             tested
+    case 2   like real tic-tac-toe: short games (3-5 steps) that always end on
+             their own, never truncated
 """
 
 import os
@@ -41,13 +43,13 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.abspath(os.path.join(HERE, ".."))
-# La raiz del repo de Stoix, para importar su implementacion de verdad.
+# The root of the Stoix repo, in order to import its real implementation.
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "..")))
 
 from stoix.utils.multistep import batch_truncated_generalized_advantage_estimation
 
-GAMMA = 0.99        # config de Stoix
-LAMBDA = 0.95       # config de Stoix
+GAMMA = 0.99        # Stoix's config
+LAMBDA = 0.95       # Stoix's config
 rng = np.random.default_rng(53)
 lines = []
 
@@ -63,8 +65,8 @@ def make_case(case, b, t, done_prob, trunc_prob, ttt_like=False):
     v_t = rng.normal(0, 1, (b, t)).astype(np.float32)
 
     if ttt_like:
-        # Tres en raya: la partida acaba cada 3-5 pasos y la recompensa solo llega
-        # al final (1 / 0.5 / 0). Entre medias, cero.
+        # Tic-tac-toe: the game ends every 3-5 steps and the reward only arrives
+        # at the end (1 / 0.5 / 0). In between, zero.
         done = np.zeros((b, t), dtype=np.float32)
         r = np.zeros((b, t), dtype=np.float32)
         for i in range(b):
@@ -79,8 +81,8 @@ def make_case(case, b, t, done_prob, trunc_prob, ttt_like=False):
     else:
         done = (rng.random((b, t)) < done_prob).astype(np.float32)
         trunc = (rng.random((b, t)) < trunc_prob).astype(np.float32)
-        # Un paso no puede ser terminal y truncado a la vez: son cosas distintas
-        # (uno acabo de verdad, al otro lo cortaron).
+        # A step cannot be terminal and truncated at once: they are different
+        # things (one really ended, the other was cut off).
         trunc = trunc * (1.0 - done)
 
     discount = ((1.0 - done) * GAMMA).astype(np.float32)

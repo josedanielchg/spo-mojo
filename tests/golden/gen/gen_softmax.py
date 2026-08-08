@@ -1,21 +1,21 @@
-"""Genera el golden de softmax/logsumexp por filas.
+"""Generates the golden for row-wise softmax/logsumexp.
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_softmax.py
 
-Escribe:
-    softmax_in.bin    (rows x cols, float32 crudo)
-    softmax_out.bin   (rows x cols, softmax por filas)
+It writes:
+    softmax_in.bin    (rows x cols, raw float32)
+    softmax_out.bin   (rows x cols, row-wise softmax)
     logsumexp_out.bin (rows, float32)
-    logsoftmax_out.bin(rows x cols, log softmax por filas)
-    softmax.txt       (shapes y que hay en cada fila)
+    logsoftmax_out.bin(rows x cols, row-wise log softmax)
+    softmax.txt       (shapes and what is in each row)
 
-Y lo mismo para una fila ANCHA (wide_*), con mas columnas que hilos por bloque.
-Eso importa: los kernels recorren la fila con `i += TPB`, y con cols <= TPB ese
-bucle da una sola vuelta. O sea que hasta ahora la ruta de striding no se habia
-ejecutado NUNCA, ni en softmax_rows (que existe desde la fase 2) ni en el
-log_softmax_rows nuevo. WIDE_COLS es ademas ragged (no multiplo de 32) para pisar
-la ultima vuelta parcial.
+And the same for a WIDE row (wide_*), with more columns than threads per block.
+That matters: the kernels walk the row with `i += TPB`, and with cols <= TPB that
+loop goes round exactly once. That is, until now the striding path had NEVER been
+executed, neither in softmax_rows (which has existed since phase 2) nor in the new
+log_softmax_rows. WIDE_COLS is also ragged (not a multiple of 32) so as to hit the
+last partial turn.
 """
 
 import os
@@ -28,26 +28,26 @@ OUT = os.path.abspath(os.path.join(HERE, ".."))
 ROWS = 6
 COLS = 16
 WIDE_ROWS = 4
-WIDE_COLS = 100      # > TPB=32 y no multiplo: 3 vueltas completas y una parcial
+WIDE_COLS = 100      # > TPB=32 and not a multiple: 3 full turns and a partial one
 
 rng = np.random.default_rng(0)
 x = rng.normal(0.0, 2.0, size=(ROWS, COLS)).astype(np.float32)
 
-# Casos que quiero forzar, no dejar al azar:
-x[0, :] = 0.0            # fila uniforme -> softmax = 1/COLS
-x[1, :] = 1000.0         # todo enorme -> sin el truco del max esto es inf/inf
-x[2, 0] = 1000.0         # un solo logit enorme -> softmax casi one-hot
-x[3, :] = -1000.0        # todo muy negativo -> exp() satura a 0 sin el truco
+# Cases I want to force, not leave to chance:
+x[0, :] = 0.0            # uniform row -> softmax = 1/COLS
+x[1, :] = 1000.0         # all huge -> without the max trick this is inf/inf
+x[2, 0] = 1000.0         # a single huge logit -> nearly one-hot softmax
+x[3, :] = -1000.0        # all very negative -> exp() saturates to 0 without the trick
 
-# Softmax estable, igual que lo hara el kernel: restar el max de la fila.
+# Stable softmax, exactly as the kernel will do it: subtract the row's max.
 m = x.max(axis=1, keepdims=True)
 e = np.exp(x - m)
 s = e.sum(axis=1, keepdims=True)
 softmax = (e / s).astype(np.float32)
 logsumexp = (m[:, 0] + np.log(s[:, 0])).astype(np.float32)
-# log softmax calculado DIRECTO (no como log del softmax): un logit muy bajo
-# desborda el softmax a 0 y su log seria -inf aunque el valor exacto fuera
-# representable. La fila 3 (todo -1000) y la 2 (un 1000) lo pisan.
+# log softmax computed DIRECTLY (not as the log of the softmax): a very low logit
+# underflows the softmax to 0 and its log would be -inf even though the exact value
+# was representable. Row 3 (all -1000) and row 2 (one 1000) hit that.
 logsoftmax = ((x - m) - np.log(s)).astype(np.float32)
 
 x.tofile(os.path.join(OUT, "softmax_in.bin"))
@@ -55,12 +55,12 @@ softmax.tofile(os.path.join(OUT, "softmax_out.bin"))
 logsumexp.tofile(os.path.join(OUT, "logsumexp_out.bin"))
 logsoftmax.tofile(os.path.join(OUT, "logsoftmax_out.bin"))
 
-# --- la fila ancha: la ruta de striding ---
+# --- the wide row: the striding path ---
 xw = rng.normal(0.0, 2.0, size=(WIDE_ROWS, WIDE_COLS)).astype(np.float32)
-xw[0, :] = 0.0                    # uniforme sobre 100 columnas
-xw[1, WIDE_COLS - 1] = 500.0      # el maximo en la ULTIMA columna: si el striding
-                                  # no llegara al final, el max saldria mal
-xw[2, :] = -800.0                 # underflow sin el truco del max
+xw[0, :] = 0.0                    # uniform over 100 columns
+xw[1, WIDE_COLS - 1] = 500.0      # the maximum in the LAST column: if the striding
+                                  # did not reach the end, the max would be wrong
+xw[2, :] = -800.0                 # underflow without the max trick
 mw = xw.max(axis=1, keepdims=True)
 ew = np.exp(xw - mw)
 sw = ew.sum(axis=1, keepdims=True)

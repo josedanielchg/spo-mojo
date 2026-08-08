@@ -1,18 +1,18 @@
-"""Genera el golden de la capa lineal y = x @ W + b.
+"""Generates the golden for the linear layer y = x @ W + b.
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_linear.py
 
-Tres casos, elegidos a proposito y no al azar:
+Three cases, chosen on purpose and not at random:
 
-  caso 0   (4, 18) @ (18, 64)   la PRIMERA capa real del critico: 18 entradas
-                                (los dos planos del tablero) y 64 ocultas
-  caso 1   (64, 64) @ (64, 64)  una capa oculta con batch grande: varios tiles
-                                en las tres dimensiones
-  caso 2   (7, 5) @ (5, 3)      ragged a proposito: ninguna dimension es multiplo
-                                del tile, asi que ejercita todos los guards
+  case 0   (4, 18) @ (18, 64)   the critic's FIRST real layer: 18 inputs (the
+                                board's two planes) and 64 hidden
+  case 1   (64, 64) @ (64, 64)  a hidden layer with a large batch: several tiles
+                                across all three dimensions
+  case 2   (7, 5) @ (5, 3)      deliberately ragged: no dimension is a multiple of
+                                the tile, so it exercises every guard
 
-Escribe un .bin por tensor y un .txt con las shapes.
+It writes one .bin per tensor and a .txt with the shapes.
 """
 
 import os
@@ -32,14 +32,14 @@ rng = np.random.default_rng(7)
 lines = []
 
 for i, (M, K, N) in enumerate(CASES):
-    # Escala tipo inicializacion de red: pequena, para que la suma de K terminos
-    # no se dispare y el error relativo sea comparable entre casos.
+    # Network-initialisation-style scale: small, so that the sum of K terms does
+    # not blow up and the relative error stays comparable across cases.
     x = rng.normal(0.0, 1.0, size=(M, K)).astype(np.float32)
     w = rng.normal(0.0, 1.0 / np.sqrt(K), size=(K, N)).astype(np.float32)
     b = rng.normal(0.0, 0.1, size=(N,)).astype(np.float32)
 
-    # La referencia. float32 en todo el camino para comparar con el kernel en
-    # las mismas condiciones (numpy acumularia en float64 si se le deja).
+    # The reference. float32 all the way, to compare against the kernel under the
+    # same conditions (numpy would accumulate in float64 if left to itself).
     y = (x @ w + b).astype(np.float32)
 
     x.tofile(os.path.join(OUT, f"linear{i}_x.bin"))

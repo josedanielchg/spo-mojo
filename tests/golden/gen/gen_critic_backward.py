@@ -1,18 +1,19 @@
-"""Golden de los gradientes del MLP del critico, con JAX (autodiff).
+"""Golden for the critic MLP's gradients, with JAX (autodiff).
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_critic_backward.py
 
-La red es 18 -> H -> H -> 1 con ReLU, y la perdida la MISMA que usa Stoix para su
-critico: `rlax.l2_loss(pred, target).mean()`, o sea media de 0.5*(V - target)^2.
+The network is 18 -> H -> H -> 1 with ReLU, and the loss is the SAME one Stoix uses
+for its critic: `rlax.l2_loss(pred, target).mean()`, that is, the mean of
+0.5*(V - target)^2.
 
-Aqui el gradiente ya no es trivial: tiene que atravesar dos ReLU. Eso es lo nuevo
-respecto a E1.4 y lo que de verdad se quiere verificar — que la mascara del ReLU
-se aplica en el sitio correcto y con la activacion correcta.
+Here the gradient is no longer trivial: it has to pass through two ReLUs. That is
+what is new with respect to E1.4 and what we really want to verify -- that the
+ReLU's mask is applied in the right place and with the right activation.
 
-Se guardan tambien las activaciones (a1, a2) y V, para que el test pueda comprobar
-que su forward coincide antes de comparar gradientes: si el forward ya difiere, el
-gradiente va a diferir por razones que no son el backward.
+The activations (a1, a2) and V are stored too, so that the test can check its
+forward matches before comparing gradients: if the forward already differs, the
+gradient is going to differ for reasons that are not the backward.
 """
 
 import os
@@ -21,9 +22,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-# Sin esto JAX usa TF32 en GPU (10 bits de mantisa) y el golden sale con ~3
-# digitos buenos, menos preciso que el kernel que verifica. Medido en E1.4:
-# 1.3e-2 de error con TF32 contra 2.3e-6 con float32 de verdad.
+# Without this JAX uses TF32 on the GPU (10 mantissa bits) and the golden comes out
+# with ~3 good digits, less precise than the kernel it verifies. Measured in E1.4:
+# 1.3e-2 of error with TF32 against 2.3e-6 with true float32.
 jax.config.update("jax_default_matmul_precision", "highest")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,8 +32,8 @@ OUT = os.path.abspath(os.path.join(HERE, ".."))
 
 IN_DIM = 18
 OUT_DIM = 1
-# Dos anchuras y dos batches. El batch 20 es ragged (no multiplo del tile de 16) y
-# H=64 da varios tiles: entre los dos casos se pisan todas las rutas.
+# Two widths and two batches. Batch 20 is ragged (not a multiple of the tile of 16)
+# and H=64 gives several tiles: between the two cases every path gets hit.
 CASES = [(32, 20), (64, 64)]
 
 rng = np.random.default_rng(31)
@@ -48,7 +49,7 @@ for hidden, m in CASES:
     w3 = rng.normal(0, 1 / np.sqrt(hidden), (hidden, OUT_DIM)).astype(np.float32)
     b3 = rng.normal(0, 0.1, (OUT_DIM,)).astype(np.float32)
 
-    # Tableros con la pinta de los de verdad: dos planos 0/1.
+    # Boards that look like the real ones: two 0/1 planes.
     x = np.zeros((m, IN_DIM), dtype=np.float32)
     for r in range(m):
         for c in range(9):
@@ -66,7 +67,7 @@ for hidden, m in CASES:
 
     def loss(p, x_, t_):
         _, _, v = forward(p, x_)
-        # rlax.l2_loss(pred, target) = 0.5*(pred-target)^2, y luego .mean()
+        # rlax.l2_loss(pred, target) = 0.5*(pred-target)^2, and then .mean()
         return jnp.mean(0.5 * (v - t_) ** 2)
 
     params = [jnp.asarray(a) for a in (w1, b1, w2, b2, w3, b3)]

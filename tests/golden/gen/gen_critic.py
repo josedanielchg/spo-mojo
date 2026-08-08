@@ -1,24 +1,24 @@
-"""Genera el golden del MLP del critico: 18 -> H -> H -> 1 con ReLU.
+"""Generates the golden for the critic's MLP: 18 -> H -> H -> 1 with ReLU.
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_critic.py
 
-TRES tamanos de red, y esa es una decision con historia: el tamano no lo fija ni
-el paper ni Stoix. Stoix usa `layer_sizes: [256, 256]` en su config de MLP, y el
-paper usa ResNets grandes (canales 256-512) para SUS entornos, que son mucho mas
-duros (Sokoban, Rubik, Brax). Tres en raya tiene 18 entradas y ~5500 posiciones
-validas, asi que "¿cuanta red hace falta?" se responde midiendo:
+THREE network sizes, and that is a decision with a history: the size is fixed
+neither by the paper nor by Stoix. Stoix uses `layer_sizes: [256, 256]` in its MLP
+config, and the paper uses large ResNets (256-512 channels) for ITS environments,
+which are far harder (Sokoban, Rubik, Brax). Tic-tac-toe has 18 inputs and ~5500
+valid positions, so "how much network is needed?" gets answered by measuring:
 
-    H = 32    1697 pesos
-    H = 64    5441 pesos
-    H = 256  70913 pesos    (el tamano de Stoix)
+    H = 32    1697 weights
+    H = 64    5441 weights
+    H = 256  70913 weights    (Stoix's size)
 
-Dos batches por arquitectura:
-    M = 5    ragged (no es multiplo del tile de 16): pisa los guards
-    M = 64   varios tiles en la dimension del batch
+Two batches per architecture:
+    M = 5    ragged (not a multiple of the tile of 16): it hits the guards
+    M = 64   several tiles along the batch dimension
 
-Se guardan TAMBIEN las activaciones intermedias (a1, a2), no solo la salida: si el
-test falla, comparar capa por capa dice en cual se rompio.
+The intermediate activations (a1, a2) are stored TOO, not just the output: if the
+test fails, comparing layer by layer says which one broke.
 """
 
 import os
@@ -37,19 +37,19 @@ rng = np.random.default_rng(11)
 
 
 def he_init(fan_in, fan_out):
-    """Inicializacion tipo He: escala 1/sqrt(fan_in) para que las activaciones no
-    crezcan ni se apaguen al apilar capas con ReLU."""
+    """He-style initialisation: scale 1/sqrt(fan_in) so that the activations
+    neither grow nor die out when stacking ReLU layers."""
     return rng.normal(0.0, 1.0 / np.sqrt(fan_in),
                       size=(fan_in, fan_out)).astype(np.float32)
 
 
 def make_boards(m):
-    """m tableros con la pinta de los de verdad: dos planos 0/1, y nunca la misma
-    casilla en los dos (no puede ser mia y suya a la vez)."""
+    """m boards that look like the real ones: two 0/1 planes, and never the same
+    cell in both (it cannot be mine and theirs at once)."""
     x = np.zeros((m, IN_DIM), dtype=np.float32)
     for r in range(m):
         for c in range(9):
-            who = rng.integers(0, 3)      # 0 vacia, 1 mia, 2 suya
+            who = rng.integers(0, 3)      # 0 empty, 1 mine, 2 theirs
             if who == 1:
                 x[r, c] = 1.0
             elif who == 2:
@@ -85,9 +85,9 @@ for hidden in HIDDENS:
         a2.tofile(os.path.join(OUT, f"critic_{tag}_a2_{m}.bin"))
         v.tofile(os.path.join(OUT, f"critic_{tag}_v{m}.bin"))
 
-        # Fraccion de neuronas que el ReLU deja a cero. ~50% es lo sano con esta
-        # inicializacion; 0% significaria que la red es efectivamente lineal y
-        # ~100% que esta muerta (gradiente cero).
+        # Fraction of neurons the ReLU leaves at zero. ~50% is healthy with this
+        # initialisation; 0% would mean the network is effectively linear and
+        # ~100% that it is dead (zero gradient).
         dead1 = float((a1 == 0).mean())
         dead2 = float((a2 == 0).mean())
         lines.append(f"hidden {hidden} batch {m}  pesos {n_params}  "

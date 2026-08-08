@@ -1,26 +1,27 @@
-"""Genera el golden del MLP del ACTOR: 18 -> H -> H -> 9, con enmascarado.
+"""Generates the golden for the ACTOR's MLP: 18 -> H -> H -> 9, with masking.
 
-Correr desde la raiz de mojo_spo:
+Run from mojo_spo's root:
     ../.venv/bin/python tests/golden/gen/gen_actor.py
 
-La red es la MISMA que la del critico salvo en la salida (9 logits en vez de 1
-valor), asi que el forward reutiliza el codigo ya verificado en E1.3. Lo que este
-golden anade de verdad es la parte nueva: **el enmascarado de casillas ilegales**.
+The network is the SAME as the critic's except for the output (9 logits instead of
+1 value), so the forward reuses the code already verified in E1.3. What this golden
+really adds is the new part: **the masking of illegal cells**.
 
-Por que el enmascarado necesita golden propio y no basta con "ya lo probamos en el
-prior": en el prior de la busqueda los logits legales valian todos 0, asi que
-enmascarar y luego hacer softmax daba una uniforme y cualquier error de indexado se
-habria visto igual de uniforme. Aqui los logits son numeros distintos entre si
-salidos de una red, asi que un fallo de indexado (tapar la casilla equivocada)
-cambia la distribucion de forma detectable.
+Why the masking needs its own golden and "we already tested it in the prior" is not
+enough: in the search's prior the legal logits were all 0, so masking and then
+taking a softmax gave a uniform, and any indexing error would have looked just as
+uniform. Here the logits are numbers different from one another coming out of a
+network, so an indexing fault (masking the wrong cell) changes the distribution
+detectably.
 
-Se usa NEG_INF = el float32 finito mas negativo, no -inf, por la misma razon que
-`ttt_prior_logits_kernel`: una fila entera tapada (tablero lleno) daria nan con
--inf, y con MIN_FINITE degenera a uniforme, que es inofensivo. El golden reproduce
-esa eleccion para que el test compare contra lo que el kernel hace de verdad.
+NEG_INF = the most negative finite float32 is used, not -inf, for the same reason
+as `ttt_prior_logits_kernel`: a whole masked row (full board) would give nan with
+-inf, and with MIN_FINITE it degenerates to uniform, which is harmless. The golden
+reproduces that choice so that the test compares against what the kernel really
+does.
 
-Tres anchos, como en el critico: el tamano de la red no lo fija ni el paper ni
-Stoix, asi que se mide.
+Three widths, as in the critic: the network's size is fixed neither by the paper
+nor by Stoix, so it gets measured.
 """
 
 import os
@@ -35,29 +36,28 @@ OUT_DIM = 9
 HIDDENS = [32, 64, 256]
 BATCHES = [5, 64]
 
-# El mismo valor que usa envs/tictactoe.mojo: el float32 finito mas negativo.
+# The same value envs/tictactoe.mojo uses: the most negative finite float32.
 NEG_INF = np.float32(np.finfo(np.float32).min)
 
 rng = np.random.default_rng(29)
 
 
 def he_init(fan_in, fan_out):
-    """Inicializacion tipo He, igual que en el critico."""
+    """He-style initialisation, same as in the critic."""
     return rng.normal(0.0, 1.0 / np.sqrt(fan_in),
                       size=(fan_in, fan_out)).astype(np.float32)
 
 
 def make_boards(m):
-    """m tableros en formato de red (dos planos 0/1) y su mascara de legales.
+    """m boards in network format (two 0/1 planes) and their legal mask.
 
-    La mascara sale del MISMO tablero: una casilla es legal si no esta en ninguno
-    de los dos planos. Asi el test comprueba de paso que la mascara y la
-    observacion son coherentes, que es justo lo que se romperia si alguien tocara
-    la codificacion.
+    The mask comes from the SAME board: a cell is legal if it is in neither plane.
+    That way the test also checks that the mask and the observation are consistent,
+    which is exactly what would break if somebody touched the encoding.
 
-    Se fuerza que ninguna fila quede sin casillas legales: un tablero lleno es una
-    partida terminada y al actor no se le pregunta ahi. El caso degenerado se
-    prueba aparte, a mano, en el test.
+    It is forced that no row is left without legal cells: a full board is a
+    finished game and the actor does not get asked there. The degenerate case is
+    tested separately, by hand, in the test.
     """
     x = np.zeros((m, IN_DIM), dtype=np.float32)
     mask = np.zeros((m, OUT_DIM), dtype=np.float32)
@@ -65,7 +65,7 @@ def make_boards(m):
         while True:
             x[r] = 0.0
             for c in range(9):
-                who = rng.integers(0, 3)      # 0 vacia, 1 mia, 2 suya
+                who = rng.integers(0, 3)      # 0 empty, 1 mine, 2 theirs
                 if who == 1:
                     x[r, c] = 1.0
                 elif who == 2:
@@ -78,11 +78,12 @@ def make_boards(m):
 
 
 def masked_softmax(logits, mask):
-    """softmax sobre los logits con las casillas ilegales puestas a NEG_INF.
+    """softmax over the logits with the illegal cells set to NEG_INF.
 
-    Se resta el maximo por fila antes de exponenciar (softmax estable), que es lo
-    que hace `softmax_rows` en Mojo. Importa reproducirlo: con NEG_INF sin restar
-    el maximo, exp() desbordaria a 0 en toda la fila.
+    The row's maximum is subtracted before exponentiating (stable softmax), which
+    is what `softmax_rows` does in Mojo. Reproducing it matters: with NEG_INF and
+    without subtracting the maximum, exp() would underflow to 0 across the whole
+    row.
     """
     masked = np.where(mask > 0, logits, NEG_INF).astype(np.float32)
     shifted = masked - masked.max(axis=1, keepdims=True)
@@ -120,8 +121,8 @@ for hidden in HIDDENS:
         masked.tofile(os.path.join(OUT, f"actor_{tag}_masked{m}.bin"))
         probs.tofile(os.path.join(OUT, f"actor_{tag}_probs{m}.bin"))
 
-        # Comprobaciones del propio generador: si el golden estuviera mal, el test
-        # de Mojo lo daria por bueno y no nos enterariamos.
+        # The generator's own checks: if the golden were wrong, the Mojo test would
+        # pass it as good and we would never find out.
         assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-5), "las filas no suman 1"
         assert (probs[mask == 0] == 0.0).all(), "una casilla ilegal tiene masa"
         legal_per_row = mask.sum(axis=1)
