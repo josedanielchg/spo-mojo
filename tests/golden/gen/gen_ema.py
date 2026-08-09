@@ -44,13 +44,13 @@ for step in range(1, STEPS + 1):
         os.path.join(OUT, f"ema_target{step}.bin"))
 
 frac = 1 - (1 - TAU) ** STEPS
-print(f"  N={N} (>{256}, o sea varios bloques), tau={TAU}, {STEPS} pasos")
-print(f"  tras {STEPS} pasos el target recorrio el {frac:.2%} del camino")
+print(f"  N={N} (>{256}, i.e. several blocks), tau={TAU}, {STEPS} steps")
+print(f"  after {STEPS} steps the target covered {frac:.2%} of the way")
 
 with open(os.path.join(OUT, "ema.txt"), "w") as f:
     f.write(f"n {N}\ntau {TAU}\nsteps {STEPS}\n")
-    f.write("generado con optax.incremental_update(online, target, tau)\n")
-    f.write("ema_target0.bin  target inicial\n")
-    f.write("ema_online.bin   online (fijo)\n")
-    f.write("ema_target<k>.bin target tras k pasos\n")
-print("golden de la EMA escrito en", OUT)
+    f.write("generated with optax.incremental_update(online, target, tau)\n")
+    f.write("ema_target0.bin  initial target\n")
+    f.write("ema_online.bin   online (fixed)\n")
+    f.write("ema_target<k>.bin target after k steps\n")
+print("EMA golden written to", OUT)

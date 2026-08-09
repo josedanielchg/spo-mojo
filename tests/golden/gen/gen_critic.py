@@ -90,28 +90,28 @@ for hidden in HIDDENS:
         # ~100% that it is dead (zero gradient).
         dead1 = float((a1 == 0).mean())
         dead2 = float((a2 == 0).mean())
-        lines.append(f"hidden {hidden} batch {m}  pesos {n_params}  "
-                     f"relu_apagadas {dead1:.3f} / {dead2:.3f}")
-        print(f"  hidden {hidden:3} batch {m:2}: {n_params:6} pesos, "
-              f"V en [{v.min():7.4f}, {v.max():7.4f}], "
-              f"ReLU apagadas {dead1:.1%} / {dead2:.1%}")
+        lines.append(f"hidden {hidden} batch {m}  weights {n_params}  "
+                     f"relu_dead {dead1:.3f} / {dead2:.3f}")
+        print(f"  hidden {hidden:3} batch {m:2}: {n_params:6} weights, "
+              f"V in [{v.min():7.4f}, {v.max():7.4f}], "
+              f"ReLU dead {dead1:.1%} / {dead2:.1%}")
 
 with open(os.path.join(OUT, "critic.txt"), "w") as f:
     f.write(f"in_dim {IN_DIM}\nout_dim {OUT_DIM}\n")
     f.write(f"hiddens {' '.join(str(h) for h in HIDDENS)}\n")
     f.write(f"batches {' '.join(str(b) for b in BATCHES)}\n")
-    f.write("los ficheros llevan el tag h<HIDDEN>:\n")
+    f.write("the files carry the tag h<HIDDEN>:\n")
     f.write("critic_h<H>_w1.bin float32 in_dim x H\n")
     f.write("critic_h<H>_b1.bin float32 H\n")
     f.write("critic_h<H>_w2.bin float32 H x H\n")
     f.write("critic_h<H>_b2.bin float32 H\n")
     f.write("critic_h<H>_w3.bin float32 H x out_dim\n")
     f.write("critic_h<H>_b3.bin float32 out_dim\n")
-    f.write("critic_h<H>_x<M>.bin   float32 M x in_dim  (tableros: dos planos 0/1)\n")
-    f.write("critic_h<H>_a1_<M>.bin float32 M x H       (relu de la capa 1)\n")
-    f.write("critic_h<H>_a2_<M>.bin float32 M x H       (relu de la capa 2)\n")
-    f.write("critic_h<H>_v<M>.bin   float32 M x out_dim (la salida V)\n")
+    f.write("critic_h<H>_x<M>.bin   float32 M x in_dim  (boards: two 0/1 planes)\n")
+    f.write("critic_h<H>_a1_<M>.bin float32 M x H       (relu of layer 1)\n")
+    f.write("critic_h<H>_a2_<M>.bin float32 M x H       (relu of layer 2)\n")
+    f.write("critic_h<H>_v<M>.bin   float32 M x out_dim (the V output)\n")
     for line in lines:
         f.write(line + "\n")
 
-print("golden del critico escrito en", OUT)
+print("critic golden written to", OUT)

@@ -84,20 +84,20 @@ for hidden, m in CASES:
 
     dead1 = float((np.asarray(a1) == 0).mean())
     dead2 = float((np.asarray(a2) == 0).mean())
-    lines.append(f"hidden {hidden} batch {m} relu_apagadas {dead1:.3f}/{dead2:.3f}")
+    lines.append(f"hidden {hidden} batch {m} relu_dead {dead1:.3f}/{dead2:.3f}")
     print(f"  hidden {hidden:3} batch {m:2}: loss={float(loss(params, jnp.asarray(x), jnp.asarray(target))):.5f}  "
           f"|dW1|max={float(jnp.abs(grads[0]).max()):.5f}  "
           f"|dW3|max={float(jnp.abs(grads[4]).max()):.5f}  "
-          f"ReLU apagadas {dead1:.0%}/{dead2:.0%}")
+          f"ReLU dead {dead1:.0%}/{dead2:.0%}")
 
 with open(os.path.join(OUT, "cbwd.txt"), "w") as f:
     f.write(f"in_dim {IN_DIM}\nout_dim {OUT_DIM}\n")
-    f.write("casos (hidden, batch): " + " ".join(f"({h},{m})" for h, m in CASES) + "\n")
-    f.write("perdida: mean(0.5*(V-target)^2), la misma que rlax.l2_loss().mean()\n")
-    f.write("gradientes por jax.grad con precision HIGHEST\n")
-    f.write("ficheros: cbwd_h<H>_m<M>_{w1,b1,w2,b2,w3,b3,x,target,a1,a2,v,"
+    f.write("cases (hidden, batch): " + " ".join(f"({h},{m})" for h, m in CASES) + "\n")
+    f.write("loss: mean(0.5*(V-target)^2), the same as rlax.l2_loss().mean()\n")
+    f.write("gradients by jax.grad at HIGHEST precision\n")
+    f.write("files: cbwd_h<H>_m<M>_{w1,b1,w2,b2,w3,b3,x,target,a1,a2,v,"
             "dw1,db1,dw2,db2,dw3,db3}.bin\n")
     for line in lines:
         f.write(line + "\n")
 
-print("golden del backward del critico escrito en", OUT)
+print("critic backward golden written to", OUT)

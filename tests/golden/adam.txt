@@ -5,10 +5,10 @@ lr 0.0003
 max_norm 0.5
 eps 1e-05
 steps 3
-b1 0.9  b2 0.999  (defaults de optax.adam)
-orden: clip_by_global_norm PRIMERO, adam DESPUES
-adam<case>_<name>_p0.bin  params iniciales
-adam<case>_<name>_g.bin   gradientes (fijos en los 3 pasos)
-adam<case>_<name>_p<t>.bin params despues del paso t
+b1 0.9  b2 0.999  (optax.adam defaults)
+order: clip_by_global_norm FIRST, adam AFTER
+adam<case>_<name>_p0.bin  initial params
+adam<case>_<name>_g.bin   gradients (fixed over the 3 steps)
+adam<case>_<name>_p<t>.bin params after step t
 case0 grad_scale 0.05 global_norm 0.353742 clip NO
-case1 grad_scale 5.0 global_norm 43.326084 clip SI
+case1 grad_scale 5.0 global_norm 43.326084 clip YES

@@ -1,17 +1,17 @@
 num_actions 9
 neg_inf np.float32(-3.4028235e+38)
-casos: small mid big multiblock
-ce_<caso>_logits.bin    float32 B x 9  (ya enmascarados con NEG_INF)
-ce_<caso>_mask.bin      float32 B x 9  (1 legal, 0 ocupada)
-ce_<caso>_q.bin         float32 B x 9  (la q agregada, suma 1)
-ce_<caso>_logpi.bin     float32 B x 9  (log_softmax; -inf en ilegales)
-ce_<caso>_per_state.bin float32 B     (la perdida de cada estado)
-ce_<caso>_entropy.bin   float32 B     (H(q), el suelo de la perdida)
-ce_<caso>_kl.bin        float32 B     (KL(q||pi) = perdida - H(q))
-ce_<caso>_loss.bin      float32 1     (la media sobre el batch)
+cases: small mid big multiblock
+ce_<case>_logits.bin    float32 B x 9  (already masked with NEG_INF)
+ce_<case>_mask.bin      float32 B x 9  (1 legal, 0 occupied)
+ce_<case>_q.bin         float32 B x 9  (the aggregated q, sums to 1)
+ce_<case>_logpi.bin     float32 B x 9  (log_softmax; -inf on illegal)
+ce_<case>_per_state.bin float32 B     (each state's loss)
+ce_<case>_entropy.bin   float32 B     (H(q), the loss's floor)
+ce_<case>_kl.bin        float32 B     (KL(q||pi) = loss - H(q))
+ce_<case>_loss.bin      float32 1     (the mean over the batch)
 
-La forma de particulas se calcula con compute_cross_entropy_loss de
-Stoix (importada) y coincide con la densa; ver la columna diff.
+The particle form is computed with Stoix's compute_cross_entropy_loss
+(imported) and matches the dense one; see the diff column.
 small batch 3 particles 16 loss 2.00388050 illegal_cells 9 diff_particles_vs_dense 1.499e-09
 mid batch 7 particles 64 loss 2.33122536 illegal_cells 13 diff_particles_vs_dense 3.876e-08
 big batch 32 particles 512 loss 1.89128131 illegal_cells 113 diff_particles_vs_dense 5.376e-08

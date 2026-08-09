@@ -3,15 +3,15 @@ cols 16
 softmax_in.bin float32 rows x cols
 softmax_out.bin float32 rows x cols
 logsumexp_out.bin float32 rows
-row0 = todo 0 (uniforme)
-row1 = todo 1000 (overflow si no se resta el max)
-row2 = un 1000 y el resto normal (casi one-hot)
-row3 = todo -1000 (underflow si no se resta el max)
-row4,row5 = normal(0, 2) con seed 0
+row0 = all 0 (uniform)
+row1 = all 1000 (overflow if the max is not subtracted)
+row2 = one 1000 and the rest normal (nearly one-hot)
+row3 = all -1000 (underflow if the max is not subtracted)
+row4,row5 = normal(0, 2) with seed 0
 logsoftmax_out.bin float32 rows x cols
 
 wide_rows 4
 wide_cols 100
-wide_*.bin: cols > TPB, para ejercitar el bucle `i += TPB`
-wide row0 = uniforme; row1 = el maximo en la ULTIMA columna;
-wide row2 = todo -800; row3 = normal(0,2)
+wide_*.bin: cols > TPB, to exercise the loop `i += TPB`
+wide row0 = uniform; row1 = the max in the LAST column;
+wide row2 = all -800; row3 = normal(0,2)

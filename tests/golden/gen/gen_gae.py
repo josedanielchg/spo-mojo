@@ -100,7 +100,7 @@ def make_case(case, b, t, done_prob, trunc_prob, ttt_like=False):
     lines.append(f"case{case} B {b} T {t} dones {int(done.sum())} "
                  f"truncs {int(trunc.sum())}")
     print(f"  case{case}: B={b} T={t}  {int(done.sum()):3} dones, "
-          f"{int(trunc.sum()):3} truncaciones  "
+          f"{int(trunc.sum()):3} truncations  "
           f"|adv|max={float(jnp.abs(adv).max()):.4f}")
 
 
@@ -110,13 +110,13 @@ make_case(2, b=8, t=32, done_prob=0.0, trunc_prob=0.0, ttt_like=True)
 
 with open(os.path.join(OUT, "gae.txt"), "w") as f:
     f.write(f"gamma {GAMMA}\nlambda {LAMBDA}\n")
-    f.write("generado con stoix.utils.multistep."
+    f.write("generated with stoix.utils.multistep."
             "batch_truncated_generalized_advantage_estimation\n")
-    f.write("discount = (1 - done) * gamma, como en ff_spo._critic_loss_fn\n")
+    f.write("discount = (1 - done) * gamma, as in ff_spo._critic_loss_fn\n")
     f.write("gae<case>_{r,discount,v_tm1,v_t,trunc,adv,targets}.bin float32 B x T\n")
-    f.write("case0 = sin truncacion\ncase1 = con truncacion\n")
-    f.write("case2 = como tres en raya (partidas de 3-5 pasos, recompensa al final)\n")
+    f.write("case0 = no truncation\ncase1 = with truncation\n")
+    f.write("case2 = like tic-tac-toe (games of 3-5 steps, reward at the end)\n")
     for line in lines:
         f.write(line + "\n")
 
-print("golden de la GAE escrito en", OUT)
+print("GAE golden written to", OUT)

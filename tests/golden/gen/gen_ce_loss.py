@@ -134,16 +134,16 @@ for name, batch, num_particles in CASES:
                 acc += q[b, a] * np.log(q[b, a])
         entropy[b] = -acc
     kl = per_state - entropy
-    assert (kl > -1e-9).all(), "la KL no puede ser negativa"
+    assert (kl > -1e-9).all(), "the KL cannot be negative"
 
     # THE check: both forms have to give the same number.
     diff = abs(loss_particles - loss_dense)
     assert diff < 2e-5, (
-        f"{name}: la forma de particulas ({loss_particles}) y la densa "
-        f"({loss_dense}) no coinciden, diff={diff}")
+        f"{name}: the particle form ({loss_particles}) and the dense one "
+        f"({loss_dense}) do not match, diff={diff}")
     # And q has to be a distribution over the LEGAL ones.
-    assert np.allclose(q.sum(axis=1), 1.0, atol=1e-5), "q no suma 1"
-    assert (q[mask == 0] == 0.0).all(), "q pone masa en una casilla ilegal"
+    assert np.allclose(q.sum(axis=1), 1.0, atol=1e-5), "q does not sum to 1"
+    assert (q[mask == 0] == 0.0).all(), "q puts mass on an illegal cell"
 
     logits.tofile(os.path.join(OUT, f"ce_{name}_logits.bin"))
     mask.tofile(os.path.join(OUT, f"ce_{name}_mask.bin"))
@@ -159,24 +159,24 @@ for name, batch, num_particles in CASES:
                  f"loss {loss_dense:.8f} illegal_cells {n_illegal} "
                  f"diff_particles_vs_dense {diff:.3e}")
     print(f"  {name:6} B={batch:2} N={num_particles:3}  "
-          f"loss={loss_dense:.6f}  |particulas-densa|={diff:.2e}  "
-          f"ilegales={n_illegal}  H(q)={entropy.mean():.4f}  KL={kl.mean():.4f}")
+          f"loss={loss_dense:.6f}  |particles-dense|={diff:.2e}  "
+          f"illegal={n_illegal}  H(q)={entropy.mean():.4f}  KL={kl.mean():.4f}")
 
 with open(os.path.join(OUT, "ce_loss.txt"), "w") as f:
     f.write(f"num_actions {NUM_ACTIONS}\n")
     f.write(f"neg_inf {NEG_INF!r}\n")
-    f.write("casos: " + " ".join(n for n, _, _ in CASES) + "\n")
-    f.write("ce_<caso>_logits.bin    float32 B x 9  (ya enmascarados con NEG_INF)\n")
-    f.write("ce_<caso>_mask.bin      float32 B x 9  (1 legal, 0 ocupada)\n")
-    f.write("ce_<caso>_q.bin         float32 B x 9  (la q agregada, suma 1)\n")
-    f.write("ce_<caso>_logpi.bin     float32 B x 9  (log_softmax; -inf en ilegales)\n")
-    f.write("ce_<caso>_per_state.bin float32 B     (la perdida de cada estado)\n")
-    f.write("ce_<caso>_entropy.bin   float32 B     (H(q), el suelo de la perdida)\n")
-    f.write("ce_<caso>_kl.bin        float32 B     (KL(q||pi) = perdida - H(q))\n")
-    f.write("ce_<caso>_loss.bin      float32 1     (la media sobre el batch)\n")
+    f.write("cases: " + " ".join(n for n, _, _ in CASES) + "\n")
+    f.write("ce_<case>_logits.bin    float32 B x 9  (already masked with NEG_INF)\n")
+    f.write("ce_<case>_mask.bin      float32 B x 9  (1 legal, 0 occupied)\n")
+    f.write("ce_<case>_q.bin         float32 B x 9  (the aggregated q, sums to 1)\n")
+    f.write("ce_<case>_logpi.bin     float32 B x 9  (log_softmax; -inf on illegal)\n")
+    f.write("ce_<case>_per_state.bin float32 B     (each state's loss)\n")
+    f.write("ce_<case>_entropy.bin   float32 B     (H(q), the loss's floor)\n")
+    f.write("ce_<case>_kl.bin        float32 B     (KL(q||pi) = loss - H(q))\n")
+    f.write("ce_<case>_loss.bin      float32 1     (the mean over the batch)\n")
     f.write("\n")
-    f.write("La forma de particulas se calcula con compute_cross_entropy_loss de\n")
-    f.write("Stoix (importada) y coincide con la densa; ver la columna diff.\n")
+    f.write("The particle form is computed with Stoix's compute_cross_entropy_loss\n")
+    f.write("(imported) and matches the dense one; see the diff column.\n")
     f.write("\n".join(lines) + "\n")
 
-print("golden de la entropia cruzada escrito en", OUT)
+print("cross-entropy golden written to", OUT)

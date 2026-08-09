@@ -81,9 +81,9 @@ for case, grad_scale in enumerate([0.05, 5.0]):
     gnorm = float(optax.global_norm(g))
     clipped = gnorm > MAX_NORM
     lines.append(f"case{case} grad_scale {grad_scale} global_norm {gnorm:.6f} "
-                 f"clip {'SI' if clipped else 'NO'}")
-    print(f"  case{case}: norma global {gnorm:.4f}  "
-          f"(limite {MAX_NORM}) -> el clip {'RECORTA' if clipped else 'no actua'}")
+                 f"clip {'YES' if clipped else 'NO'}")
+    print(f"  case{case}: global norm {gnorm:.4f}  "
+          f"(limit {MAX_NORM}) -> the clip {'FIRES' if clipped else 'does not act'}")
 
     for name, arr in params.items():
         arr.tofile(os.path.join(OUT, f"adam{case}_{name}_p0.bin"))
@@ -97,17 +97,17 @@ for case, grad_scale in enumerate([0.05, 5.0]):
             np.asarray(p[name], dtype=np.float32).tofile(
                 os.path.join(OUT, f"adam{case}_{name}_p{step}.bin"))
         total = sum(float(jnp.sum(jnp.abs(v))) for v in p.values())
-        print(f"    paso {step}: suma |params| = {total:.6f}")
+        print(f"    step {step}: sum |params| = {total:.6f}")
 
 with open(os.path.join(OUT, "adam.txt"), "w") as f:
     f.write(f"in_dim {IN_DIM}\nhidden {HIDDEN}\nout_dim {OUT_DIM}\n")
     f.write(f"lr {LR}\nmax_norm {MAX_NORM}\neps {EPS}\nsteps {STEPS}\n")
-    f.write("b1 0.9  b2 0.999  (defaults de optax.adam)\n")
-    f.write("orden: clip_by_global_norm PRIMERO, adam DESPUES\n")
-    f.write("adam<case>_<name>_p0.bin  params iniciales\n")
-    f.write("adam<case>_<name>_g.bin   gradientes (fijos en los 3 pasos)\n")
-    f.write("adam<case>_<name>_p<t>.bin params despues del paso t\n")
+    f.write("b1 0.9  b2 0.999  (optax.adam defaults)\n")
+    f.write("order: clip_by_global_norm FIRST, adam AFTER\n")
+    f.write("adam<case>_<name>_p0.bin  initial params\n")
+    f.write("adam<case>_<name>_g.bin   gradients (fixed over the 3 steps)\n")
+    f.write("adam<case>_<name>_p<t>.bin params after step t\n")
     for line in lines:
         f.write(line + "\n")
 
-print("golden de adam escrito en", OUT)
+print("adam golden written to", OUT)

@@ -1,14 +1,14 @@
 in_dim 18
 num_actions 9
-casos: bw_small bw_big
-<caso>_{w1,b1,w2,b2,w3,b3}.bin  los pesos
-<caso>_{dw1,db1,dw2,db2,dw3,db3}.bin  sus gradientes (jax.grad)
-<caso>_x.bin float32 B x 18   observaciones
-<caso>_mask.bin float32 B x 9 (1 legal, 0 ocupada)
-<caso>_q.bin float32 B x 9    la politica objetivo
-<caso>_pi.bin float32 B x 9   la politica de la red
-<caso>_z.bin float32 B x 9    los logits SIN enmascarar
-<caso>_dz.bin float32 B x 9   dL/dlogits = (pi-q)/B, 0 en ilegales
-<caso>_loss.bin float32 1
+cases: bw_small bw_big
+<case>_{w1,b1,w2,b2,w3,b3}.bin  the weights
+<case>_{dw1,db1,dw2,db2,dw3,db3}.bin  their gradients (jax.grad)
+<case>_x.bin float32 B x 18   observations
+<case>_mask.bin float32 B x 9 (1 legal, 0 occupied)
+<case>_q.bin float32 B x 9    the target policy
+<case>_pi.bin float32 B x 9   the network's policy
+<case>_z.bin float32 B x 9    the logits NOT masked
+<case>_dz.bin float32 B x 9   dL/dlogits = (pi-q)/B, 0 on illegal
+<case>_loss.bin float32 1
 bw_small batch 5 hidden 32 loss 0.94596481 max|grad| 0.226451 dz_vs_analytic 2.24e-08
 bw_big batch 40 hidden 64 loss 1.14417541 max|grad| 0.094145 dz_vs_analytic 2.79e-09

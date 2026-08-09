@@ -123,15 +123,15 @@ for hidden in HIDDENS:
 
         # The generator's own checks: if the golden were wrong, the Mojo test would
         # pass it as good and we would never find out.
-        assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-5), "las filas no suman 1"
-        assert (probs[mask == 0] == 0.0).all(), "una casilla ilegal tiene masa"
+        assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-5), "rows do not sum to 1"
+        assert (probs[mask == 0] == 0.0).all(), "an illegal cell has mass"
         legal_per_row = mask.sum(axis=1)
-        lines.append(f"hidden {hidden} batch {m}  pesos {n_params}  "
-                     f"legales/fila min {legal_per_row.min():.0f} "
+        lines.append(f"hidden {hidden} batch {m}  weights {n_params}  "
+                     f"legal/row min {legal_per_row.min():.0f} "
                      f"max {legal_per_row.max():.0f}")
-        print(f"  hidden {hidden:3} batch {m:2}: {n_params:6} pesos, "
-              f"logits en [{raw.min():7.4f}, {raw.max():7.4f}], "
-              f"legales/fila {legal_per_row.min():.0f}-{legal_per_row.max():.0f}, "
+        print(f"  hidden {hidden:3} batch {m:2}: {n_params:6} weights, "
+              f"logits in [{raw.min():7.4f}, {raw.max():7.4f}], "
+              f"legal/row {legal_per_row.min():.0f}-{legal_per_row.max():.0f}, "
               f"p_max {probs.max():.4f}")
 
 with open(os.path.join(OUT, "actor.txt"), "w") as f:
@@ -139,18 +139,18 @@ with open(os.path.join(OUT, "actor.txt"), "w") as f:
     f.write(f"hiddens {' '.join(str(h) for h in HIDDENS)}\n")
     f.write(f"batches {' '.join(str(b) for b in BATCHES)}\n")
     f.write(f"neg_inf {NEG_INF!r}\n")
-    f.write("los ficheros llevan el tag h<HIDDEN>:\n")
+    f.write("the files carry the tag h<HIDDEN>:\n")
     f.write("actor_h<H>_w1.bin      float32 in_dim x H\n")
     f.write("actor_h<H>_b1.bin      float32 H\n")
     f.write("actor_h<H>_w2.bin      float32 H x H\n")
     f.write("actor_h<H>_b2.bin      float32 H\n")
     f.write("actor_h<H>_w3.bin      float32 H x out_dim\n")
     f.write("actor_h<H>_b3.bin      float32 out_dim\n")
-    f.write("actor_h<H>_x<M>.bin      float32 M x in_dim  (dos planos 0/1)\n")
-    f.write("actor_h<H>_mask<M>.bin   float32 M x out_dim (1 legal, 0 ocupada)\n")
-    f.write("actor_h<H>_raw<M>.bin    float32 M x out_dim (logits SIN enmascarar)\n")
-    f.write("actor_h<H>_masked<M>.bin float32 M x out_dim (logits enmascarados)\n")
-    f.write("actor_h<H>_probs<M>.bin  float32 M x out_dim (softmax enmascarado)\n")
+    f.write("actor_h<H>_x<M>.bin      float32 M x in_dim  (two 0/1 planes)\n")
+    f.write("actor_h<H>_mask<M>.bin   float32 M x out_dim (1 legal, 0 occupied)\n")
+    f.write("actor_h<H>_raw<M>.bin    float32 M x out_dim (logits NOT masked)\n")
+    f.write("actor_h<H>_masked<M>.bin float32 M x out_dim (masked logits)\n")
+    f.write("actor_h<H>_probs<M>.bin  float32 M x out_dim (masked softmax)\n")
     f.write("\n".join(lines) + "\n")
 
-print("golden del actor escrito en", OUT)
+print("actor golden written to", OUT)

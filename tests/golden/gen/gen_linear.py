@@ -56,10 +56,10 @@ with open(os.path.join(OUT, "linear.txt"), "w") as f:
     f.write("linear<i>_w.bin float32 K x N\n")
     f.write("linear<i>_b.bin float32 N\n")
     f.write("linear<i>_y.bin float32 M x N   (= x @ w + b)\n")
-    f.write("case0 = primera capa del critico (18 entradas -> 64 ocultas)\n")
-    f.write("case1 = capa oculta 64x64 con batch 64 (varios tiles)\n")
-    f.write("case2 = ragged 7x5x3 (ninguna dimension multiplo del tile)\n")
+    f.write("case0 = the critic's first layer (18 inputs -> 64 hidden)\n")
+    f.write("case1 = hidden layer 64x64 with batch 64 (several tiles)\n")
+    f.write("case2 = ragged 7x5x3 (no dimension a multiple of the tile)\n")
 
-print("golden de la capa lineal escrito en", OUT)
+print("linear-layer golden written to", OUT)
 for i, (M, K, N) in enumerate(CASES):
     print(f"  case{i}: ({M},{K}) @ ({K},{N}) + ({N},) -> ({M},{N})")

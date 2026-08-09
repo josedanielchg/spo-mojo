@@ -140,10 +140,10 @@ for name, batch, hidden in CASES:
     pi = (e / e.sum(axis=1, keepdims=True)).astype(np.float32)
     dz_analytic = np.where(mask > 0, (pi - q) / batch, 0.0).astype(np.float32)
     dz_diff = float(np.abs(dz - dz_analytic).max())
-    assert dz_diff < 1e-7, f"{name}: (pi-q)/m no coincide con autodiff: {dz_diff}"
+    assert dz_diff < 1e-7, f"{name}: (pi-q)/m does not match autodiff: {dz_diff}"
     # And on the illegal ones the autodiff has to give exactly 0.
     assert (np.abs(dz[mask == 0]) == 0.0).all(), \
-        f"{name}: el gradiente se cuela por una casilla enmascarada"
+        f"{name}: the gradient leaks through a masked cell"
 
     for arr, nm in [(x, "x"), (mask, "mask"), (q, "q"), (pi, "pi"),
                     (z_raw, "z"), (dz, "dz")]:
@@ -163,16 +163,16 @@ for name, batch, hidden in CASES:
 
 with open(os.path.join(OUT, "actor_backward.txt"), "w") as f:
     f.write(f"in_dim {IN_DIM}\nnum_actions {NUM_ACTIONS}\n")
-    f.write("casos: " + " ".join(n for n, _, _ in CASES) + "\n")
-    f.write("<caso>_{w1,b1,w2,b2,w3,b3}.bin  los pesos\n")
-    f.write("<caso>_{dw1,db1,dw2,db2,dw3,db3}.bin  sus gradientes (jax.grad)\n")
-    f.write("<caso>_x.bin float32 B x 18   observaciones\n")
-    f.write("<caso>_mask.bin float32 B x 9 (1 legal, 0 ocupada)\n")
-    f.write("<caso>_q.bin float32 B x 9    la politica objetivo\n")
-    f.write("<caso>_pi.bin float32 B x 9   la politica de la red\n")
-    f.write("<caso>_z.bin float32 B x 9    los logits SIN enmascarar\n")
-    f.write("<caso>_dz.bin float32 B x 9   dL/dlogits = (pi-q)/B, 0 en ilegales\n")
-    f.write("<caso>_loss.bin float32 1\n")
+    f.write("cases: " + " ".join(n for n, _, _ in CASES) + "\n")
+    f.write("<case>_{w1,b1,w2,b2,w3,b3}.bin  the weights\n")
+    f.write("<case>_{dw1,db1,dw2,db2,dw3,db3}.bin  their gradients (jax.grad)\n")
+    f.write("<case>_x.bin float32 B x 18   observations\n")
+    f.write("<case>_mask.bin float32 B x 9 (1 legal, 0 occupied)\n")
+    f.write("<case>_q.bin float32 B x 9    the target policy\n")
+    f.write("<case>_pi.bin float32 B x 9   the network's policy\n")
+    f.write("<case>_z.bin float32 B x 9    the logits NOT masked\n")
+    f.write("<case>_dz.bin float32 B x 9   dL/dlogits = (pi-q)/B, 0 on illegal\n")
+    f.write("<case>_loss.bin float32 1\n")
     f.write("\n".join(lines) + "\n")
 
-print("golden del backward del actor escrito en", OUT)
+print("actor backward golden written to", OUT)

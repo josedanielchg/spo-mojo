@@ -2,20 +2,20 @@ in_dim 18
 out_dim 1
 hiddens 32 64 256
 batches 5 64
-los ficheros llevan el tag h<HIDDEN>:
+the files carry the tag h<HIDDEN>:
 critic_h<H>_w1.bin float32 in_dim x H
 critic_h<H>_b1.bin float32 H
 critic_h<H>_w2.bin float32 H x H
 critic_h<H>_b2.bin float32 H
 critic_h<H>_w3.bin float32 H x out_dim
 critic_h<H>_b3.bin float32 out_dim
-critic_h<H>_x<M>.bin   float32 M x in_dim  (tableros: dos planos 0/1)
-critic_h<H>_a1_<M>.bin float32 M x H       (relu de la capa 1)
-critic_h<H>_a2_<M>.bin float32 M x H       (relu de la capa 2)
-critic_h<H>_v<M>.bin   float32 M x out_dim (la salida V)
-hidden 32 batch 5  pesos 1697  relu_apagadas 0.444 / 0.575
-hidden 32 batch 64  pesos 1697  relu_apagadas 0.498 / 0.551
-hidden 64 batch 5  pesos 5441  relu_apagadas 0.459 / 0.562
-hidden 64 batch 64  pesos 5441  relu_apagadas 0.472 / 0.513
-hidden 256 batch 5  pesos 70913  relu_apagadas 0.518 / 0.478
-hidden 256 batch 64  pesos 70913  relu_apagadas 0.517 / 0.479
+critic_h<H>_x<M>.bin   float32 M x in_dim  (boards: two 0/1 planes)
+critic_h<H>_a1_<M>.bin float32 M x H       (relu of layer 1)
+critic_h<H>_a2_<M>.bin float32 M x H       (relu of layer 2)
+critic_h<H>_v<M>.bin   float32 M x out_dim (the V output)
+hidden 32 batch 5  weights 1697  relu_dead 0.444 / 0.575
+hidden 32 batch 64  weights 1697  relu_dead 0.498 / 0.551
+hidden 64 batch 5  weights 5441  relu_dead 0.459 / 0.562
+hidden 64 batch 64  weights 5441  relu_dead 0.472 / 0.513
+hidden 256 batch 5  weights 70913  relu_dead 0.518 / 0.478
+hidden 256 batch 64  weights 70913  relu_dead 0.517 / 0.479
