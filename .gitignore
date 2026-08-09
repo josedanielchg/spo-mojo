@@ -24,3 +24,4 @@ results/*
 # claude-authored notes/docs kept locally for context, never committed
 *.md
 !tests/golden/**/*.md
+!README.md
