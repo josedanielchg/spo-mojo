@@ -70,10 +70,10 @@ comptime RNG_OPEN = UInt32(5_000_000)
 # differ, and that is the point: when opening, maximising the score and never
 # losing are the SAME policy; when answering, they are two different policies,
 # and the first one accepts 0.42% losses.
-comptime OPT_PREMIER = 0.9974
+comptime OPT_FIRST = 0.9974
 comptime OPT_SECOND = 0.9624
-comptime OPT_MOYENNE = 0.9799
-comptime HASARD_MOYENNE = 0.5000
+comptime OPT_MEAN = 0.9799
+comptime RANDOM_MEAN = 0.5000
 
 # Exact references by recursion over all states, playing first.
 comptime RANDOM_SCORE = 0.6484
@@ -127,16 +127,16 @@ struct Timed(Movable):
         d = n if n > 0 else 1
         return (Float64(self.wins[k]) + 0.5 * Float64(self.draws[k])) / Float64(d)
 
-    def score_moyen(self) -> Float64:
+    def mean_score(self) -> Float64:
         """UNWEIGHTED mean of the two seats. See the note on the struct."""
         return 0.5 * (self.score(0) + self.score(1))
 
-    def perte(self, k: Int) -> Float64:
+    def loss_pct(self, k: Int) -> Float64:
         n = self.games(k)
         return 100.0 * Float64(self.losses[k]) / Float64(n if n > 0 else 1)
 
-    def perte_moyenne(self) -> Float64:
-        return 0.5 * (self.perte(0) + self.perte(1))
+    def mean_loss_pct(self) -> Float64:
+        return 0.5 * (self.loss_pct(0) + self.loss_pct(1))
 
 
 def play_timed(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
@@ -300,7 +300,7 @@ def metrics_of(mode: String, t: Timed, particles: Int, k: Int) -> PlannerMetrics
         x_wins=t.wins[k], o_wins=t.losses[k], draws=t.draws[k])
 
 
-def deux_lignes(mut rows: List[PlannerMetrics], mode: String, t: Timed,
+def two_rows(mut rows: List[PlannerMetrics], mode: String, t: Timed,
                 particles: Int) -> None:
     """Appends the rows of a campaign, one per seat.
 
@@ -341,13 +341,13 @@ def check_ceiling(mode: String, t: Timed) raises:
         if variance < 0.0:
             variance = 0.0
         se = (variance / Float64(n)) ** 0.5
-        plafond = OPT_PREMIER if k == 0 else OPT_SECOND
-        if s > plafond + 4.0 * (se if se > 1e-12 else 1e-12):
-            raise Error("`" + mode + "` obtient " + fmt_fixed(s, 4)
-                        + " au siege " + String(k) + ", au-dessus du plafond exact "
-                        + fmt_fixed(plafond, 4)
-                        + ". Impossible en jouant proprement : il y a une fuite "
-                        + "d'information.")
+        ceiling = OPT_FIRST if k == 0 else OPT_SECOND
+        if s > ceiling + 4.0 * (se if se > 1e-12 else 1e-12):
+            raise Error("`" + mode + "` scores " + fmt_fixed(s, 4)
+                        + " on seat " + String(k) + ", above the exact ceiling "
+                        + fmt_fixed(ceiling, 4)
+                        + ". Impossible when playing cleanly: there is an information "
+                        + "leak.")
 
 
 def pad(s: String, width: Int, left: Bool = False) -> String:
@@ -362,25 +362,25 @@ def show(mode: String, t: Timed) raises:
     """Prints the two seats and their unweighted mean."""
     if t.games(0) == 0 or t.games(1) == 0:
         k = 0 if t.games(0) > 0 else 1
-        nom = String("1er") if k == 0 else String("2e")
-        print("  " + pad(mode, 28) + " " + nom + " seulement  "
-              + fmt_fixed(t.score(k), 4) + "/" + fmt_fixed(t.perte(k), 2) + "%"
+        label = String("1st") if k == 0 else String("2nd")
+        print("  " + pad(mode, 28) + " " + label + " only       "
+              + fmt_fixed(t.score(k), 4) + "/" + fmt_fixed(t.loss_pct(k), 2) + "%"
               + "   n=" + String(t.games(k)))
         return
     print("  " + pad(mode, 28)
-          + " 1er " + fmt_fixed(t.score(0), 4) + "/" + fmt_fixed(t.perte(0), 2) + "%"
-          + "   2e " + fmt_fixed(t.score(1), 4) + "/" + fmt_fixed(t.perte(1), 2) + "%"
-          + "   moy " + fmt_fixed(t.score_moyen(), 4)
-          + "/" + fmt_fixed(t.perte_moyenne(), 2) + "%"
+          + " 1st " + fmt_fixed(t.score(0), 4) + "/" + fmt_fixed(t.loss_pct(0), 2) + "%"
+          + "  2nd " + fmt_fixed(t.score(1), 4) + "/" + fmt_fixed(t.loss_pct(1), 2) + "%"
+          + "  mean " + fmt_fixed(t.mean_score(), 4)
+          + "/" + fmt_fixed(t.mean_loss_pct(), 2) + "%"
           + "   n=" + String(t.games_total()))
 
 
-def two(con: Timed, sin_red: Timed) raises -> String:
+def two(with_net: Timed, planner_run: Timed) raises -> String:
     """The two columns of a sweep: with and without network, mean over the seats."""
-    return ("   avec reseau  " + fmt_fixed(con.score_moyen(), 4)
-            + " / " + fmt_fixed(con.perte_moyenne(), 2) + "%"
-            + "     sans reseau  " + fmt_fixed(sin_red.score_moyen(), 4)
-            + " / " + fmt_fixed(sin_red.perte_moyenne(), 2) + "%")
+    return ("   with network " + fmt_fixed(with_net.mean_score(), 4)
+            + " / " + fmt_fixed(with_net.mean_loss_pct(), 2) + "%"
+            + "  without network " + fmt_fixed(planner_run.mean_score(), 4)
+            + " / " + fmt_fixed(planner_run.mean_loss_pct(), 2) + "%")
 
 
 def main() raises:
@@ -393,7 +393,7 @@ def main() raises:
     # "fiel" = the paper's readout (weighted histogram). Anything else = our
     # variant. ONE ACTOR IS TRAINED PER READOUT: an actor distilled from one
     # readout's q is not the right prior for the other.
-    spo_readout = (String(args[3]) == "fiel") if len(args) > 3 else False
+    spo_readout = (String(args[3]) == "faithful") if len(args) > 3 else False
     # Particles used for MEASURING. Training carries on with NUM_PARTICLES: raising
     # the search only at evaluation time is legitimate and is what gets compared
     # with the MCTS, which also picks its simulations per move at play time.
@@ -411,7 +411,7 @@ def main() raises:
     # "cabecera" measures only the comparison rows and skips the sweeps. It is what
     # is needed to repeat the SAME configuration with several seeds: the sweeps do
     # not change the conclusion and would multiply the cost by twenty.
-    solo_cabecera = (String(args[8]) == "cabecera") if len(args) > 8 else False
+    header_only = (String(args[8]) == "header") if len(args) > 8 else False
     # Resampling period for TRAINING and for the header rows. Defaults to
     # NO_RESAMPLE, which at depth 6 never fires: it is the configuration everything
     # up to here was measured with, and it does not change.
@@ -425,31 +425,31 @@ def main() raises:
     resample = Int(args[9]) if len(args) > 9 else NO_RESAMPLE
 
     with DeviceContext() as ctx:
-        print("SPO-Mojo: agente ENTRENADO sobre tres en raya (rival aleatorio)")
-        print("  particulas: entrena con", NUM_PARTICLES, " mide con", n_part)
-        print("  profundidad", SEARCH_DEPTH, " temperatura", TEMPERATURE)
-        print("  gamma_r", gamma_r, " (Stoix pasa la recompensa cruda: 1.0)")
-        print("  loss_penalty", penalty, " (Stoix no lo tiene: 0.0)")
-        print("  semilla de entrenamiento", train_seed)
-        print("  referencias exactas: azar", RANDOM_SCORE,
-              " optimo", OPTIMAL_SCORE)
+        print("SPO-Mojo: TRAINED agent on tic-tac-toe (random opponent)")
+        print("  particles: trains with", NUM_PARTICLES, " measures with", n_part)
+        print("  depth", SEARCH_DEPTH, " temperature", TEMPERATURE)
+        print("  gamma_r", gamma_r, " (Stoix passes the raw reward: 1.0)")
+        print("  loss_penalty", penalty, " (Stoix does not have it: 0.0)")
+        print("  training seed", train_seed)
+        print("  exact references: random", RANDOM_SCORE,
+              " optimal", OPTIMAL_SCORE)
         print()
 
-        print("=== entrenando (la implementacion en Mojo no persiste pesos) ===")
-        print("  rondas", rounds, " = ", rounds * STEPS_PER_ROUND,
-              "pasos de entorno")
+        print("=== training (the Mojo implementation does not persist weights) ===")
+        print("  rounds", rounds, " = ", rounds * STEPS_PER_ROUND,
+              "environment steps")
         train_start = perf_counter_ns()
-        print("  readout:", "fiel (histograma ponderado)" if spo_readout
-              else "variante (media por accion)")
+        print("  readout:", "faithful (weighted histogram)" if spo_readout
+              else "variant (mean per action)")
         outcome = train_run(ctx, "spo-mojo", use_actor=True,
                             spo_readout=spo_readout, gamma_r=gamma_r,
                             penalty=penalty, use_critic=True,
                             depth_disc=gamma_r < Scalar[dtype](1),
                             rounds=rounds, seed=train_seed, period=resample)
         train_seconds = Float64(perf_counter_ns() - train_start) / 1e9
-        print("  tiempo de entrenamiento: " + fmt_fixed(train_seconds, 1)
-              + " s  (se paga UNA vez; el MCTS no lo paga, pero paga busqueda en"
-              + " cada jugada)")
+        print("  training time: " + fmt_fixed(train_seconds, 1)
+              + " s  (paid ONCE; MCTS does not pay it, but pays search on"
+              + " every move)")
         print()
 
         # Warm-up: the first call pays for kernel compilation and that cost is not
@@ -460,51 +460,51 @@ def main() raises:
 
         rows = List[PlannerMetrics]()
 
-        print("=== lote de", BATCH_ENVS, "partidas (throughput) ===")
-        moda = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS,
+        print("=== batch of", BATCH_ENVS, "games (throughput) ===")
+        greedy_run = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS,
                           n_part, True, True, spo_readout, gamma_r, penalty,
                           SEARCH_DEPTH, TEMPERATURE, resample)
-        show("smc_agent_moda_lote", moda)
-        check_ceiling("smc_agent_moda_lote", moda)
-        deux_lignes(rows, "smc_agent_moda_lote", moda, n_part)
+        show("smc_agent_moda_lote", greedy_run)
+        check_ceiling("smc_agent_moda_lote", greedy_run)
+        two_rows(rows, "smc_agent_moda_lote", greedy_run, n_part)
 
-        muestreada = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS,
+        sampled_run = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS,
                                 n_part, True, False, spo_readout, gamma_r, penalty,
                                 SEARCH_DEPTH, TEMPERATURE, resample)
-        show("smc_agent_muestreada_lote", muestreada)
-        check_ceiling("smc_agent_muestreada_lote", muestreada)
-        deux_lignes(rows, "smc_agent_muestreada_lote", muestreada, n_part)
+        show("smc_agent_muestreada_lote", sampled_run)
+        check_ceiling("smc_agent_muestreada_lote", sampled_run)
+        two_rows(rows, "smc_agent_muestreada_lote", sampled_run, n_part)
 
         # The arm WITHOUT the network, with the same hyperparameters: it is the
         # comparison term of the asymmetry axis (paying for training once versus
         # paying for search at every move).
-        sin_red = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS,
+        planner_run = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS,
                              n_part, False, True, spo_readout, gamma_r, penalty,
                              SEARCH_DEPTH, TEMPERATURE, resample)
-        show("smc_planificador_moda_lote", sin_red)
-        check_ceiling("smc_planificador_moda_lote", sin_red)
-        deux_lignes(rows, "smc_planificador_moda_lote", sin_red, n_part)
+        show("smc_planificador_moda_lote", planner_run)
+        check_ceiling("smc_planificador_moda_lote", planner_run)
+        two_rows(rows, "smc_planificador_moda_lote", planner_run, n_part)
 
         print()
-        print("=== una partida a la vez (latencia, comparable con el MCTS) ===")
+        print("=== one game at a time (latency, comparable with MCTS) ===")
         lat = play_timed(ctx, outcome.actor, outcome.critic, 1, LATENCY_STEPS, n_part,
                          True, True, False, REWARD_GAMMA, LOSS_PENALTY,
                          SEARCH_DEPTH, TEMPERATURE, resample)
         latency = lat.seconds / Float64(lat.decisions)
         show("smc_agent_moda_latencia", lat)
         check_ceiling("smc_agent_moda_latencia", lat)
-        deux_lignes(rows, "smc_agent_moda_latencia", lat, n_part)
+        two_rows(rows, "smc_agent_moda_latencia", lat, n_part)
 
-        batched_cost = moda.seconds / Float64(moda.decisions)
-        print("  latencia        : " + fmt_fixed(latency, 6) + " s/decision")
-        print("  coste repartido : " + fmt_fixed(batched_cost, 6) + " s/decision")
-        print("  ganancia de lote: x" + fmt_fixed(latency / batched_cost, 1)
-              + "  (" + String(BATCH_ENVS) + " partidas a la vez)")
+        batched_cost = greedy_run.seconds / Float64(greedy_run.decisions)
+        print("  latency         : " + fmt_fixed(latency, 6) + " s/decision")
+        print("  amortised cost  : " + fmt_fixed(batched_cost, 6) + " s/decision")
+        print("  batching gain   : x" + fmt_fixed(latency / batched_cost, 1)
+              + "  (" + String(BATCH_ENVS) + " games at a time)")
 
-        if solo_cabecera:
+        if header_only:
             write_csv_rows(rows, path)
             print()
-            print("csv escrito en", path, " (solo cabecera)")
+            print("csv written to", path, " (header only)")
             return
 
         # --- The axis that really discriminates: search budget ---
@@ -515,8 +515,8 @@ def main() raises:
         # same level with LESS search, which is SPO's practical argument against
         # the MCTS: training is paid once and search is paid at every move.
         print()
-        print("=== curva de presupuesto (misma red, distinto numero de particulas) ===")
-        print("  particulas   con red                        sin red")
+        print("=== budget curve (same network, different particle counts) ===")
+        print("  particles    with network                  without network")
         budgets = List[Int]()
         budgets.append(4)
         budgets.append(8)
@@ -527,17 +527,17 @@ def main() raises:
         budgets.append(256)
         budgets.append(512)
         for b in budgets:
-            con = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS, b,
+            with_net = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS, b,
                              True, True, spo_readout, gamma_r, penalty,
                              SEARCH_DEPTH, TEMPERATURE, resample)
-            sin = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS, b,
+            without_net = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS, BATCH_STEPS, b,
                              False, True, spo_readout, gamma_r, penalty,
                              SEARCH_DEPTH, TEMPERATURE, resample)
-            check_ceiling("presupuesto_con_red_" + String(b), con)
-            check_ceiling("presupuesto_sin_red_" + String(b), sin)
-            print("  " + pad(String(b), 10, True) + two(con, sin))
-            deux_lignes(rows, "presupuesto_con_red_" + String(b), con, b)
-            deux_lignes(rows, "presupuesto_sin_red_" + String(b), sin, b)
+            check_ceiling("presupuesto_con_red_" + String(b), with_net)
+            check_ceiling("presupuesto_sin_red_" + String(b), without_net)
+            print("  " + pad(String(b), 10, True) + two(with_net, without_net))
+            two_rows(rows, "presupuesto_con_red_" + String(b), with_net, b)
+            two_rows(rows, "presupuesto_sin_red_" + String(b), without_net, b)
 
         # --- Sweep of the axes Stoix also exposes ---
         #
@@ -548,7 +548,7 @@ def main() raises:
         # implementations of the same algorithm have to respond alike to the same
         # knobs.
         print()
-        print("=== BARRIDO: profundidad (particulas fijas en", n_part, ") ===")
+        print("=== SWEEP: depth (particles fixed at", n_part, ") ===")
         depths = List[Int]()
         depths.append(1); depths.append(2); depths.append(3)
         depths.append(4); depths.append(6); depths.append(8)
@@ -559,15 +559,15 @@ def main() raises:
             sn = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS,
                             BATCH_STEPS, n_part, False, True, spo_readout,
                             gamma_r, penalty, d, TEMPERATURE, NO_RESAMPLE)
-            check_ceiling("profundidad_" + String(d), c)
-            check_ceiling("profundidad_sinred_" + String(d), sn)
-            print("  profundidad " + pad(String(d), 3, True) + two(c, sn))
-            deux_lignes(rows, "barrido_profundidad_" + String(d), c, n_part)
-            deux_lignes(rows, "barrido_profundidad_sinred_" + String(d),
+            check_ceiling("depth_" + String(d), c)
+            check_ceiling("depth_nonet_" + String(d), sn)
+            print("  depth       " + pad(String(d), 3, True) + two(c, sn))
+            two_rows(rows, "barrido_profundidad_" + String(d), c, n_part)
+            two_rows(rows, "barrido_profundidad_sinred_" + String(d),
                         sn, n_part)
 
         print()
-        print("=== BARRIDO: temperatura ===")
+        print("=== SWEEP: temperature ===")
         temps = List[Scalar[dtype]]()
         temps.append(0.005); temps.append(0.02); temps.append(0.1)
         temps.append(0.5); temps.append(1.0)
@@ -578,15 +578,15 @@ def main() raises:
             sn = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS,
                             BATCH_STEPS, n_part, False, True, spo_readout,
                             gamma_r, penalty, SEARCH_DEPTH, tv, NO_RESAMPLE)
-            check_ceiling("temperatura", c)
-            check_ceiling("temperatura_sinred", sn)
+            check_ceiling("temperature", c)
+            check_ceiling("temperature_nonet", sn)
             print("  tau " + fmt_fixed(Float64(tv), 3) + two(c, sn))
             lbl = fmt_fixed(Float64(tv), 3)
-            deux_lignes(rows, "barrido_tau_" + lbl, c, n_part)
-            deux_lignes(rows, "barrido_tau_sinred_" + lbl, sn, n_part)
+            two_rows(rows, "barrido_tau_" + lbl, c, n_part)
+            two_rows(rows, "barrido_tau_sinred_" + lbl, sn, n_part)
 
         print()
-        print("=== BARRIDO: periodo de remuestreo (99 = apagado) ===")
+        print("=== SWEEP: resampling period (99 = off) ===")
         periods = List[Int]()
         periods.append(1); periods.append(2); periods.append(4)
         periods.append(8); periods.append(99)
@@ -597,12 +597,12 @@ def main() raises:
             sn = play_timed(ctx, outcome.actor, outcome.critic, BATCH_ENVS,
                             BATCH_STEPS, n_part, False, True, spo_readout,
                             gamma_r, penalty, SEARCH_DEPTH, TEMPERATURE, pr)
-            check_ceiling("remuestreo", c)
-            check_ceiling("remuestreo_sinred", sn)
-            print("  periodo " + pad(String(pr), 3, True) + two(c, sn))
-            deux_lignes(rows, "barrido_remuestreo_" + String(pr), c, n_part)
-            deux_lignes(rows, "barrido_remuestreo_sinred_" + String(pr), sn, n_part)
+            check_ceiling("resampling", c)
+            check_ceiling("resampling_nonet", sn)
+            print("  period  " + pad(String(pr), 3, True) + two(c, sn))
+            two_rows(rows, "barrido_remuestreo_" + String(pr), c, n_part)
+            two_rows(rows, "barrido_remuestreo_sinred_" + String(pr), sn, n_part)
 
         write_csv_rows(rows, path)
         print()
-        print("csv escrito en", path)
+        print("csv written to", path)

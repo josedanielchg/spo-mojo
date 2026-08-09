@@ -88,7 +88,7 @@ def _replace_rng(state: Any, keys: jnp.ndarray) -> Any:
         return state.replace(rng_key=keys)
     if hasattr(state, "base_env_state"):
         return state.replace(base_env_state=_replace_rng(state.base_env_state, keys))
-    raise ValueError("no encuentro rng_key en el estado")
+    raise ValueError("cannot find rng_key in the state")
 
 
 def build(cfg: DictConfig, untrained: bool = False) -> Tuple[Any, ...]:
@@ -239,10 +239,10 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
     # whatever its seat, whereas the games where the rival opens are shorter and
     # more of them finish.
     out = {}
-    for k, nom in ((0, "1er"), (1, "2e")):
+    for k, seat_key in ((0, "1er"), (1, "2e")):
         n_env = int((seat == k).sum())
         part = n_env / num_envs if num_envs else 0.0
-        out[nom] = {
+        out[seat_key] = {
             "games": int(wins[k] + draws[k] + losses[k]),
             "iterations": particles,
             "exploration": float(cfg.system.temperature.fixed_temperature),
@@ -313,7 +313,7 @@ def row(mode: str, m: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def score_moyen(d: Dict[str, Any]) -> Tuple[float, float]:
+def mean_score(d: Dict[str, Any]) -> Tuple[float, float]:
     """UNWEIGHTED mean of the two seats, and its standard error.
 
     Pooling both seats' games into a single counter would bias the result: where
@@ -327,7 +327,7 @@ def score_moyen(d: Dict[str, Any]) -> Tuple[float, float]:
     return 0.5 * (s0 + s1), 0.5 * (e0 * e0 + e1 * e1) ** 0.5
 
 
-def perte_moyenne(d: Dict[str, Any]) -> float:
+def mean_loss_pct(d: Dict[str, Any]) -> float:
     return 0.5 * sum(
         100.0 * d[k]["o_wins"] / max(d[k]["games"], 1) for k in ("1er", "2e")
     )
@@ -335,18 +335,18 @@ def perte_moyenne(d: Dict[str, Any]) -> float:
 
 def show(mode: str, d: Dict[str, Any]) -> None:
     """The two seats and their unweighted mean."""
-    trozos = []
+    pieces = []
     for k in ("1er", "2e"):
         m = d[k]
         n = max(m["games"], 1)
-        trozos.append(
+        pieces.append(
             f"{k} {(m['x_wins'] + 0.5 * m['draws']) / n:.4f}"
             f"/{100 * m['o_wins'] / n:.2f}%"
         )
-    moy, _ = score_moyen(d)
+    mean, _ = mean_score(d)
     n_tot = d["1er"]["games"] + d["2e"]["games"]
-    print(f"  {mode:28} " + "   ".join(trozos)
-          + f"   moy {moy:.4f}/{perte_moyenne(d):.2f}%   n={n_tot}")
+    print(f"  {mode:28} " + "   ".join(pieces)
+          + f"   mean {mean:.4f}/{mean_loss_pct(d):.2f}%   n={n_tot}")
 
 
 def main() -> None:
@@ -359,11 +359,11 @@ def main() -> None:
     ap.add_argument("--out", default="mojo_spo/results/bench_spo_stoix.csv")
     ap.add_argument("--overrides", nargs="*", default=[])
     ap.add_argument("--untrained", action="store_true",
-                    help="Juega con pesos sin entrenar: aisla la busqueda.")
+                    help="Plays with untrained weights: isolates the search.")
     ap.add_argument("--tag", default=None,
-                    help="Sufijo para la etiqueta `mode`. Por defecto el uid del "
-                         "checkpoint, para que dos configuraciones distintas no se "
-                         "confundan en el CSV comun.")
+                    help="Suffix for the `mode` label. Defaults to the checkpoint "
+                         "uid, so that two different configurations do not get "
+                         "mixed up in the shared CSV.")
     args = ap.parse_args()
 
     # The same config_path ff_spo's entry point uses
@@ -395,14 +395,14 @@ def main() -> None:
     cfg.num_devices = len(jax.devices())
     cfg = check_total_timesteps(cfg)
 
-    print("=== SPO-Stoix en tres en raya ===")
-    print(f"   particulas {cfg.system.num_particles}  profundidad "
-          f"{cfg.system.search_depth}  periodo "
-          f"{cfg.system.resampling.period}  temperatura "
-          f"{'adaptativa' if cfg.system.temperature.adaptive else cfg.system.temperature.fixed_temperature}")
-    print(f"   referencias exactas (1er / 2e / media) :"
-          f" azar {RANDOM_FIRST}/{RANDOM_SECOND}/{RANDOM_MEAN}"
-          f"   optimo {OPTIMAL_FIRST}/{OPTIMAL_SECOND}/{OPTIMAL_MEAN}")
+    print("=== SPO-Stoix on tic-tac-toe ===")
+    print(f"   particles {cfg.system.num_particles}  depth "
+          f"{cfg.system.search_depth}  period "
+          f"{cfg.system.resampling.period}  temperature "
+          f"{'adaptive' if cfg.system.temperature.adaptive else cfg.system.temperature.fixed_temperature}")
+    print(f"   exact references (1st / 2nd / mean) :"
+          f" random {RANDOM_FIRST}/{RANDOM_SECOND}/{RANDOM_MEAN}"
+          f"   optimal {OPTIMAL_FIRST}/{OPTIMAL_SECOND}/{OPTIMAL_MEAN}")
     print()
 
     eval_env, root_fn, search_apply_fn, params = build(cfg, args.untrained)
@@ -412,23 +412,23 @@ def main() -> None:
     # fault would go unnoticed.
     chk = play(cfg, eval_env, root_fn, search_apply_fn, params, args.num_envs,
                args.steps, False, args.seed, random_policy=True)
-    show("VALIDACION azar", chk)
-    for k, esperado in (("1er", RANDOM_FIRST), ("2e", RANDOM_SECOND)):
+    show("VALIDATION random", chk)
+    for k, expected in (("1er", RANDOM_FIRST), ("2e", RANDOM_SECOND)):
         m = chk[k]
         nk = max(m["games"], 1)
         sk = (m["x_wins"] + 0.5 * m["draws"]) / nk
-        if abs(sk - esperado) > 0.03:
+        if abs(sk - expected) > 0.03:
             raise SystemExit(
-                f"\n*** El bucle esta MAL en el asiento {k}: una politica aleatoria "
-                f"deberia dar {esperado} y da {sk:.4f}. No se escribe CSV. ***"
+                f"\n*** The loop is WRONG on seat {k}: a random policy "
+                f"should give {expected} and gives {sk:.4f}. No CSV written. ***"
             )
-    chk_moy, _ = score_moyen(chk)
-    if abs(chk_moy - RANDOM_MEAN) > 0.02:
+    chk_mean, _ = mean_score(chk)
+    if abs(chk_mean - RANDOM_MEAN) > 0.02:
         raise SystemExit(
-            f"\n*** El bucle esta MAL: la media de los dos asientos deberia dar "
-            f"{RANDOM_MEAN} y da {chk_moy:.4f}. No se escribe CSV. ***"
+            f"\n*** The loop is WRONG: the mean of the two seats should give "
+            f"{RANDOM_MEAN} and gives {chk_mean:.4f}. No CSV written. ***"
         )
-    print(f"   (bucle validado: media {chk_moy:.4f} vs {RANDOM_MEAN} exacto)\n")
+    print(f"   (loop validated: mean {chk_mean:.4f} vs {RANDOM_MEAN} exact)\n")
 
     tag = args.tag if args.tag is not None else args.checkpoint_uid
     rows = []
@@ -436,7 +436,7 @@ def main() -> None:
         m = play(cfg, eval_env, root_fn, search_apply_fn, params,
                  args.num_envs, args.steps, greedy, args.seed)
         show(mode, m)
-        score, se = score_moyen(m)
+        score, se = mean_score(m)
 
         # CEILING GUARD, PER SEAT. Beating the exact optimum is not a good result:
         # it is proof that the agent sees something it should not. This is how the
@@ -444,14 +444,14 @@ def main() -> None:
         # Each seat has ITS OWN ceiling -- 0.9974 opening, 0.9624 answering -- and
         # conflating them would let an impossible value through on the second's
         # side.
-        for k, techo in (("1er", OPTIMAL_FIRST), ("2e", OPTIMAL_SECOND)):
+        for k, ceiling in (("1er", OPTIMAL_FIRST), ("2e", OPTIMAL_SECOND)):
             sk, sek = score_and_se(m[k])
-            if sk > techo + 4.0 * sek:
+            if sk > ceiling + 4.0 * sek:
                 raise SystemExit(
-                    f"\n*** `{mode}` puntua {sk:.4f} +- {sek:.4f} en el asiento {k}, "
-                    f"por encima del techo exacto {techo} "
-                    f"({(sk - techo) / max(sek, 1e-12):.1f} sigma). Eso es IMPOSIBLE "
-                    f"jugando limpio: hay una fuga de informacion. No se escribe CSV. ***"
+                    f"\n*** `{mode}` scores {sk:.4f} +- {sek:.4f} on seat {k}, "
+                    f"above the exact ceiling {ceiling} "
+                    f"({(sk - ceiling) / max(sek, 1e-12):.1f} sigma). That is IMPOSSIBLE "
+                    f"when playing cleanly: there is an information leak. No CSV written. ***"
                 )
 
         # Control for the RNG leak, already fixed in `make_root_fn`
@@ -461,18 +461,18 @@ def main() -> None:
         m2 = play(cfg, eval_env, root_fn, search_apply_fn, params,
                   args.num_envs, args.steps, greedy, args.seed,
                   break_rng_sharing=True)
-        show(mode + " (control sin fuga)", m2)
-        score2, se2 = score_moyen(m2)
+        show(mode + " (leak-free control)", m2)
+        score2, se2 = mean_score(m2)
         se_diff = (se * se + se2 * se2) ** 0.5
         sigmas = abs(score - score2) / max(se_diff, 1e-12)
         if sigmas > 4.0:
             raise SystemExit(
-                f"\n*** `{mode}` puntua {score:.4f} pero {score2:.4f} al romper la "
-                f"comparticion de RNG ({sigmas:.1f} sigma). La busqueda sigue leyendo "
-                f"el azar del entorno real. No se escribe CSV. ***"
+                f"\n*** `{mode}` scores {score:.4f} but {score2:.4f} when the RNG "
+                f"sharing is broken ({sigmas:.1f} sigma). The search is still reading "
+                f"the real environment's randomness. No CSV written. ***"
             )
         print(f"   (control: {score:.4f} vs {score2:.4f}, {sigmas:.1f} sigma "
-              f"-> no hay fuga)")
+              f"-> no leak)")
         # One row per seat. The mean is computed at analysis time, not at
         # measurement time.
         rows.append(row(f"{mode}_{tag}_1er", m["1er"]))
@@ -489,9 +489,9 @@ def main() -> None:
         if new_file:
             w.writeheader()
         w.writerows(rows)
-    print(f"\n   {len(rows)} filas anadidas a {args.out}")
-    print("   La fila `moda` es la comparable con MCTS y SMC-Mojo; la")
-    print("   `muestreada` es lo que hace el evaluador de Stoix.")
+    print(f"\n   {len(rows)} rows appended to {args.out}")
+    print("   The `moda` row is the one comparable with MCTS and SMC-Mojo; the")
+    print("   `muestreada` is what Stoix's evaluator does.")
 
 
 if __name__ == "__main__":
