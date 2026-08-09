@@ -38,9 +38,9 @@ comptime RNG_OPEN = UInt32(5_000_000)
 comptime NUM_ENVS = 256
 comptime NUM_STEPS = 400
 
-comptime REF_PREMIER = 0.6484
+comptime REF_FIRST = 0.6484
 comptime REF_SECOND = 0.3516
-comptime REF_MOYENNE = 0.5000
+comptime REF_MEAN = 0.5000
 
 
 def main() raises:
@@ -100,33 +100,33 @@ def main() raises:
                 NUM_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
         ctx.synchronize()
 
-        print("  siege        parties     score    reference")
+        print("  seat                   games     score    reference")
         var scores = InlineArray[Float64, 2](fill=0.0)
         var refs = InlineArray[Float64, 2](fill=0.0)
-        refs[0] = REF_PREMIER
+        refs[0] = REF_FIRST
         refs[1] = REF_SECOND
         for k in range(2):
             n = g[k] + e_[k] + d[k]
             scores[k] = (Float64(g[k]) + 0.5 * Float64(e_[k])) / Float64(n if n > 0 else 1)
-            nom = String("l'agent ouvre") if k == 0 else String("le rival ouvre")
-            print("  " + nom + "   " + String(n) + "    "
+            label = String("the agent opens   ") if k == 0 else String("the opponent opens")
+            print("  " + label + "   " + String(n) + "    "
                   + String(scores[k]) + "   " + String(refs[k]))
 
         # UNWEIGHTED mean of the two seats. See the warning in the header.
         n_tot = g[0] + g[1] + e_[0] + e_[1] + d[0] + d[1]
-        moy = 0.5 * (scores[0] + scores[1])
-        print("  moyenne       " + String(n_tot) + "    " + String(moy)
-              + "   " + String(REF_MOYENNE))
+        mean = 0.5 * (scores[0] + scores[1])
+        print("  mean                 " + String(n_tot) + "    " + String(mean)
+              + "   " + String(REF_MEAN))
 
         # Three sigma on a proportion of variance at most 0.25.
         tol0 = 3.0 * (0.25 / Float64(g[0] + e_[0] + d[0])) ** 0.5
         tol1 = 3.0 * (0.25 / Float64(g[1] + e_[1] + d[1])) ** 0.5
         tolm = 0.5 * (tol0 * tol0 + tol1 * tol1) ** 0.5
-        ok = (abs(scores[0] - REF_PREMIER) < tol0
+        ok = (abs(scores[0] - REF_FIRST) < tol0
               and abs(scores[1] - REF_SECOND) < tol1
-              and abs(moy - REF_MOYENNE) < tolm)
+              and abs(mean - REF_MEAN) < tolm)
         print()
         if ok:
-            print("PASS les deux sieges et leur moyenne retrouvent les references exactes")
+            print("PASS both seats and their mean recover the exact references")
         else:
-            raise Error("les scores mesures ne retrouvent pas les references exactes")
+            raise Error("the measured scores do not recover the exact references")
