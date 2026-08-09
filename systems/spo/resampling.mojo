@@ -56,7 +56,7 @@ def resample_indices_kernel[TPB_P: Int](
     the uniform.
     """
     debug_assert(num_particles <= TPB_P,
-                 "resample: las particulas de un env tienen que caber en el bloque")
+                 "resample: an env's particles must fit in the block")
 
     shared = stack_allocation[TPB_P, Scalar[dtype],
                               address_space = AddressSpace.SHARED]()

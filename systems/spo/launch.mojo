@@ -41,7 +41,7 @@ def check_search_config(cfg: SPOConfig) raises:
     anything. The kernel's debug_assert catches it, but only if somebody runs with
     -D ASSERT=all; this check always fires and says exactly what to do."""
     if cfg.num_particles > TPB_PARTICLES:
-        raise Error("num_particles=", cfg.num_particles, " no cabe en un bloque de ",
-                    TPB_PARTICLES, ". Sube TPB_PARTICLES (potencia de dos) o baja N.")
+        raise Error("num_particles=", cfg.num_particles, " does not fit in a block of ",
+                    TPB_PARTICLES, ". Raise TPB_PARTICLES (a power of two) or lower N.")
     if cfg.num_actions > TPB:
-        raise Error("num_actions=", cfg.num_actions, " no cabe en un bloque de ", TPB)
+        raise Error("num_actions=", cfg.num_actions, " does not fit in a block of ", TPB)

@@ -103,13 +103,13 @@ struct TrajectoryBuffer(Movable):
         and the actor would learn from it without anything failing."""
         if len(reward) != self.t_len or len(done) != self.t_len \
                 or len(truncated) != self.t_len:
-            raise Error("la secuencia deberia tener ", self.t_len, " pasos")
+            raise Error("the sequence should have ", self.t_len, " steps")
         if len(obs) != self.t_len * self.obs_dim \
                 or len(bootstrap_obs) != self.t_len * self.obs_dim:
-            raise Error("las observaciones deberian ser t_len * obs_dim")
+            raise Error("the observations should be t_len * obs_dim")
         if len(q) != self.t_len * self.num_actions:
-            raise Error("q deberia tener t_len * num_actions = ",
-                        self.t_len * self.num_actions, " valores, y tiene ",
+            raise Error("q should have t_len * num_actions = ",
+                        self.t_len * self.num_actions, " values, and has ",
                         len(q))
 
         slot = self.write
@@ -139,7 +139,7 @@ struct TrajectoryBuffer(Movable):
         training tests can be deterministic end to end.
         """
         if self.count == 0:
-            raise Error("el buffer esta vacio: no hay nada que muestrear")
+            raise Error("the buffer is empty: there is nothing to sample")
         out = List[Int]()
         for i in range(n):
             bits = rand_bits(seed, stream, UInt32(i))
@@ -157,7 +157,7 @@ struct TrajectoryBuffer(Movable):
         for k in range(len(indices)):
             idx = indices[k]
             if idx < 0 or idx >= self.count:
-                raise Error("indice de secuencia fuera de rango: ", idx)
+                raise Error("sequence index out of range: ", idx)
             base = idx * span
             for i in range(span):
                 out.append(self.obs[base + i])
@@ -173,7 +173,7 @@ struct TrajectoryBuffer(Movable):
         for k in range(len(indices)):
             idx = indices[k]
             if idx < 0 or idx >= self.count:
-                raise Error("indice de secuencia fuera de rango: ", idx)
+                raise Error("sequence index out of range: ", idx)
             base = idx * self.t_len
             for i in range(self.t_len):
                 if which == 0:
@@ -198,13 +198,13 @@ struct TrajectoryBuffer(Movable):
     def gather_q(self, indices: List[Int]) raises -> List[Scalar[dtype]]:
         """The q of the requested sequences, in the requested order."""
         if self.num_actions == 0:
-            raise Error("este buffer se creo sin q (num_actions = 0)")
+            raise Error("this buffer was created without q (num_actions = 0)")
         span = self.t_len * self.num_actions
         out = List[Scalar[dtype]]()
         for k in range(len(indices)):
             idx = indices[k]
             if idx < 0 or idx >= self.count:
-                raise Error("indice fuera de rango: ", idx)
+                raise Error("index out of range: ", idx)
             base = idx * span
             for i in range(span):
                 out.append(self.q[base + i])
