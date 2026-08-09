@@ -1,30 +1,30 @@
-"""E2.6: las tres mediciones que cierran la etapa del actor.
+"""E2.6: the three measurements that close the actor stage.
 
-  1. **La red SOLA**, jugando sin buscar. Es la prueba de destilacion: ¿se metio en
-     los pesos algo del conocimiento de la busqueda? Se compara contra el azar
-     exacto (0.6484), calculado por recursion.
-  2. **El 2x2**: {SPO fiel, corregido} x {sin actor, con actor}. La celda que
-     demuestra el bucle EM es la segunda columna: la busqueda CON red superando a
-     la busqueda SIN red con el mismo presupuesto.
-  3. **La curva de presupuesto**: score contra numero de particulas, con y sin red.
-     Con red deberia alcanzarse antes el mismo nivel -- que es el argumento
-     practico de SPO frente a MCTS (pagas el entrenamiento una vez y luego buscas
-     menos).
+  1. **The network ALONE**, playing without searching. It is the distillation test:
+     did any of the search's knowledge get into the weights? It is compared against
+     exact random play (0.6484), computed by recursion.
+  2. **The 2x2**: {faithful SPO, corrected} x {without actor, with actor}. The cell
+     that demonstrates the EM loop is the second column: the search WITH the
+     network beating the search WITHOUT it at the same budget.
+  3. **The budget curve**: score against number of particles, with and without the
+     network. With the network the same level should be reached sooner -- which is
+     SPO's practical argument against MCTS (you pay for training once and then
+     search less).
 
-**Por que el 2x2 y no una comparacion directa.** Comparar "actor + readout
-corregido" contra "sin actor + readout de SPO" mezclaria dos cambios y no se podria
-atribuir la mejora a ninguno. Con las cuatro celdas se aisla la contribucion del
-actor (dentro de cada fila) y la del readout (entre filas).
+**Why the 2x2 and not a direct comparison.** Comparing "actor + corrected readout"
+against "no actor + SPO readout" would mix two changes and the improvement could
+not be attributed to either. With the four cells the actor's contribution (within
+each row) and the readout's (between rows) get isolated.
 
-**Cada montaje conserva SUS hiperparametros**, que es lo honesto: el de SPO va con
-remuestreo, gamma_r = 0.7 y sin castigo (el de M1); el corregido va sin remuestreo,
-gamma_r = 0.9 y castigo 1 (el de E1.11c). No es una ablacion pura del readout, es
-"los dos sistemas que tenemos, cada uno en su mejor ajuste, con y sin prior
-aprendido". Y cada uno entrena SU PROPIO actor con SU PROPIA q: un actor entrenado
-con la q de un readout no es el prior adecuado para el otro.
+**Each setup keeps ITS OWN hyperparameters**, which is the honest thing: SPO's runs
+with resampling, gamma_r = 0.7 and no penalty (M1's); the corrected one runs without
+resampling, gamma_r = 0.9 and penalty 1 (E1.11c's). It is not a pure readout
+ablation, it is "the two systems we have, each at its best setting, with and without
+a learned prior". And each trains ITS OWN actor with ITS OWN q: an actor trained
+with one readout's q is not the right prior for the other.
 
-Todas las partidas se juegan con la **moda** de q, no con una muestra: se esta
-midiendo fuerza, no explorando.
+Every game is played with the **mode** of q, not with a sample: we are measuring
+strength, not exploring.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -54,11 +54,11 @@ comptime EVAL_STEPS = 300
 comptime SWEEP_STEPS = 100
 comptime EVAL_SEED = UInt32(20260803)
 
-# Referencias exactas, por recursion sobre todos los estados.
+# Exact references, by recursion over all states.
 comptime RANDOM_SCORE = 0.6484
 comptime OPTIMAL_SCORE = 0.9974
 
-# Los dos montajes, cada uno con sus hiperparametros.
+# The two setups, each with its own hyperparameters.
 comptime SPO_PERIOD = 3
 comptime SPO_GAMMA = Scalar[dtype](0.7)
 comptime SPO_PENALTY = Scalar[dtype](0.0)
@@ -89,9 +89,9 @@ def pct(x: Float64) -> String:
 def show(a: Arm) raises:
     n = a.games()
     s = a.score()
-    # El IC va sobre el SCORE via las victorias y las derrotas por separado: el
-    # score es una media de 1/0.5/0 y su IC binomial no aplica tal cual, asi que se
-    # informa el IC de las derrotas (la columna que el juego optimo clava a 0).
+    # The CI goes over the SCORE via wins and losses separately: the score is a
+    # mean of 1/0.5/0 and its binomial CI does not apply as such, so the losses' CI
+    # is reported (the column optimal play pins at 0).
     print("   ", a.name, "  n=", n,
           "  gana ", pct(Float64(a.wins) / Float64(n)),
           "  empata ", pct(Float64(a.draws) / Float64(n)),
@@ -105,16 +105,16 @@ def show(a: Arm) raises:
 struct NetArm(Copyable, Movable):
     var arm: Arm
     var illegal: Int
-    """Cuantas veces la red eligio una casilla ocupada. TIENE que ser 0."""
+    """How many times the network chose an occupied cell. It HAS to be 0."""
 
 
 def play_network_only(ctx: DeviceContext, name: String, actor: Actor,
                       steps: Int) raises -> NetArm:
-    """La red decide sola: argmax de pi, sin busqueda ninguna.
+    """The network decides on its own: argmax of pi, with no search at all.
 
-    Es la prueba de destilacion. Si la red no hubiera aprendido nada de la
-    busqueda, jugaria como el prior inicial (casi uniforme sobre las legales) y
-    sacaria el score del azar, 0.6484.
+    It is the distillation test. If the network had learned nothing from the
+    search, it would play like the initial prior (nearly uniform over the legal
+    cells) and would score random play's 0.6484.
     """
     blocks = (EVAL_ENVS + TPB_TTT - 1) // TPB_TTT
     state = zero_buffer[dtype](ctx, EVAL_ENVS * STATE_DIM)
@@ -135,15 +135,15 @@ def play_network_only(ctx: DeviceContext, name: String, actor: Actor,
             obs.unsafe_ptr(), state.unsafe_ptr(), EVAL_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
         actor.forward(ctx, state, obs, EVAL_ENVS)
-        # La jugada es el argmax de pi. Las ocupadas salen a 0 exacto, asi que el
-        # argmax nunca puede caer en una casilla ilegal.
+        # The move is the argmax of pi. The occupied ones come out at exactly 0,
+        # so the argmax can never land on an illegal cell.
         ctx.enqueue_function[argmax_action_kernel, argmax_action_kernel](
             action.unsafe_ptr(), actor.probs.unsafe_ptr(), EVAL_ENVS,
             NUM_ACTIONS, grid_dim=blocks_for(EVAL_ENVS), block_dim=TPB)
-        # ANTES de aplicarla: ¿es legal? `ttt_apply` no lo comprueba (lo dice su
-        # docstring), asi que una jugada ilegal sobrescribiria la ficha del rival
-        # y el score saldria inflado. Se CUENTA en vez de suponer que el
-        # enmascarado basta.
+        # BEFORE applying it: is it legal? `ttt_apply` does not check (its
+        # docstring says so), so an illegal move would overwrite the rival's mark
+        # and the score would come out inflated. It is COUNTED rather than assuming
+        # the masking is enough.
         ctx.synchronize()
         with state.map_to_host() as sh:
             with action.map_to_host() as ah:
@@ -177,14 +177,14 @@ def play_network_only(ctx: DeviceContext, name: String, actor: Actor,
 
 def diagnose_prior(ctx: DeviceContext, actor: ActorLearner, spo_readout: Bool,
                    particles: Int, steps: Int) raises:
-    """¿Colapsa el prior aprendido la diversidad de la busqueda?
+    """Does the learned prior collapse the search's diversity?
 
-    Es la explicacion candidata de por que el criterio 2 falla. Si el prior es muy
-    picudo, `categorical_from_logits` sortea casi siempre la misma accion raiz: las
-    particulas acaban explorando UNA jugada y la busqueda no tiene nada que
-    comparar. Se mide contando cuantas acciones raiz DISTINTAS muestrean las
-    particulas, con prior de actor y con prior uniforme, sobre EL MISMO estado y
-    con LA MISMA semilla.
+    It is the candidate explanation for why criterion 2 fails. If the prior is very
+    peaked, `categorical_from_logits` almost always draws the same root action: the
+    particles end up exploring ONE move and the search has nothing to compare. It is
+    measured by counting how many DISTINCT root actions the particles sample, with
+    the actor's prior and with a uniform prior, over THE SAME state and with THE
+    SAME seed.
     """
     period = SPO_PERIOD if spo_readout else NO_RESAMPLE
     gamma_r = SPO_GAMMA if spo_readout else FIX_GAMMA
@@ -214,12 +214,12 @@ def diagnose_prior(ctx: DeviceContext, actor: ActorLearner, spo_readout: Bool,
 
     sum_a = Scalar[dtype](0); sum_u = Scalar[dtype](0)
     sum_legal = Scalar[dtype](0); count = 0
-    # Y la otra hipotesis, especifica del readout de MEDIA: la media por accion
-    # tiene varianza inversa al numero de particulas que la muestrean. Un prior
-    # picudo deja acciones legales con 1 o 2 particulas, y su media es ruido -- que
-    # luego compite de tu a tu con la de una accion muestreada 40 veces. El readout
-    # de SPO no sufre esto porque su suma de exponenciales pesa implicitamente por
-    # cuantas particulas hay.
+    # And the other hypothesis, specific to the MEAN readout: the per-action mean
+    # has variance inverse to the number of particles sampling it. A peaked prior
+    # leaves legal actions with 1 or 2 particles, and their mean is noise -- which
+    # then competes on equal terms with that of an action sampled 40 times. SPO's
+    # readout does not suffer from this because its sum of exponentials implicitly
+    # weights by how many particles there are.
     thin_a = 0; thin_u = 0; min_a = Scalar[dtype](0); min_u = Scalar[dtype](0)
 
     for step in range(steps):
@@ -249,8 +249,8 @@ def diagnose_prior(ctx: DeviceContext, actor: ActorLearner, spo_readout: Bool,
                 sum_a += Scalar[dtype](da); sum_u += Scalar[dtype](du)
                 sum_legal += Scalar[dtype](legal); count += 1
 
-                # Cuenta de particulas por accion, y cuantas acciones quedan
-                # "flacas" (menos de 4 particulas: su media es poco fiable).
+                # Particle count per action, and how many actions are left
+                # "thin" (fewer than 4 particles: their mean is unreliable).
                 cnt_a = List[Int](); cnt_u = List[Int]()
                 for _ in range(NUM_ACTIONS):
                     cnt_a.append(0); cnt_u.append(0)
@@ -267,8 +267,8 @@ def diagnose_prior(ctx: DeviceContext, actor: ActorLearner, spo_readout: Bool,
                         if cnt_u[a] < lo_u: lo_u = cnt_u[a]
                 min_a += Scalar[dtype](lo_a); min_u += Scalar[dtype](lo_u)
 
-        # Avanzar con la busqueda CON actor, para recorrer las posiciones que ese
-        # agente visita de verdad.
+        # Advance with the search WITH the actor, so as to walk the positions
+        # that agent actually visits.
         search[TicTacToeActor](ctx, ws, cfg, amodel, state, sd)
         if spo_readout:
             readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
@@ -301,10 +301,11 @@ def diagnose_prior(ctx: DeviceContext, actor: ActorLearner, spo_readout: Bool,
 def play_search(ctx: DeviceContext, name: String, actor: ActorLearner,
                 use_actor: Bool, spo_readout: Bool, particles: Int,
                 steps: Int) raises -> Arm:
-    """Juega con la busqueda, con o sin prior aprendido, con uno u otro readout.
+    """Plays with the search, with or without the learned prior, with one readout or
+    the other.
 
-    Cada montaje trae sus hiperparametros: el de SPO con remuestreo y gamma_r 0.7,
-    el corregido sin remuestreo, gamma_r 0.9 y castigo 1.
+    Each setup brings its own hyperparameters: SPO's with resampling and
+    gamma_r 0.7, the corrected one without resampling, gamma_r 0.9 and penalty 1.
     """
     period = SPO_PERIOD if spo_readout else NO_RESAMPLE
     gamma_r = SPO_GAMMA if spo_readout else FIX_GAMMA
@@ -340,7 +341,7 @@ def play_search(ctx: DeviceContext, name: String, actor: ActorLearner,
             search[TicTacToeActor](ctx, ws, cfg, amodel, state, sd)
         else:
             search[TicTacToe](ctx, ws, cfg, model, state, sd)
-        # La moda de q en los dos casos: se mide fuerza, no exploracion.
+        # The mode of q in both cases: strength is being measured, not exploration.
         if spo_readout:
             readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
         else:
@@ -372,8 +373,8 @@ def play_search(ctx: DeviceContext, name: String, actor: ActorLearner,
 
 
 def verdict(base: Arm, other: Arm) raises:
-    """Compara dos brazos por las derrotas, con la regla de siempre: si los IC de
-    Wilson se solapan, no se afirma diferencia."""
+    """Compares two arms by their losses, with the usual rule: if the Wilson
+    intervals overlap, no difference is claimed."""
     n1 = base.games(); n2 = other.games()
     hi2 = wilson_hi(other.losses, n2); lo1 = wilson_lo(base.losses, n1)
     lo2 = wilson_lo(other.losses, n2); hi1 = wilson_hi(base.losses, n1)
@@ -399,7 +400,7 @@ def main() raises:
               OPTIMAL_SCORE, "(este ultimo pierde 0.00%)")
         print()
 
-        # --- entrenar un actor por montaje, cada uno con SU q ---
+        # --- train one actor per setup, each with ITS OWN q ---
         print("--- 1. entrenamiento (un actor por montaje) ---")
         fixed = train_run(ctx, String("corregido, bucle EM"), True, False,
                           NO_RESAMPLE, FIX_GAMMA, FIX_PENALTY, EVAL_PARTICLES)

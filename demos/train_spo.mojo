@@ -1,29 +1,29 @@
-"""E2.4: el bucle de aprendizaje completo. Actor y critico, los dos entrenando.
+"""E2.4: the complete learning loop. Actor and critic, both training.
 
-Hasta aqui el critico aprendia solo (E1.10) y el actor existia pero no lo llamaba
-nadie. Esto los junta y cierra la mitad del bucle EM:
+Up to here the critic learned on its own (E1.10) and the actor existed but nobody
+called it. This brings them together and closes half the EM loop:
 
-    E-step   la busqueda planifica y produce q, la politica mejorada
-    M-step   el critico aprende a predecir retornos  (perdida L2, E1.10)
-             el actor aprende a imitar q             (ecuacion 11, E2.2/E2.3)
+    E-step   the search plans and produces q, the improved policy
+    M-step   the critic learns to predict returns  (L2 loss, E1.10)
+             the actor learns to imitate q         (equation 11, E2.2/E2.3)
 
-Falta la vuelta: que el prior de la busqueda salga del actor en vez de ser
-uniforme. Eso es E2.5, y hasta entonces la busqueda no se entera de que hay un
-actor -- aqui el actor solo mira. Que sea asi a proposito importa: permite medir
-si el actor APRENDE antes de meterlo a decidir, y si algo sale raro en E2.5 ya se
-sabe que no viene de aqui.
+The return leg is still missing: having the search's prior come from the actor
+instead of being uniform. That is E2.5, and until then the search does not know
+there is an actor -- here the actor only watches. That this is deliberate matters:
+it allows measuring whether the actor LEARNS before putting it in charge of
+deciding, and if something looks odd in E2.5 we already know it does not come from
+here.
 
-**Optimizador propio para cada red**, como en Stoix, que tiene `actor_lr` y
-`critic_lr` por separado (los dos a 3e-4 en su config) y encadena el clip por
-norma dentro de cada optax. O sea: dos estados de Adam, dos clips globales
-independientes. Mezclarlos haria que la norma de uno recortara los gradientes del
-otro.
+**Its own optimiser for each network**, as in Stoix, which has separate `actor_lr`
+and `critic_lr` (both at 3e-4 in its config) and chains the norm clip inside each
+optax. That is: two Adam states, two independent global clips. Mixing them would
+mean one's norm clipped the other's gradients.
 
-**Que se reporta y por que.** La entropia cruzada cruda no sirve de curva: se
-descompone en H(q) + KL(q||pi) y H(q) NO depende del actor, asi que el suelo se
-mueve cuando cambia q. Se reporta la **KL**, cuyo cero significa "el actor
-reproduce lo que dice la busqueda" y es comparable entre configuraciones. Ver el
-comentario largo en networks/actor_loss.mojo.
+**What gets reported and why.** The raw cross entropy is useless as a curve: it
+decomposes into H(q) + KL(q||pi) and H(q) does NOT depend on the actor, so the floor
+moves when q changes. The **KL** is reported, whose zero means "the actor reproduces
+what the search says" and is comparable across configurations. See the long comment
+in networks/actor_loss.mojo.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -70,8 +70,8 @@ comptime TAU = Scalar[dtype](0.005)
 comptime BATCH = 16
 comptime BUFFER_CAP = 256
 
-# La busqueda, con el montaje que quedo tras E1.11c: sin remuestreo, readout de
-# media, y el castigo por derrota. Es el que juega a 0.00% de derrotas.
+# The search, with the setup left after E1.11c: no resampling, mean readout, and
+# the loss penalty. It is the one that plays at 0.00% losses.
 comptime NUM_PARTICLES = 128
 comptime SEARCH_DEPTH = 6
 comptime NO_RESAMPLE = 99
@@ -79,12 +79,12 @@ comptime TEMPERATURE = Scalar[dtype](0.02)
 comptime REWARD_GAMMA = Scalar[dtype](0.9)
 comptime LOSS_PENALTY = Scalar[dtype](1.0)
 
-# Stream propio para el sorteo de la accion en el readout. RNG_POLICY (20000) y
-# RNG_RIVAL (30000) ya estan tomados; 40000 no colisiona con ninguno.
+# Its own stream for the readout's action draw. RNG_POLICY (20000) and RNG_RIVAL
+# (30000) are already taken; 40000 collides with neither.
 comptime RNG_READOUT = UInt32(3_000_000)
-# Ouverture de l'adversaire quand c'est lui qui commence. Flux separe : il ne doit
-# correler ni avec la politique, ni avec les reponses de l'adversaire en cours de
-# partie, sinon le siege et le jeu seraient lies.
+# The opponent's opening move when it is the one that starts. A separate stream:
+# it must correlate neither with the policy nor with the opponent's replies during
+# the game, otherwise the seat and the play would be linked.
 comptime RNG_OPEN = UInt32(5_000_000)
 
 comptime TRAIN_ROUNDS = 30
@@ -92,7 +92,7 @@ comptime UPDATES_PER_ROUND = 80
 
 
 struct ActorLearner(Movable):
-    """El actor con todo lo que hace falta para entrenarlo."""
+    """The actor with everything needed to train it."""
 
     var net: Actor
     var grads: CriticGrads
@@ -119,12 +119,11 @@ struct ActorLearner(Movable):
 
 def init_actor_weights(ctx: DeviceContext, mut actor: ActorLearner,
                        seed: UInt32) raises:
-    """Pesos tipo He y biases a cero, igual que el critico.
+    """He-style weights and zero biases, same as the critic.
 
-    Con biases a cero y pesos centrados, la politica inicial es practicamente
-    uniforme sobre las legales -- que es exactamente el prior con el que la
-    busqueda ha estado trabajando hasta ahora. O sea que en E2.5 el actor entrara
-    sin dar un salto brusco.
+    With zero biases and centred weights, the initial policy is practically uniform
+    over the legal cells -- which is exactly the prior the search has been working
+    with so far. That is, in E2.5 the actor will come in without a sudden jump.
     """
     fan_ins = List[Int]()
     fan_ins.append(OBS_DIM); fan_ins.append(HIDDEN); fan_ins.append(HIDDEN)
@@ -162,14 +161,15 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             u_rival: DeviceBuffer[dtype], u_readout: DeviceBuffer[dtype],
             u_open: DeviceBuffer[dtype], seed: UInt32,
             round_idx: Int) raises -> Scalar[dtype]:
-    """Juega ROLLOUT turnos y guarda observaciones, recompensas Y la q.
+    """Plays ROLLOUT turns and stores observations, rewards AND the q.
 
-    La diferencia con el `collect` de E1.10 es esa q: es el objetivo del actor, y
-    hay que capturarla EN EL MOMENTO, porque el workspace de la busqueda se
-    reutiliza y en el turno siguiente ya no esta.
+    The difference from E1.10's `collect` is that q: it is the actor's target, and
+    it has to be captured AT THE MOMENT, because the search's workspace is reused
+    and on the next turn it is gone.
 
-    Como alli, `next_obs` se toma DESPUES del paso pero ANTES del auto-reset: si se
-    cogiera despues, el bootstrap miraria a un tablero vacio de otra partida.
+    As there, `next_obs` is taken AFTER the step but BEFORE the auto-reset: if it
+    were taken afterwards, the bootstrap would be looking at an empty board from
+    another game.
     """
     blocks = (NUM_ENVS + TPB_TTT - 1) // TPB_TTT
 
@@ -193,30 +193,30 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
     for t in range(ROLLOUT):
         stream = UInt32(round_idx * ROLLOUT + t)
 
-        # La observacion ANTES de mover: es la que va con esta q.
+        # The observation BEFORE moving: it is the one that goes with this q.
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
             obs_buf.unsafe_ptr(), state.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
 
-        # Con `use_actor`, la busqueda parte del prior de la red en vez de
-        # uniforme: es lo que cierra el bucle EM.
+        # With `use_actor`, the search starts from the network's prior instead of
+        # uniform: it is what closes the EM loop.
         if use_actor:
             search[TicTacToeActor](ctx, ws, cfg, amodel, state,
                                    seed ^ (stream * 2654435761))
         else:
             search[TicTacToe](ctx, ws, cfg, model, state,
                               seed ^ (stream * 2654435761))
-        # El readout de la variante deja q densa en q_buf Y elige la accion.
-        # Se sortea de q (greedy=False) en vez de coger la moda: ese sorteo ES la
-        # exploracion de SPO, y sin el el buffer solo veria una linea de juego.
-        # Uniformes FRESCOS: reutilizar los que dejo la busqueda haria que el
-        # sorteo estuviera correlacionado con el muestreo de particulas.
+        # The variant's readout leaves a dense q in q_buf AND picks the action.
+        # It draws from q (greedy=False) instead of taking the mode: that draw IS
+        # SPO's exploration, and without it the buffer would only ever see one line
+        # of play. FRESH uniforms: reusing the ones the search left would make the
+        # draw correlated with the particle sampling.
         ctx.enqueue_function[fill_uniform, fill_uniform](
             u_readout.unsafe_ptr(), seed, RNG_READOUT + stream, NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
         if spo_readout:
-            # La q de SPO tal cual: agregar por accion los pesos por particula.
-            # La accion ejecutada es la que ya eligio `search` (sorteada de q).
+            # SPO's q as it stands: aggregate the per-particle weights by action.
+            # The action executed is the one `search` already chose (drawn from q).
             q_histogram(ctx, ws.particles, ws.output, cfg, q_buf)
         else:
             readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf,
@@ -263,7 +263,7 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             state.unsafe_ptr(), done.unsafe_ptr(), u_open.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
 
-    # Una secuencia por env.
+    # One sequence per env.
     for e in range(NUM_ENVS):
         seq_obs = List[Scalar[dtype]]()
         seq_next = List[Scalar[dtype]]()
@@ -288,21 +288,21 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
 
 def states_from_buffer(buf: TrajectoryBuffer, n_want: Int, seed: UInt32,
                        stream: UInt32) raises -> List[Scalar[dtype]]:
-    """`n_want` tableros sacados del buffer, reconstruidos desde la observacion.
+    """`n_want` boards taken from the buffer, reconstructed from the observation.
 
-    Hace falta porque el suelo de la KL tiene que medirse sobre la MISMA
-    distribucion de estados con la que se entrena. Medirlo sobre posiciones
-    frescas da un numero que no es comparable -- me paso: sali con un suelo de
-    1.21 y un actor a 0.94, o sea el actor "por debajo del suelo", que es
-    imposible y solo significaba que estaba comparando dos cosas distintas.
+    It is needed because the KL's floor has to be measured over the SAME state
+    distribution the training uses. Measuring it over fresh positions gives a number
+    that is not comparable -- it happened to me: I came out with a floor of 1.21 and
+    an actor at 0.94, that is, the actor "below the floor", which is impossible and
+    only meant I was comparing two different things.
     """
     idx = buf.sample_indices(n_want, seed, stream)
     obs = buf.gather(idx)
     span = buf.t_len * buf.obs_dim
     out = List[Scalar[dtype]]()
     for k in range(n_want):
-        # Un paso al azar dentro de la secuencia, para no coger siempre el t=0
-        # (que es casi siempre el tablero vacio).
+        # A random step within the sequence, so as not to always take t=0 (which
+        # is almost always the empty board).
         t = Int((seed + UInt32(k) * 2654435761) % UInt32(buf.t_len))
         base = k * span + t * buf.obs_dim
         for c in range(NUM_CELLS):
@@ -323,40 +323,40 @@ def measure_q_noise(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
                     q_buf: DeviceBuffer[dtype], logits_buf: DeviceBuffer[dtype],
                     u_readout: DeviceBuffer[dtype], reps: Int,
                     seed: UInt32) raises -> Scalar[dtype]:
-    """El SUELO de la KL: cuanto ruido tiene q como objetivo.
+    """The KL's FLOOR: how much noise q carries as a target.
 
-    Hace falta por la misma razon que hizo falta separar H(q) de la entropia
-    cruzada. La q que el actor imita sale de una busqueda con particulas
-    ALEATORIAS: la misma posicion buscada dos veces da q distintas. Un actor es una
-    funcion determinista del estado, asi que lo mejor que puede aprender es la
-    MEDIA de esas q, y su KL no bajara del ruido que las separa.
+    It is needed for the same reason H(q) had to be separated from the cross
+    entropy. The q the actor imitates comes out of a search with RANDOM particles:
+    the same position searched twice gives different qs. An actor is a deterministic
+    function of the state, so the best it can learn is the MEAN of those qs, and its
+    KL will not drop below the noise separating them.
 
-    **La forma de calcularlo importa, y me equivoque dos veces antes de dar con
-    ella.** El suelo es E_k[KL(q_k || q_media)], y con pi = q_media eso vale
+    **How it is computed matters, and I got it wrong twice before finding it.** The
+    floor is E_k[KL(q_k || q_mean)], and with pi = q_mean that is
 
-        suelo = H(q_media) - E_k[H(q_k)]
+        floor = H(q_mean) - E_k[H(q_k)]
 
-    Esa segunda forma es la que se usa aqui, y es la unica estable. Calcularlo como
-    KL directa exige estimar bien q_media, y con q casi one-hot sobre 5-9 casillas
-    eso pide muchisimas repeticiones: si la casilla de q_k aparece en pocas de las
-    demas, el log de una probabilidad diminuta infla el resultado sin limite (con
-    leave-one-out y 12 repeticiones me salio un suelo de 1.33, por encima de la KL
-    del actor, o sea imposible). Con la diferencia de entropias no hay logaritmos
-    de valores diminutos y el numero es estable.
+    That second form is the one used here, and it is the only stable one. Computing
+    it as a direct KL requires estimating q_mean well, and with q nearly one-hot over
+    5-9 cells that calls for a great many repetitions: if q_k's cell appears in few
+    of the others, the log of a tiny probability inflates the result without bound
+    (with leave-one-out and 12 repetitions I got a floor of 1.33, above the actor's
+    KL, that is, impossible). With the difference of entropies there are no
+    logarithms of tiny values and the number is stable.
 
-    Queda un sesgo: H(q_media) se estima con `reps` muestras y sale algo bajo, asi
-    que el suelo tambien. Se mitiga subiendo reps, y main() lo mide con dos valores
-    distintos para que se vea si el numero se mueve.
+    A bias remains: H(q_mean) is estimated with `reps` samples and comes out
+    somewhat low, so the floor does too. It is mitigated by raising reps, and main()
+    measures it with two different values so that any movement in the number shows.
     """
     all_q = List[Scalar[dtype]]()
     n = cfg.num_envs * NUM_ACTIONS
     blocks = (cfg.num_envs + TPB_TTT - 1) // TPB_TTT
 
     for k in range(reps):
-        # Con EL MISMO modelo que genero los datos de entrenamiento. Medirlo con
-        # otro da un suelo de otra distribucion de q y el numero no es comparable:
-        # me volvio a pasar aqui -- salio un "138% de lo reducible", imposible, y
-        # era esto.
+        # With THE SAME model that generated the training data. Measuring it with
+        # another gives a floor from a different q distribution and the number is not
+        # comparable: it happened to me again here -- a "138% of what is reducible"
+        # came out, impossible, and this was the cause.
         if use_actor:
             search[TicTacToeActor](ctx, ws, cfg, amodel, state,
                                    seed ^ (UInt32(7919 + k) * 2654435761))
@@ -373,7 +373,7 @@ def measure_q_noise(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
         for i in range(n):
             all_q.append(qk[i])
 
-    # E_k[H(q_k)]: la entropia media de las q individuales.
+    # E_k[H(q_k)]: the mean entropy of the individual qs.
     mean_h = Scalar[dtype](0)
     for k in range(reps):
         for e in range(cfg.num_envs):
@@ -385,7 +385,7 @@ def measure_q_noise(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
             mean_h += -acc
     mean_h /= Scalar[dtype](reps * cfg.num_envs)
 
-    # H(q_media): la entropia de la media.
+    # H(q_mean): the entropy of the mean.
     h_mean = Scalar[dtype](0)
     for e in range(cfg.num_envs):
         acc = Scalar[dtype](0)
@@ -399,13 +399,13 @@ def measure_q_noise(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
         h_mean += -acc
     h_mean /= Scalar[dtype](cfg.num_envs)
 
-    # Por Jensen H(media) >= media(H), asi que esto no puede salir negativo.
+    # By Jensen H(mean) >= mean(H), so this cannot come out negative.
     return h_mean - mean_h
 
 
 @fieldwise_init
 struct Report(Copyable, Movable):
-    """Lo que sale de un paso de aprendizaje."""
+    """What comes out of one learning step."""
     var critic_loss: Scalar[dtype]
     var cross_entropy: Scalar[dtype]
     var entropy_q: Scalar[dtype]
@@ -416,7 +416,7 @@ struct Report(Copyable, Movable):
 
 def update(ctx: DeviceContext, mut critic: Critic, mut actor: ActorLearner,
            buf: TrajectoryBuffer, step: Int, seed: UInt32) raises -> Report:
-    """Un paso de gradiente sobre las DOS redes, cada una con su optimizador."""
+    """One gradient step on BOTH networks, each with its own optimiser."""
     idx = buf.sample_indices(BATCH, seed, UInt32(step))
     n = BATCH * ROLLOUT
 
@@ -432,7 +432,7 @@ def update(ctx: DeviceContext, mut critic: Critic, mut actor: ActorLearner,
         disc_host.append((Scalar[dtype](1) - done_host[i]) * GAMMA)
     discount = upload[dtype](ctx, disc_host)
 
-    # ---------------- el critico, igual que en E1.10 ----------------
+    # ---------------- the critic, same as in E1.10 ----------------
     v_tm1 = zero_buffer[dtype](ctx, n)
     v_t = zero_buffer[dtype](ctx, n)
     critic_forward(ctx, critic.target, critic.tcache, obs, n)
@@ -491,8 +491,8 @@ def update(ctx: DeviceContext, mut critic: Critic, mut actor: ActorLearner,
     ema_update(ctx, critic.target.w3, critic.online.w3, HIDDEN, TAU)
     ema_update(ctx, critic.target.b3, critic.online.b3, 1, TAU)
 
-    # ---------------- el actor ----------------
-    # La mascara sale de la observacion, que es lo unico que el buffer guarda.
+    # ---------------- the actor ----------------
+    # The mask comes from the observation, which is all the buffer stores.
     ctx.enqueue_function[ttt_legal_mask_from_obs_kernel,
                          ttt_legal_mask_from_obs_kernel](
         actor.net.mask.unsafe_ptr(), obs.unsafe_ptr(), n,
@@ -500,8 +500,8 @@ def update(ctx: DeviceContext, mut critic: Critic, mut actor: ActorLearner,
     actor_probs(ctx, actor.net.params, actor.net.cache, obs, actor.net.mask,
                 actor.net.probs, n)
 
-    # Perdida y diagnostico. La entropia cruzada se descompone en H(q) + KL, y
-    # solo la KL depende del actor.
+    # Loss and diagnostic. The cross entropy decomposes into H(q) + KL, and only
+    # the KL depends on the actor.
     log_pi = zero_buffer[dtype](ctx, n * NUM_ACTIONS)
     ce = zero_buffer[dtype](ctx, n)
     hq = zero_buffer[dtype](ctx, n)
@@ -526,8 +526,8 @@ def update(ctx: DeviceContext, mut critic: Critic, mut actor: ActorLearner,
                    actor.scratch, obs, actor.net.probs, q, actor.net.mask, n)
     ctx.synchronize()
 
-    # Clip GLOBAL propio: la norma del actor no debe recortar al critico ni al
-    # reves. Es lo que hace Stoix al encadenar el clip dentro de cada optax.
+    # Its own GLOBAL clip: the actor's norm must not clip the critic nor the other
+    # way round. It is what Stoix does by chaining the clip inside each optax.
     a_sq = (sum_squares(ctx, actor.grads.dw1, OBS_DIM * HIDDEN)
             + sum_squares(ctx, actor.grads.db1, HIDDEN)
             + sum_squares(ctx, actor.grads.dw2, HIDDEN * HIDDEN)
@@ -568,10 +568,11 @@ struct ArmResult(Copyable, Movable):
 
 
 struct TrainOutcome(Movable):
-    """Lo que sale de entrenar: las metricas Y el actor, para poder medirlo.
+    """What comes out of training: the metrics AND the actor, so it can be measured.
 
-    Va junto porque `ActorLearner` posee `DeviceBuffer` y solo es `Movable`: si el
-    entrenamiento no lo devolviera, habria que reentrenar para medir.
+    They go together because `ActorLearner` owns `DeviceBuffer`s and is only
+    `Movable`: if training did not return it, one would have to retrain in order to
+    measure.
     """
     var result: ArmResult
     var actor: ActorLearner
@@ -579,8 +580,8 @@ struct TrainOutcome(Movable):
 
     def __init__(out self, var result: ArmResult, var actor: ActorLearner,
                  var critic: Critic):
-        # Init explicito: `@fieldwise_init` no vale porque `ActorLearner` posee
-        # DeviceBuffers y hay que TRANSFERIRLO, no copiarlo.
+        # Explicit init: `@fieldwise_init` will not do because `ActorLearner` owns
+        # DeviceBuffers and it has to be TRANSFERRED, not copied.
         self.result = result^
         self.actor = actor^
         self.critic = critic^
@@ -596,23 +597,24 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
               temp: Scalar[dtype] = TEMPERATURE,
               rounds: Int = TRAIN_ROUNDS,
               seed: UInt32 = SEED) raises -> TrainOutcome:
-    """Un brazo completo: entrena actor y critico, con o sin prior aprendido.
+    """A complete arm: trains actor and critic, with or without a learned prior.
 
-    Los dos brazos comparten semilla, config y numero de pasos. Lo unico que
-    cambia es de donde sale el prior de la busqueda, asi que la diferencia se
-    puede atribuir a eso y no a otra cosa.
+    Both arms share seed, config and number of steps. The only thing that changes is
+    where the search's prior comes from, so the difference can be attributed to that
+    and to nothing else.
 
-    `rounds` es el presupuesto de DATOS: cada ronda juega ROLLOUT turnos en NUM_ENVS
-    entornos, o sea ROLLOUT*NUM_ENVS pasos de entorno. Es parametro y no constante
-    porque la comparacion del Milestone 4 necesita igualar este presupuesto con el
-    de SPO-Stoix, y el defecto tiene que seguir siendo el de siempre para no mover
-    en silencio lo que miden los demas experimentos.
+    `rounds` is the DATA budget: each round plays ROLLOUT turns across NUM_ENVS
+    environments, that is, ROLLOUT*NUM_ENVS environment steps. It is a parameter and
+    not a constant because Milestone 4's comparison needs to match this budget with
+    SPO-Stoix's, and the default has to stay as it always was so as not to silently
+    move what the other experiments measure.
 
-    `seed` gobierna TODO el azar del entrenamiento: inicializacion de las dos redes,
-    rollouts, sorteo del readout y muestreo del buffer. Es parametro para poder medir
-    la variabilidad ENTRE SEMILLAS, que es una incertidumbre distinta de la del
-    numero de partidas jugadas: el intervalo de Wilson dice cuantas partidas se
-    jugaron, no cuanto depende el resultado del azar del entrenamiento.
+    `seed` governs ALL the training's randomness: initialisation of both networks,
+    rollouts, the readout's draw and the buffer's sampling. It is a parameter so
+    that the variability BETWEEN SEEDS can be measured, which is a different
+    uncertainty from that of the number of games played: the Wilson interval says
+    how many games were played, not how much the result depends on training's
+    randomness.
     """
     cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=particles,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
@@ -645,10 +647,10 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
     u_rival = zero_buffer[dtype](ctx, NUM_ENVS)
     u_readout = zero_buffer[dtype](ctx, NUM_ENVS)
     u_open = zero_buffer[dtype](ctx, NUM_ENVS)
-    # L'agent ouvre dans les environnements d'indice pair, repond dans les impairs.
-    # Il apprend donc les deux sieges, ce qui est indispensable : les mesures
-    # finales l'evaluent dans les deux, et un agent entraine d'un seul cote y
-    # serait juge sur une situation qu'il n'a jamais vue.
+    # The agent opens in the even-indexed environments and answers in the odd ones.
+    # It therefore learns both seats, which is indispensable: the final measurements
+    # evaluate it in both, and an agent trained on one side only would be judged
+    # there on a situation it has never seen.
     ctx.enqueue_function[fill_uniform, fill_uniform](
         u_open.unsafe_ptr(), seed, RNG_OPEN, NUM_ENVS,
         grid_dim=blocks, block_dim=TPB_TTT)
@@ -674,13 +676,13 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
             if round_idx == 0 and e == 0:
                 first = r.copy()
             last = r.copy()
-        # AQUI se cierra el bucle: la busqueda de la ronda siguiente vera al actor
-        # que se acaba de entrenar. Sin esta linea el M-step entrenaria una red que
-        # nadie usa.
+        # HERE is where the loop closes: the next round's search will see the actor
+        # that has just been trained. Without this line the M-step would train a
+        # network nobody uses.
         if use_actor:
-            # Las DOS redes se refrescan: el bucle EM cierra sobre el actor, y el
-            # critico tambien tiene que ser el actual o la busqueda evaluaria con
-            # un V de hace 80 pasos de gradiente.
+            # BOTH networks get refreshed: the EM loop closes over the actor, and
+            # the critic also has to be the current one or the search would evaluate
+            # with a V from 80 gradient steps ago.
             amodel.sync_from(ctx, actor.net.params)
             amodel.sync_critic_from(ctx, critic.online)
             ctx.synchronize()

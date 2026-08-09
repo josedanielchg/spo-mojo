@@ -1,31 +1,32 @@
-"""H5: evalua SPO-Stoix en tres en raya y escribe la fila del CSV comun.
+"""H5: evaluates SPO-Stoix on tic-tac-toe and writes the common CSV's row.
 
-Correr desde la raiz del repo de Stoix (necesita su venv y sus imports):
+Run from the root of the Stoix repo (it needs its venv and its imports):
 
     PYTHONPATH=. .venv/bin/python mojo_spo/bench/spo_stoix_ttt.py \
         --checkpoint-uid ttt_run1 --games 6000 --out mojo_spo/results/bench_spo_stoix.csv
 
-Escribe en el MISMO esquema de 17 columnas que usan MCTS-Mojo y SMC-Mojo
-(`mojo_spo/bench/metrics.mojo`), para que las tres patas se puedan concatenar en el
+It writes in the SAME 17-column schema used by MCTS-Mojo and SMC-Mojo
+(`mojo_spo/bench/metrics.mojo`), so that the three legs can be concatenated in
 Milestone 4.
 
-**Mide con los DOS protocolos, y eso es el punto delicado.** El evaluador de Stoix
-juega `search_output.action`, que es una accion MUESTREADA de q
-(`stoix/systems/search/evaluator.py:57`). Nuestro MCTS juega su argmax de visitas
+**It measures with BOTH protocols, and that is the delicate point.** Stoix's
+evaluator plays `search_output.action`, which is an action SAMPLED from q
+(`stoix/systems/search/evaluator.py:57`). Our MCTS plays its visit argmax
 (`MCTS-mojo-tictactoe/src/mcts.mojo:56`: "return the most-visited root action").
-Comparar el argmax de uno contra el sorteo del otro seria comparar explotacion
-contra exploracion, asi que se emiten dos filas etiquetadas:
+Comparing one's argmax against the other's draw would be comparing exploitation
+against exploration, so two labelled rows are emitted:
 
-    spo_stoix_moda        el argmax de q  -> comparable con MCTS y con SMC-Mojo
-    spo_stoix_muestreada  el sorteo de q  -> lo que hace el evaluador de Stoix
+    spo_stoix_moda        the argmax of q -> comparable with MCTS and SMC-Mojo
+    spo_stoix_muestreada  the draw from q -> what Stoix's evaluator does
 
-La moda hay que construirla aqui porque Stoix no la expone: q es implicita (las
-acciones raiz con sus pesos, con repeticiones), asi que se agrega por accion y se
-coge el maximo -- la misma operacion que `q_histogram` en la version de Mojo.
+The mode has to be built here because Stoix does not expose it: q is implicit (the
+root actions with their weights, with repetitions), so it is aggregated per action
+and the maximum taken -- the same operation as `q_histogram` in the Mojo version.
 
-El script NO entrena. Se entrena antes con el punto de entrada normal y
-`logger.checkpointing.save_model=True`, y aqui solo se carga: asi la medicion es
-reproducible y no depende de que el entrenamiento salga igual dos veces.
+The script does NOT train. Training happens beforehand through the normal entry
+point with `logger.checkpointing.save_model=True`, and here it is only loaded: that
+way the measurement is reproducible and does not depend on training coming out the
+same twice.
 """
 
 import argparse
@@ -40,13 +41,13 @@ import numpy as np
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
-# Referencias exactas de tres en raya, por recursion sobre todos los estados.
-# Referencias exactas por recursion sobre todos los estados alcanzables.
-# El agente abre la mitad de las partidas y responde la otra mitad, y los dos
-# asientos NO son el mismo problema: contra el mismo rival uniforme, el juego que
-# maximiza el score saca 0.9974 abriendo y 0.9624 respondiendo. Y sobre todo,
-# pierde 0.00% de las que abre contra 0.42% de las que responde -- respondiendo,
-# maximizar el score EXIGE aceptar derrotas.
+# Exact tic-tac-toe references, by recursion over all states.
+# Exact references by recursion over all reachable states.
+# The agent opens half the games and answers the other half, and the two seats are
+# NOT the same problem: against the same uniform rival, score-maximising play gets
+# 0.9974 opening and 0.9624 answering. And above all, it loses 0.00% of the ones it
+# opens against 0.42% of the ones it answers -- when answering, maximising the
+# score REQUIRES accepting losses.
 RANDOM_FIRST, RANDOM_SECOND, RANDOM_MEAN = 0.6484, 0.3516, 0.5000
 OPTIMAL_FIRST, OPTIMAL_SECOND, OPTIMAL_MEAN = 0.9974, 0.9624, 0.9799
 
@@ -60,19 +61,19 @@ CSV_HEADER = [
 
 def dense_q(sampled_actions: jnp.ndarray, weights: jnp.ndarray,
             num_actions: int) -> jnp.ndarray:
-    """q como vector [num_actions] a partir de (acciones raiz, pesos).
+    """q as a [num_actions] vector from (root actions, weights).
 
-    Es la reagrupacion `SUMA_n w_n = SUMA_a q(a)` de la ecuacion 6: las acciones
-    raiz se repiten entre particulas y sus pesos se suman. No cambia nada, solo la
-    forma -- pero hace falta para poder coger el maximo, porque sobre la forma
-    implicita no se puede.
+    It is equation 6's regrouping `SUM_n w_n = SUM_a q(a)`: the root actions repeat
+    across particles and their weights get summed. It changes nothing, only the
+    shape -- but it is needed in order to take the maximum, because on the implicit
+    form one cannot.
     """
     one_hot = jax.nn.one_hot(sampled_actions, num_actions)  # [N, A]
     return jnp.einsum("n,na->a", weights, one_hot)
 
 
 def _select(mask: jnp.ndarray, when_true: Any, when_false: Any) -> Any:
-    """Elige por env entre dos pytrees, difundiendo la mascara a cada hoja."""
+    """Chooses per env between two pytrees, broadcasting the mask to each leaf."""
 
     def pick(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
         m = mask.reshape((mask.shape[0],) + (1,) * (jnp.ndim(a) - 1))
@@ -82,7 +83,7 @@ def _select(mask: jnp.ndarray, when_true: Any, when_false: Any) -> Any:
 
 
 def _replace_rng(state: Any, keys: jnp.ndarray) -> Any:
-    """Sustituye `rng_key` en el nivel del estado que la tenga."""
+    """Replaces `rng_key` at whichever level of the state has it."""
     if hasattr(state, "rng_key"):
         return state.replace(rng_key=keys)
     if hasattr(state, "base_env_state"):
@@ -91,14 +92,15 @@ def _replace_rng(state: Any, keys: jnp.ndarray) -> Any:
 
 
 def build(cfg: DictConfig, untrained: bool = False) -> Tuple[Any, ...]:
-    """Monta el entorno, las redes y la busqueda, y carga los pesos entrenados.
+    """Builds the environment, the networks and the search, and loads the trained weights.
 
-    Con `untrained=True` NO se carga el checkpoint y se juega con los pesos recien
-    inicializados. Sirve para comparar la BUSQUEDA sola contra la de otra
-    implementacion: una red sin entrenar da un prior practicamente uniforme y un
-    critico sin informacion, asi que lo unico que queda trabajando es el SMC. Es la
-    unica forma de barrer los mandos de busqueda y que muevan algo -- con la red
-    entrenada el agente resuelve el tres en raya por si solo y todo satura.
+    With `untrained=True` the checkpoint is NOT loaded and play happens with
+    freshly initialised weights. It serves to compare the SEARCH on its own against
+    another implementation's: an untrained network gives a practically uniform
+    prior and an uninformed critic, so the only thing left working is the SMC. It is
+    the only way to sweep the search knobs and have them move anything -- with the
+    trained network the agent solves tic-tac-toe on its own and everything
+    saturates.
     """
     from stoix.systems.spo.ff_spo import learner_setup
     from stoix.utils.checkpointing import Checkpointer
@@ -110,8 +112,8 @@ def build(cfg: DictConfig, untrained: bool = False) -> Tuple[Any, ...]:
         env, (keys[0], keys[1], keys[2]), cfg, eval_env
     )
 
-    # Los params vienen replicados por dispositivo y por update_batch: se coge el
-    # primero de cada eje para tener un juego "plano" con el que jugar.
+    # The params come replicated per device and per update_batch: the first of each
+    # axis is taken to get a "flat" set to play with.
     params = jax.tree_util.tree_map(lambda x: x[0][0], learner_state.params)
 
     if untrained:
@@ -128,21 +130,23 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
          params: Any, num_envs: int, steps: int, greedy: bool,
          seed: int, random_policy: bool = False,
          break_rng_sharing: bool = False) -> Dict[str, Any]:
-    """Juega `num_envs` partidas en paralelo durante `steps` rondas.
+    """Plays `num_envs` games in parallel for `steps` rounds.
 
-    `random_policy` salta la busqueda y juega uniformemente entre las legales. Es
-    la validacion del BUCLE DE MEDIDA: tiene que dar el 0.6484 exacto del azar. Sin
-    ella, un fallo del bucle se confunde con un resultado del agente -- y de hecho
-    paso: la primera version daba score 1.0000, por encima del optimo teorico.
+    `random_policy` skips the search and plays uniformly among the legal moves. It
+    is the validation of the MEASUREMENT LOOP: it has to give random play's exact
+    0.6484. Without it, a fault in the loop gets mistaken for a result of the agent
+    -- and it did happen: the first version gave a score of 1.0000, above the
+    theoretical optimum.
     """
     num_actions = cfg.system.action_dim if "action_dim" in cfg.system else 9
 
     def decide(params: Any, obs: Any, env_state: Any, key: jax.Array) -> jnp.ndarray:
-        # `env_state` DIRECTO, no `env_state.unwrapped_state`. Los dos aparecen en
-        # Stoix y la diferencia es cual entorno se usa: el LEARNER va con el env
-        # completo (con core wrappers) y desnuda el estado (`ff_spo.py:1101`); el
-        # EVALUADOR va con `eval_env`, que no los lleva, y lo pasa tal cual
-        # (`search/evaluator.py:55`). Aqui se evalua, asi que toca lo segundo.
+        # `env_state` DIRECTLY, not `env_state.unwrapped_state`. Both appear in
+        # Stoix and the difference is which environment is used: the LEARNER runs
+        # with the full env (with core wrappers) and unwraps the state
+        # (`ff_spo.py:1101`); the EVALUATOR runs with `eval_env`, which does not
+        # carry them, and passes it as is (`search/evaluator.py:55`). Here we are
+        # evaluating, so it is the latter.
         if random_policy:
             mask = obs.action_mask
             return jax.random.categorical(key, jnp.where(mask > 0, 0.0, -jnp.inf))
@@ -150,7 +154,7 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
         out = search_apply_fn(params, key, root)
         if not greedy:
             return out.action
-        # La moda: agregar q por accion y coger el maximo. vmap sobre el batch.
+        # The mode: aggregate q per action and take the maximum. vmap over the batch.
         q = jax.vmap(dense_q, in_axes=(0, 0, None))(
             out.sampled_actions, out.sampled_action_weights, num_actions
         )
@@ -163,9 +167,10 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
     step = jax.jit(jax.vmap(eval_env.step))
 
     state, ts = reset(keys)
-    # El asiento se deduce del tablero recien reiniciado, sin plumbing extra: nueve
-    # casillas legales significa que abre el agente, ocho que el rival ya jugo.
-    # Hay que recalcularlo tras CADA reinicio, porque el sorteo es por partida.
+    # The seat is deduced from the freshly reset board, with no extra plumbing:
+    # nine legal cells means the agent opens, eight that the rival has already
+    # played. It has to be recomputed after EVERY reset, because the draw is per
+    # game.
     seat = _seat_of(ts)
     wins = np.zeros(2, dtype=np.int64)
     draws = np.zeros(2, dtype=np.int64)
@@ -174,8 +179,8 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
     key = jax.random.PRNGKey(seed + 1)
     reset_counter = num_envs
 
-    # Una pasada de calentamiento fuera del reloj: la primera llamada paga la
-    # compilacion, y eso no es tiempo de juego.
+    # A warm-up pass off the clock: the first call pays for compilation, and that
+    # is not play time.
     key, sub = jax.random.split(key)
     _ = decide_jit(params, ts.observation, state, sub).block_until_ready()
 
@@ -185,12 +190,13 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
         action = decide_jit(params, ts.observation, state, sub)
 
         if break_rng_sharing:
-            # La busqueda usa el ENTORNO REAL como modelo, y el azar del rival sale
-            # de `state.rng_key` (el adaptador hace `split(state.rng_key)`). O sea
-            # que el modelo deriva la MISMA jugada del rival que va a ocurrir de
-            # verdad: la busqueda no planifica bajo incertidumbre, ve el futuro.
-            # Aqui se re-randomiza la clave DESPUES de decidir, para que el rival
-            # real use una que la busqueda no vio.
+            # The search uses the REAL ENVIRONMENT as its model, and the rival's
+            # randomness comes from `state.rng_key` (the adapter does
+            # `split(state.rng_key)`). That is, the model derives the SAME rival
+            # move that is actually going to happen: the search is not planning
+            # under uncertainty, it sees the future. Here the key is re-randomised
+            # AFTER deciding, so that the real rival uses one the search did not
+            # see.
             key, rk = jax.random.split(key)
             fresh = jax.random.split(rk, num_envs)
             state = _replace_rng(state, fresh)
@@ -206,11 +212,11 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
             draws[k] += int((((r > 0.25) & (r < 0.75)) & fin).sum())
             losses[k] += int(((r < 0.25) & fin).sum())
 
-        # `eval_env` NO lleva auto-reset (los core wrappers van solo en `env`), asi
-        # que hay que reiniciar a mano las partidas acabadas. Sin esto se sigue
-        # contando la misma partida en cada paso, y como pgx pone las recompensas a
-        # 0 en un estado terminal, `(0+1)/2 = 0.5` las convierte en TABLAS: sale
-        # ~99% de empates, que es la firma de este fallo.
+        # `eval_env` does NOT carry auto-reset (the core wrappers go only on
+        # `env`), so the finished games have to be reset by hand. Without this the
+        # same game keeps being counted at every step, and since pgx sets the
+        # rewards to 0 in a terminal state, `(0+1)/2 = 0.5` turns them into DRAWS:
+        # ~99% draws come out, which is this fault's signature.
         if done.any():
             fresh_keys = jax.random.split(
                 jax.random.fold_in(jax.random.PRNGKey(seed), reset_counter),
@@ -220,7 +226,7 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
             fresh_state, fresh_ts = reset(fresh_keys)
             mask = jnp.asarray(done)
             state, ts = _select(mask, fresh_state, state), _select(mask, fresh_ts, ts)
-            # Los envs reiniciados han vuelto a sortear asiento: hay que releerlo.
+            # The reset envs have drawn a seat again: it has to be re-read.
             seat = np.where(done, _seat_of(ts), seat)
     jax.block_until_ready(state)
     runtime = time.perf_counter() - start
@@ -228,10 +234,10 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
     decisions = num_envs * steps
     particles = int(cfg.system.num_particles)
     depth = int(cfg.system.search_depth)
-    # Una entrada por asiento. El tiempo, las decisiones y los movimientos se
-    # reparten por PARTE DE ENTORNOS del asiento, no por partidas: cada entorno
-    # decide una vez por paso sea cual sea su asiento, mientras que las partidas
-    # donde abre el rival son mas cortas y se terminan mas.
+    # One entry per seat. Time, decisions and moves are split by the seat's SHARE
+    # OF ENVIRONMENTS, not by games: each environment decides once per step
+    # whatever its seat, whereas the games where the rival opens are shorter and
+    # more of them finish.
     out = {}
     for k, nom in ((0, "1er"), (1, "2e")):
         n_env = int((seat == k).sum())
@@ -253,27 +259,27 @@ def play(cfg: DictConfig, eval_env: Any, root_fn: Any, search_apply_fn: Any,
 
 
 def _seat_of(ts: Any) -> Any:
-    """0 si el agente abre, 1 si responde, por entorno.
+    """0 if the agent opens, 1 if it answers, per environment.
 
-    Se lee del numero de casillas legales justo tras el reinicio: nueve libres es
-    un tablero virgen, ocho significa que el rival ya ha abierto. No hace falta
-    propagar ninguna bandera por el arbol de estados -- lo cual importa, porque
-    anadir una capa de estado romperia el broadcast de particulas de la busqueda.
+    It is read from the number of legal cells right after the reset: nine free is a
+    pristine board, eight means the rival has already opened. No flag needs to be
+    propagated through the state tree -- which matters, because adding a layer of
+    state would break the search's particle broadcast.
     """
     libres = np.asarray(ts.observation.action_mask).sum(axis=-1)
     return (libres < 9).astype(np.int64)
 
 
 def score_and_se(m: Dict[str, Any]) -> Tuple[float, float]:
-    """Score medio por partida y su error estandar EMPIRICO.
+    """Mean score per game and its EMPIRICAL standard error.
 
-    El score por partida vale 1 / 0.5 / 0, asi que su varianza es
-    `E[s^2] - E[s]^2` con `E[s^2] = (ganadas + 0.25*empates)/n`. Hay que calcularla
-    de verdad y no acotarla por el peor caso (0.25, que sale de p=0.5): cerca del
-    techo casi todas las partidas son victorias, la varianza real cae a ~1e-4 y la
-    cota del peor caso es ~1500 veces mas ancha. Con ella, la guarda del techo daba
-    una tolerancia de 4 sigma = 0.023 y se tragaba un 0.9997 sin protestar --
-    exactamente la fuga que se pretendia detectar.
+    The per-game score is 1 / 0.5 / 0, so its variance is `E[s^2] - E[s]^2` with
+    `E[s^2] = (wins + 0.25*draws)/n`. It has to be computed for real and not
+    bounded by the worst case (0.25, which comes from p=0.5): near the ceiling
+    almost every game is a win, the real variance drops to ~1e-4 and the worst-case
+    bound is ~1500 times wider. With it, the ceiling guard gave a tolerance of
+    4 sigma = 0.023 and swallowed a 0.9997 without complaint -- exactly the leak it
+    was meant to detect.
     """
     n = max(m["games"], 1)
     score = (m["x_wins"] + 0.5 * m["draws"]) / n
@@ -295,8 +301,8 @@ def row(mode: str, m: Dict[str, Any]) -> Dict[str, Any]:
         "total_moves": m["total_moves"],
         "mcts_decisions": m["mcts_decisions"],
         "total_simulations": m["total_simulations"],
-        # La busqueda SMC no construye arbol, asi que las columnas de nodos van a 0
-        # en las tres patas de SPO (el MCTS si las rellena).
+        # The SMC search builds no tree, so the node columns are 0 across all three
+        # SPO legs (the MCTS does fill them in).
         "total_nodes": 0,
         "x_wins": m["x_wins"],
         "o_wins": m["o_wins"],
@@ -308,14 +314,13 @@ def row(mode: str, m: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def score_moyen(d: Dict[str, Any]) -> Tuple[float, float]:
-    """Media NO PONDERADA de los dos asientos, y su error estandar.
+    """UNWEIGHTED mean of the two seats, and its standard error.
 
-    Agrupar las partidas de los dos asientos en un solo contador sesgaria el
-    resultado: donde abre el rival, la partida es mas corta y se terminan mas, asi
-    que el promedio agrupado pesa hacia ese lado. Medido en Mojo con el mismo
-    montaje: 12 233 partidas contra 14 801, y una media agrupada de 0.4845 donde
-    la verdad exacta del juego al azar es 0.5000. El sesgo no es ruido y ninguna
-    barra de error lo delataria.
+    Pooling both seats' games into a single counter would bias the result: where
+    the rival opens, the game is shorter and more of them finish, so the pooled
+    average leans that way. Measured in Mojo with the same setup: 12,233 games
+    against 14,801, and a pooled mean of 0.4845 where the exact truth of random
+    play is 0.5000. The bias is not noise and no error bar would give it away.
     """
     s0, e0 = score_and_se(d["1er"])
     s1, e1 = score_and_se(d["2e"])
@@ -329,7 +334,7 @@ def perte_moyenne(d: Dict[str, Any]) -> float:
 
 
 def show(mode: str, d: Dict[str, Any]) -> None:
-    """Los dos asientos y su media no ponderada."""
+    """The two seats and their unweighted mean."""
     trozos = []
     for k in ("1er", "2e"):
         m = d[k]
@@ -361,30 +366,30 @@ def main() -> None:
                          "confundan en el CSV comun.")
     args = ap.parse_args()
 
-    # El mismo config_path que usa el punto de entrada de ff_spo
-    # (`config_path="../../configs/default/anakin"`), o hydra no encuentra
-    # la config primaria.
+    # The same config_path ff_spo's entry point uses
+    # (`config_path="../../configs/default/anakin"`), or hydra will not find the
+    # primary config.
     cfg_dir = os.path.abspath("stoix/configs/default/anakin")
     with initialize_config_dir(version_base=None, config_dir=cfg_dir):
         cfg = compose(
             config_name=args.config_name,
             overrides=[
                 f"arch.total_num_envs={args.num_envs}",
-                # OJO: `learner_setup` carga el checkpoint EL SOLO cuando esto
-                # esta a True (`ff_spo.py:1836`), asi que con `--untrained` hay
-                # que apagarlo aqui. No basta con saltarse el `Checkpointer` de
-                # `build`: los pesos ya vendrian restaurados dentro de
-                # `learner_state.params` y el flag no haria nada.
+                # CAREFUL: `learner_setup` loads the checkpoint BY ITSELF when this
+                # is True (`ff_spo.py:1836`), so with `--untrained` it has to be
+                # switched off here. Skipping `build`'s `Checkpointer` is not
+                # enough: the weights would already come restored inside
+                # `learner_state.params` and the flag would do nothing.
                 f"logger.checkpointing.load_model={not args.untrained}",
                 f"logger.checkpointing.load_args.checkpoint_uid={args.checkpoint_uid}",
                 *args.overrides,
             ],
         )
     OmegaConf.set_struct(cfg, False)
-    # `arch.num_envs` y `num_devices` no estan en la config compuesta: Stoix los
-    # deriva en tiempo de ejecucion (total_timestep_checker.py:59), y `make_env`
-    # los necesita. Se llama al mismo checker que usa el punto de entrada para que
-    # la config quede EXACTAMENTE como en el entrenamiento.
+    # `arch.num_envs` and `num_devices` are not in the composed config: Stoix
+    # derives them at run time (total_timestep_checker.py:59), and `make_env` needs
+    # them. The same checker the entry point uses is called so that the config ends
+    # up EXACTLY as it was during training.
     from stoix.utils.total_timestep_checker import check_total_timesteps
 
     cfg.num_devices = len(jax.devices())
@@ -402,9 +407,9 @@ def main() -> None:
 
     eval_env, root_fn, search_apply_fn, params = build(cfg, args.untrained)
 
-    # Validacion del bucle. Se comprueban los DOS asientos por separado, no solo
-    # la media: intercambiarlos dejaria la media intacta invirtiendo las mitades,
-    # y ese fallo pasaria desapercibido.
+    # Loop validation. BOTH seats are checked separately, not just the mean:
+    # swapping them would leave the mean intact by inverting the halves, and that
+    # fault would go unnoticed.
     chk = play(cfg, eval_env, root_fn, search_apply_fn, params, args.num_envs,
                args.steps, False, args.seed, random_policy=True)
     show("VALIDACION azar", chk)
@@ -433,11 +438,12 @@ def main() -> None:
         show(mode, m)
         score, se = score_moyen(m)
 
-        # GUARDA DEL TECHO, POR ASIENTO. Superar el optimo exacto no es un buen
-        # resultado: es la prueba de que el agente ve algo que no deberia. Asi se
-        # descubrio la fuga de RNG (0.9996 contra 0.9974, once sigmas).
-        # Cada asiento tiene SU techo -- 0.9974 abriendo, 0.9624 respondiendo --
-        # y confundirlos dejaria pasar un imposible por el lado del segundo.
+        # CEILING GUARD, PER SEAT. Beating the exact optimum is not a good result:
+        # it is proof that the agent sees something it should not. This is how the
+        # RNG leak was discovered (0.9996 against 0.9974, eleven sigmas).
+        # Each seat has ITS OWN ceiling -- 0.9974 opening, 0.9624 answering -- and
+        # conflating them would let an impossible value through on the second's
+        # side.
         for k, techo in (("1er", OPTIMAL_FIRST), ("2e", OPTIMAL_SECOND)):
             sk, sek = score_and_se(m[k])
             if sk > techo + 4.0 * sek:
@@ -448,9 +454,10 @@ def main() -> None:
                     f"jugando limpio: hay una fuga de informacion. No se escribe CSV. ***"
                 )
 
-        # Control de la fuga de RNG, ya corregida en `make_root_fn` (`_rekey_particles`).
-        # Se vuelve a medir con la comparticion de claves ROTA a mano: si el score
-        # cambia, la busqueda seguia leyendo el azar del entorno real.
+        # Control for the RNG leak, already fixed in `make_root_fn`
+        # (`_rekey_particles`). It is measured again with the key sharing BROKEN by
+        # hand: if the score changes, the search was still reading the real
+        # environment's randomness.
         m2 = play(cfg, eval_env, root_fn, search_apply_fn, params,
                   args.num_envs, args.steps, greedy, args.seed,
                   break_rng_sharing=True)
@@ -466,14 +473,15 @@ def main() -> None:
             )
         print(f"   (control: {score:.4f} vs {score2:.4f}, {sigmas:.1f} sigma "
               f"-> no hay fuga)")
-        # Una fila por asiento. La media se calcula al analizar, no al medir.
+        # One row per seat. The mean is computed at analysis time, not at
+        # measurement time.
         rows.append(row(f"{mode}_{tag}_1er", m["1er"]))
         rows.append(row(f"{mode}_{tag}_2e", m["2e"]))
 
-    # ACUMULA. El CSV comun del Milestone 4 tiene que sostener las tres patas y
-    # varias configuraciones a la vez, asi que se anade al final y la cabecera solo
-    # se escribe si el fichero todavia no existe. Truncar aqui borraba la pata
-    # anterior en silencio.
+    # IT APPENDS. Milestone 4's common CSV has to hold the three legs and several
+    # configurations at once, so it is appended to and the header is only written
+    # if the file does not exist yet. Truncating here silently erased the previous
+    # leg.
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     new_file = not os.path.exists(args.out) or os.path.getsize(args.out) == 0
     with open(args.out, "a", newline="") as f:

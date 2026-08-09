@@ -1,23 +1,24 @@
-"""Compara los CSV de los dos planificadores y saca la tabla.
+"""Compares the two planners' CSVs and prints the table.
 
     ./run.sh bench/compare.mojo <csv_mcts> <csv_smc>
 
-Lee las dos filas (mismo esquema de 17 columnas) y las pone lado a lado contra las
-dos referencias EXACTAS de tres en raya, calculadas por recursion sobre todos los
-estados y no medidas:
+It reads the two rows (same 17-column schema) and puts them side by side against
+tic-tac-toe's two EXACT references, computed by recursion over all states and not
+measured:
 
-    X al azar vs O al azar : gana 58.49%  empata 12.70%  pierde 28.81%  score 0.6484
-    X optimo  vs O al azar : gana 99.48%  empata  0.52%  pierde  0.00%  score 0.9974
+    random X vs random O  : wins 58.49%  draws 12.70%  loses 28.81%  score 0.6484
+    optimal X vs random O : wins 99.48%  draws  0.52%  loses  0.00%  score 0.9974
 
-Tener el techo cambia como se lee la comparacion: sin el, "96.8% de victorias" y
-"99.0%" parecen casi lo mismo; con el, se ve que uno deja el 2.4% de la mejora
-posible sin recoger y el otro casi nada.
+Having the ceiling changes how the comparison reads: without it, "96.8% wins" and
+"99.0%" look almost the same; with it, one can see that one leaves 2.4% of the
+possible improvement uncollected and the other next to nothing.
 
-Sobre el tiempo, la tabla es deliberadamente cauta. La columna del CSV es
-`avg_decision_time_s`, y NO significa lo mismo en las dos filas: el MCTS juega las
-partidas en serie en la CPU, asi que es su latencia real; la busqueda SMC planifica
-para 64 partidas a la vez en la GPU, asi que es coste repartido (throughput). La
-latencia de la busqueda se mide aparte, con un solo env, en bench_tictactoe.mojo.
+On timing, the table is deliberately cautious. The CSV's column is
+`avg_decision_time_s`, and it does NOT mean the same thing in the two rows: the
+MCTS plays the games serially on the CPU, so it is its real latency; the SMC search
+plans for 64 games at once on the GPU, so it is amortised cost (throughput). The
+search's latency is measured separately, with a single env, in
+bench_tictactoe.mojo.
 """
 
 from std.sys import argv
@@ -30,7 +31,7 @@ comptime OPTIMAL_SCORE = 0.9974
 
 @fieldwise_init
 struct Row(Copyable, Movable):
-    """Una fila del CSV comun, con lo que hace falta para la tabla."""
+    """One row of the common CSV, with what the table needs."""
     var language: String
     var mode: String
     var games: Int
@@ -54,7 +55,7 @@ struct Row(Copyable, Movable):
 
 
 def read_row(path: String) raises -> Row:
-    """Segunda linea del CSV (la primera es la cabecera)."""
+    """The CSV's second line (the first is the header)."""
     text: String
     with open(path, "r") as f:
         text = f.read()
@@ -66,7 +67,7 @@ def read_row(path: String) raises -> Row:
     if len(c) < 17:
         raise Error("el csv ", path, " tiene ", len(c), " columnas, esperaba 17")
 
-    # `split` devuelve StringSlice, asi que hay que envolver en String/Int/Float64.
+    # `split` returns StringSlice, so it has to be wrapped in String/Int/Float64.
     return Row(language=String(c[0]), mode=String(c[1]),
                games=Int(String(c[2])), iterations=Int(String(c[3])),
                runtime_s=Float64(String(c[6])), decisions=Int(String(c[8])),
@@ -81,7 +82,7 @@ def pct(v: Float64) -> String:
 
 
 def show_strength(label: String, r: Row) raises:
-    """Una linea de la tabla de fuerza, con el intervalo de Wilson de las victorias."""
+    """One line of the strength table, with the wins' Wilson interval."""
     frac = (r.score() - RANDOM_SCORE) / (OPTIMAL_SCORE - RANDOM_SCORE)
     print("  ", label,
           "  gana ", pct(r.rate(r.x_wins)),

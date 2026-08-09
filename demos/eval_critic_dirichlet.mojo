@@ -1,36 +1,35 @@
-"""Revision de la etapa 2: el critico reconectado y el ruido de Dirichlet.
+"""Stage 2 review: the critic reconnected and the Dirichlet noise.
 
-Salen de dos decisiones tomadas al revisar la etapa:
+They come out of two decisions taken while reviewing the stage:
 
-**1. Reconectar el critico.** V esta en la ecuacion 10 del paper
+**1. Reconnecting the critic.** V is in equation 10 of the paper
 
     A(s_t,a_t) = r_t + V(s_{t+1}) - V(s_t)
 
-y en `_critic_loss_fn` de Stoix. Tenerlo a 0 era una desviacion NUESTRA, no una
-eleccion del metodo. E1.11 midio que no ayudaba, pero lo midio con un critico
-entrenado con datos de un planificador que perdia el 2% y partia de prior uniforme.
-Ahora los datos vienen de un agente mucho mas fuerte que visita otras posiciones,
-asi que aquella medida no aplica y hay que repetirla.
+and in Stoix's `_critic_loss_fn`. Holding it at 0 was OUR deviation, not a choice
+of the method. E1.11 measured that it did not help, but it measured it with a
+critic trained on data from a planner that lost 2% and started from a uniform
+prior. Now the data comes from a much stronger agent that visits other positions,
+so that measurement does not apply and has to be repeated.
 
-**2. Activar el ruido de Dirichlet en la raiz.** No es una desviacion: Stoix lo
-implementa (`apply_exploration_noise`, `ff_spo.py:119`, via
-`rlax.add_dirichlet_noise`) y solo lo tiene a `fraction = 0.0`. En E2.6 medimos que
-un prior aprendido muy seguro deja acciones legales con muy pocas particulas
-(0.96 por posicion frente a 0.001 con prior uniforme), y el ruido es el mecanismo
-de AlphaZero para exactamente eso.
+**2. Switching on the Dirichlet noise at the root.** It is not a deviation: Stoix
+implements it (`apply_exploration_noise`, `ff_spo.py:119`, via
+`rlax.add_dirichlet_noise`) and merely holds it at `fraction = 0.0`. In E2.6 we
+measured that a very confident learned prior leaves legal actions with very few
+particles (0.96 per position against 0.001 with a uniform prior), and the noise is
+AlphaZero's mechanism for exactly that.
 
-**Los dos montajes que se comparan:**
+**The two setups being compared:**
 
-  - **SPO literal**: gamma_r = 1.0 (sin nuestro descuento de A6), sin castigo por
-    derrota, con remuestreo, readout de SPO, critico con el bootstrap del contrato
-    (`discount * search_gamma * V`). Es SPO tal cual, y **nunca lo habiamos medido
-    con un critico entrenado de verdad**.
-  - **Variante**: gamma_r = 0.9, castigo 1, sin remuestreo, readout de media,
-    bootstrap descontado por profundidad. Es el montaje de E1.11c, con UNA
-    desviacion declarada.
+  - **Literal SPO**: gamma_r = 1.0 (without our A6 discount), no loss penalty, with
+    resampling, SPO's readout, critic with the contract's bootstrap
+    (`discount * search_gamma * V`). It is SPO as it stands, and **we had never
+    measured it with a genuinely trained critic**.
+  - **Variant**: gamma_r = 0.9, penalty 1, no resampling, mean readout,
+    depth-discounted bootstrap. It is E1.11c's setup, with ONE declared deviation.
 
-Cada montaje entrena su propio actor y su propio critico, y se mide el cruce
-{critico si/no} x {Dirichlet 0 / 0.25}. Todas las partidas con la MODA de q.
+Each setup trains its own actor and its own critic, and the cross
+{critic yes/no} x {Dirichlet 0 / 0.25} is measured. Every game with the MODE of q.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -58,11 +57,11 @@ comptime EVAL_SEED = UInt32(20260804)
 comptime EVAL_PARTICLES = 128
 comptime NOISE = Scalar[dtype](0.25)
 
-# SPO literal: sin ninguna de nuestras anadiduras.
+# Literal SPO: without any of our additions.
 comptime SPO_PERIOD = 3
 comptime SPO_GAMMA = Scalar[dtype](1.0)
 comptime SPO_PENALTY = Scalar[dtype](0.0)
-# La variante de E1.11c.
+# E1.11c's variant.
 comptime VAR_GAMMA = Scalar[dtype](0.9)
 comptime VAR_PENALTY = Scalar[dtype](1.0)
 
@@ -118,17 +117,18 @@ def play(ctx: DeviceContext, name: String, actor: ActorLearner,
          critic: Critic, spo_readout: Bool, use_critic: Bool,
          noise: Scalar[dtype], steps: Int,
          use_actor: Bool = True) raises -> Arm:
-    """Juega con o sin prior del actor, con o sin critico, con o sin ruido.
+    """Plays with or without the actor's prior, with or without the critic, with or
+    without noise.
 
-    `use_actor = False` hace falta para la celda de control: sin ella no se puede
-    atribuir al actor la mejora del montaje literal.
+    `use_actor = False` is needed for the control cell: without it the literal
+    setup's improvement cannot be attributed to the actor.
     """
     period = SPO_PERIOD if spo_readout else NO_RESAMPLE
     gamma_r = SPO_GAMMA if spo_readout else VAR_GAMMA
     penalty = SPO_PENALTY if spo_readout else VAR_PENALTY
-    # El bootstrap descontado por profundidad SOLO hace falta si gamma_r < 1: es lo
-    # que pone la recompensa y el valor en la misma escala. Con gamma_r = 1 (SPO
-    # literal) el contrato del SearchModel vale tal cual.
+    # The depth-discounted bootstrap is ONLY needed if gamma_r < 1: it is what
+    # puts the reward and the value on the same scale. With gamma_r = 1 (literal
+    # SPO) the SearchModel's contract holds as it stands.
     depth_disc = gamma_r < Scalar[dtype](1)
 
     cfg = SPOConfig(num_envs=EVAL_ENVS, num_particles=EVAL_PARTICLES,
@@ -200,9 +200,9 @@ def main() raises:
         print()
 
         print("--- entrenamiento: cada montaje con su actor y su critico ---")
-        # El critico entra YA durante el entrenamiento: si la busqueda que genera
-        # los datos no lo usa, la q que aprende el actor no es la del sistema que
-        # despues se mide.
+        # The critic goes in DURING training already: if the search that
+        # generates the data does not use it, the q the actor learns is not that of
+        # the system measured afterwards.
         spo = train_run(ctx, String("SPO literal"), True, True, SPO_PERIOD,
                         SPO_GAMMA, SPO_PENALTY, EVAL_PARTICLES, True, False, 0)
         var_ = train_run(ctx, String("variante E1.11c"), True, False,

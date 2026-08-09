@@ -1,21 +1,21 @@
-"""Benchmark del planificador SMC en tres en raya, para comparar con el MCTS.
+"""Benchmark of the SMC planner on tic-tac-toe, to compare with the MCTS.
 
-    ./run.sh bench/bench_tictactoe.mojo [ruta_csv]
+    ./run.sh bench/bench_tictactoe.mojo [csv_path]
 
-Corre partidas contra el rival aleatorio midiendo el tiempo, imprime el resumen con
-intervalos de Wilson y escribe una fila CSV con el MISMO esquema que
-`MCTS-mojo-tictactoe`, para poder concatenar los dos ficheros.
+It plays games against the random rival while timing them, prints the summary with
+Wilson intervals and writes a CSV row with the SAME schema as
+`MCTS-mojo-tictactoe`, so that the two files can be concatenated.
 
-Mide DOS tiempos, porque comparar una GPU por lotes con una CPU en serie con un solo
-numero seria enganoso:
+It measures TWO times, because comparing a batched GPU with a serial CPU using a
+single number would be misleading:
 
-  * throughput: se planifica para NUM_ENVS partidas a la vez, asi que el coste por
-    decision repartido es el tiempo total entre todas las decisiones.
-  * latencia: lo mismo con UN solo env, que es lo que de verdad se compara con el
-    tiempo por decision del MCTS (que juega las partidas en serie).
+  * throughput: planning happens for NUM_ENVS games at once, so the amortised cost
+    per decision is the total time divided by all the decisions.
+  * latency: the same thing with a SINGLE env, which is what really compares with
+    the MCTS's time per decision (it plays the games serially).
 
-El tiempo excluye la reserva del workspace y el reset inicial, igual que el MCTS
-mide "only the play time".
+The timing excludes allocating the workspace and the initial reset, just as the
+MCTS measures "only the play time".
 """
 
 from std.gpu.host import DeviceContext
@@ -46,7 +46,7 @@ comptime NUM_STEPS = 60
 
 @fieldwise_init
 struct Timed(Movable):
-    """Marcador y tiempo de una tanda."""
+    """A batch's scoreboard and time."""
     var wins: Int
     var draws: Int
     var losses: Int
@@ -56,7 +56,7 @@ struct Timed(Movable):
 
 
 def run_games(ctx: DeviceContext, num_envs: Int, num_steps: Int) raises -> Timed:
-    """Juega con la busqueda y devuelve marcador + tiempo de juego."""
+    """Plays with the search and returns scoreboard + play time."""
     cfg = SPOConfig(num_envs=num_envs, num_particles=NUM_PARTICLES,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                     search_depth=DEPTH, resample_period=PERIOD,
@@ -73,7 +73,7 @@ def run_games(ctx: DeviceContext, num_envs: Int, num_steps: Int) raises -> Timed
 
     ctx.enqueue_function[ttt_reset_kernel, ttt_reset_kernel](
         state.unsafe_ptr(), num_envs, grid_dim=blocks, block_dim=TPB_TTT)
-    ctx.synchronize()          # el reset no cuenta como tiempo de juego
+    ctx.synchronize()          # the reset does not count as play time
 
     wins = 0
     draws = 0
@@ -109,7 +109,8 @@ def run_games(ctx: DeviceContext, num_envs: Int, num_steps: Int) raises -> Timed
     ctx.synchronize()
     seconds = Float64(perf_counter_ns() - start) / 1e9
 
-    # Una decision por env y por turno: la busqueda decide para todos a la vez.
+    # One decision per env and per turn: the search decides for all of them at
+    # once.
     return Timed(wins, draws, losses, moves, num_envs * num_steps, seconds)
 
 
@@ -123,8 +124,8 @@ def main() raises:
               " temperatura", TEMPERATURE, " descuento", REWARD_GAMMA)
         print()
 
-        # Una tanda de calentamiento: la primera llamada paga la compilacion de los
-        # kernels, y ese coste no es parte de lo que se quiere medir.
+        # A warm-up batch: the first call pays for kernel compilation, and that
+        # cost is not part of what we want to measure.
         _ = run_games(ctx, NUM_ENVS, 3)
 
         batched = run_games(ctx, NUM_ENVS, NUM_STEPS)
@@ -140,7 +141,8 @@ def main() raises:
             x_wins=batched.wins, o_wins=batched.losses, draws=batched.draws)
         print(m.summary())
 
-        # Y la latencia de una decision suelta, que es lo comparable con el MCTS.
+        # And the latency of a single decision, which is what compares with the
+        # MCTS.
         single = run_games(ctx, 1, 40)
         latency = single.seconds / Float64(single.decisions)
         print()

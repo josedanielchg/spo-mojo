@@ -1,21 +1,23 @@
-"""La temperatura: nuestro 0.02 contra el 0.5 de Stoix, con el sistema fiel.
+"""The temperature: our 0.02 against Stoix's 0.5, with the faithful system.
 
-Ultimo apano sin re-medir. `temperature = 0.02` lo elegimos en el barrido de M1
-(0.5 -> 0.784 ... 0.02 -> 0.9739), o sea **cuando no habia ni actor ni critico**.
-Stoix usa `temperature.adaptive: True` por defecto y su valor fijo es **0.5**.
+The last patch left un-remeasured. We picked `temperature = 0.02` in M1's sweep
+(0.5 -> 0.784 ... 0.02 -> 0.9739), that is, **when there was neither actor nor
+critic**. Stoix uses `temperature.adaptive: True` by default and its fixed value is
+**0.5**.
 
-Es el mismo patron que `reward_gamma`: un hiperparametro afinado para compensar
-componentes que faltaban. Y ya sabemos como acaba ese patron -- gamma_r = 0.7 daba
-2.65% de derrotas con el actor conectado y gamma_r = 1.0 (el fiel) da 0.62%. Asi que
-hay que comprobar si con el actor y el critico puestos el 0.5 de la referencia va
-igual o mejor: seria una desviacion menos que justificar.
+It is the same pattern as `reward_gamma`: a hyperparameter tuned to compensate for
+missing components. And we already know how that pattern ends -- gamma_r = 0.7 gave
+2.65% losses with the actor wired in and gamma_r = 1.0 (the faithful one) gives
+0.62%. So it has to be checked whether, with the actor and the critic in place,
+the reference's 0.5 does as well or better: it would be one deviation less to
+justify.
 
-La temperatura entra en DOS sitios, asi que hay que entrenar con cada valor y no
-solo medir: el remuestreo (`resample_logits_kernel`) y el readout. O sea que cambia
-la q que el actor aprende, no solo como se juega.
+The temperature enters in TWO places, so one has to train with each value and not
+merely measure: the resampling (`resample_logits_kernel`) and the readout. That is,
+it changes the q the actor learns, not only how the game is played.
 
-Montaje: SPO literal (gamma_r = 1.0, sin castigo, con remuestreo, readout de SPO),
-prior del actor, critico conectado, ruido de Dirichlet a 0.25. Cero desviaciones.
+Setup: literal SPO (gamma_r = 1.0, no penalty, with resampling, SPO's readout), the
+actor's prior, the critic wired in, Dirichlet noise at 0.25. Zero deviations.
 """
 
 from std.gpu.host import DeviceContext
@@ -53,13 +55,13 @@ def pct(x: Float64) -> String:
 def play(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
          temp: Scalar[dtype], steps: Int,
          greedy: Bool = True) raises -> List[Int]:
-    """Juega y devuelve [gana, empata, pierde].
+    """Plays and returns [wins, draws, losses].
 
-    `greedy = False` reproduce el protocolo de evaluacion de Stoix: su evaluador
-    usa el MISMO root_fn y juega `search_output.action`, que es la accion
-    MUESTREADA de q (`evaluator.py:55-57`). Jugar la moda es una desviacion
-    nuestra del protocolo de medida, y con la temperatura importa mucho: al
-    muestrear, tau controla directamente cuan aleatoria sale la jugada."""
+    `greedy = False` reproduces Stoix's evaluation protocol: its evaluator uses the
+    SAME root_fn and plays `search_output.action`, which is the action SAMPLED from
+    q (`evaluator.py:55-57`). Playing the mode is a deviation of ours from the
+    measurement protocol, and with the temperature it matters a great deal: when
+    sampling, tau directly controls how random the move comes out."""
     cfg = SPOConfig(num_envs=EVAL_ENVS, num_particles=PARTICLES,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                     search_depth=SEARCH_DEPTH, resample_period=PERIOD,
@@ -85,8 +87,8 @@ def play(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
     for step in range(steps):
         search[TicTacToeActor](ctx, ws, cfg, amodel, state,
                                EVAL_SEED ^ (UInt32(step) * 2654435761))
-        # Sin greedy no se toca `ws.output.action`: `search` ya la dejo
-        # muestreada de q, que es lo que juega el evaluador de Stoix.
+        # Without greedy, `ws.output.action` is not touched: `search` already left
+        # it sampled from q, which is what Stoix's evaluator plays.
         if greedy:
             readout_greedy(ctx, ws.particles, ws.output, cfg, q_buf)
         ctx.enqueue_function[fill_uniform, fill_uniform](
@@ -116,7 +118,7 @@ def play(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
 def play_g(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
            temp: Scalar[dtype], gamma_r: Scalar[dtype], steps: Int,
            greedy: Bool) raises -> List[Int]:
-    """Como `play` pero con gamma_r variable, para el barrido de abajo."""
+    """Like `play` but with a variable gamma_r, for the sweep below."""
     depth_disc = gamma_r < Scalar[dtype](1)
     cfg = SPOConfig(num_envs=EVAL_ENVS, num_particles=PARTICLES,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
@@ -177,9 +179,9 @@ def main() raises:
         print()
 
         temps = List[Float64]()
-        temps.append(0.02)      # el nuestro, afinado en M1 sin redes
+        temps.append(0.02)      # ours, tuned in M1 without networks
         temps.append(0.1)
-        temps.append(0.5)       # el `fixed_temperature` de Stoix
+        temps.append(0.5)       # Stoix's `fixed_temperature`
         names = List[String]()
         names.append(String("0.02  (nuestro, M1)"))
         names.append(String("0.10               "))

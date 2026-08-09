@@ -1,59 +1,61 @@
-"""El bucle de entrenamiento del critico: jugar, guardar, aprender.
+"""The critic's training loop: play, store, learn.
 
     ./run.sh demos/train_critic.mojo
 
-Junta todo lo de la etapa 1. Dos fases que se alternan, como en Stoix:
+It brings together everything from stage 1. Two alternating phases, as in Stoix:
 
-    ACTUAR   jugar partidas con la busqueda y guardar las transiciones
-    APRENDER muestrear del buffer y dar pasos de gradiente sobre el critico
+    ACT      play games with the search and store the transitions
+    LEARN    sample from the buffer and take gradient steps on the critic
 
-El orden de la fase de aprender es el de `_critic_loss_fn` de ff_spo.py, y hay un
-detalle facil de confundir: **se usan DOS redes**.
+The learning phase's order is that of ff_spo.py's `_critic_loss_fn`, and there is
+one detail that is easy to confuse: **TWO networks are used**.
 
-    pred   = critico ONLINE (obs)             <- lo que se entrena
-    v_tm1  = critico TARGET (obs)             |
-    v_t    = critico TARGET (bootstrap_obs)   |-- para calcular los objetivos
+    pred   = ONLINE critic (obs)              <- what gets trained
+    v_tm1  = TARGET critic (obs)              |
+    v_t    = TARGET critic (bootstrap_obs)    |-- to compute the targets
     targets = GAE(reward, (1-done)*gamma, lambda, v_tm1, v_t, truncated)
-    loss   = media de 0.5*(pred - targets)^2
+    loss   = mean of 0.5*(pred - targets)^2
 
-Si se usara la online para los objetivos, el critico perseguiria un blanco que se
-mueve a la vez que el: por eso existe la copia lenta (la EMA de E1.7).
+If the online one were used for the targets, the critic would chase a target moving
+at the same time as itself: that is why the slow copy exists (E1.7's EMA).
 
-En esta etapa la busqueda sigue con V = 0. El critico aprende MIRANDO las partidas
-que genera esa busqueda, pero todavia no la alimenta; enchufarlo es E1.11, y ahi
-es donde se medira si sirve para algo.
+At this stage the search still runs with V = 0. The critic learns by WATCHING the
+games that search generates, but does not feed it yet; plugging it in is E1.11, and
+that is where whether it helps gets measured.
 
-Se miden dos cosas, y la segunda importa mas:
+Two things get measured, and the second matters more:
 
-  1. **¿baja la perdida?** Un critico que no reduce su error no ha aprendido nada.
-  2. **¿su valor SEPARA las partidas ganadas de las perdidas?** Porque la perdida
-     tambien bajaria si el critico se limitara a predecir siempre la media.
+  1. **does the loss go down?** A critic that does not reduce its error has learned
+     nothing.
+  2. **does its value SEPARATE the games won from the games lost?** Because the
+     loss would also go down if the critic merely predicted the mean every time.
 
-La segunda medida no usa correlacion sino la diferencia de medias por resultado, y
-es a proposito: la busqueda gana el ~97% de las partidas, asi que el resultado es
-casi constante y correlacionar contra algo casi constante mide ruido. Con clases
-tan desbalanceadas, comparar medias por grupo aguanta mejor.
+The second measurement does not use correlation but the difference of means by
+outcome, and that is on purpose: the search wins ~97% of the games, so the outcome
+is nearly constant and correlating against something nearly constant measures
+noise. With classes this imbalanced, comparing group means holds up better.
 
-Una expectativa que conviene tener antes de mirar los numeros: el rival juega AL
-AZAR, asi que el resultado de una partida concreta tiene mucho de suerte. Una
-posicion buena puede acabar en derrota si el rival acierta. El critico deberia
-predecir el valor ESPERADO, no el resultado concreto, asi que la separacion entre
-ganadas y perdidas sera pequena por construccion.
+An expectation worth having before looking at the numbers: the rival plays AT
+RANDOM, so a particular game's outcome has a lot of luck in it. A good position can
+end in a loss if the rival gets it right. The critic should predict the EXPECTED
+value, not the particular outcome, so the separation between wins and losses will be
+small by construction.
 
-Por eso la separacion se reporta con su ERROR ESTANDAR y en sigmas: con clases tan
-desbalanceadas (~97% de victorias) una diferencia de medias pequena puede ser puro
-azar. Midiendo con pocas muestras salia 1.7 sigmas (no afirmable) y con 6.7 veces
-mas, 2.5 sigmas (afirmable) — el efecto estaba, faltaban datos para verlo.
+That is why the separation is reported with its STANDARD ERROR and in sigmas: with
+classes this imbalanced (~97% wins) a small difference of means can be pure chance.
+Measuring with few samples it came out at 1.7 sigmas (not claimable) and with 6.7
+times more, 2.5 sigmas (claimable): the effect was there, the data to see it was
+missing.
 
-Resultados con la configuracion actual (25 rondas, 500 updates):
+Results with the current configuration (25 rounds, 500 updates):
 
-    perdida            0.41  ->  0.017          (25 veces menor)
-    V medio            0.00  ->  0.9346         (coincide con el valor esperado)
-    separacion         0.0009 -> 0.0072 +/- 0.0029  (2.47 sigmas: real)
+    loss              0.41  ->  0.017           (25 times smaller)
+    mean V            0.00  ->  0.9346          (matches the expected value)
+    separation        0.0009 -> 0.0072 +/- 0.0029  (2.47 sigmas: real)
 
-La separacion es REAL pero pequena: V queda casi constante entre posiciones. Si eso
-basta para que la busqueda vea amenazas es otra pregunta, y se responde en E1.11
-midiendo el 2.02% de derrotas, no suponiendo.
+The separation is REAL but small: V stays nearly constant across positions. Whether
+that is enough for the search to see threats is another question, and it gets
+answered in E1.11 by measuring the 2.02% loss rate, not by assuming.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -77,12 +79,12 @@ from systems.spo.spo_types import SPOConfig
 from systems.spo.search import search
 from tests.helpers import upload, download, write_into
 
-# --- configuracion (los valores de Stoix donde aplica) ---
+# --- configuration (Stoix's values where applicable) ---
 comptime SEED = UInt32(20260729)
 comptime NUM_ENVS = 32
 comptime ROLLOUT = 16
-"""Pasos por env en cada fase de actuacion. Con partidas de ~4 turnos, cada
-secuencia cubre unas 4 partidas completas."""
+"""Steps per env in each acting phase. With games of ~4 turns, each sequence
+covers about 4 complete games."""
 
 comptime HIDDEN = 64
 comptime OUT_DIM = 1
@@ -94,7 +96,7 @@ comptime TAU = Scalar[dtype](0.005)
 comptime BATCH = 16
 comptime BUFFER_CAP = 256
 
-# La busqueda que genera las partidas: la config afinada en A6/A7.
+# The search that generates the games: the config tuned in A6/A7.
 comptime NUM_PARTICLES = 64
 comptime SEARCH_DEPTH = 6
 comptime RESAMPLE_PERIOD = 3
@@ -103,14 +105,14 @@ comptime REWARD_GAMMA = Scalar[dtype](0.7)
 
 
 struct Critic(Movable):
-    """El critico entero: las dos redes, los buffers de trabajo y Adam."""
+    """The whole critic: both networks, the working buffers and Adam."""
 
     var online: CriticParams
     var target: CriticParams
     var cache: CriticCache
-    """Para el forward de la red online (el que se entrena)."""
+    """For the online network's forward (the one being trained)."""
     var tcache: CriticCache
-    """Para los dos forwards de la red target."""
+    """For the target network's two forwards."""
     var grads: CriticGrads
     var scratch: CriticScratch
 
@@ -138,10 +140,10 @@ struct Critic(Movable):
 
 def init_critic_weights(ctx: DeviceContext, mut critic: Critic,
                         seed: UInt32) raises:
-    """Pesos iniciales tipo He y biases a cero; el target arranca igual.
+    """He-style initial weights and zero biases; the target starts identical.
 
-    Que las dos redes empiecen IDENTICAS importa: si difirieran, los objetivos
-    estarian sesgados desde el primer update y costaria ver por que.
+    That both networks start IDENTICAL matters: if they differed, the targets would
+    be biased from the very first update and it would be hard to see why.
     """
     fan_ins = List[Int]()
     fan_ins.append(OBS_DIM); fan_ins.append(HIDDEN); fan_ins.append(HIDDEN)
@@ -160,7 +162,7 @@ def init_critic_weights(ctx: DeviceContext, mut critic: Critic,
         ctx.synchronize()
         u = download[dtype](buf, n)
         for i in range(n):
-            # De U(0,1) a U(-scale, scale): centrado en cero y con la escala de He.
+            # From U(0,1) to U(-scale, scale): centred at zero and on He's scale.
             vals.append((u[i] * Scalar[dtype](2) - Scalar[dtype](1)) * scale)
 
         if layer == 0:
@@ -181,18 +183,18 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             reward: DeviceBuffer[dtype], done: DeviceBuffer[idx_dtype],
             u_rival: DeviceBuffer[dtype], seed: UInt32,
             round_idx: Int) raises -> Scalar[dtype]:
-    """Juega ROLLOUT turnos en NUM_ENVS partidas y guarda las secuencias.
+    """Plays ROLLOUT turns across NUM_ENVS games and stores the sequences.
 
-    Devuelve la puntuacion media de las partidas terminadas, para poder ver que
-    la busqueda sigue jugando igual de bien mientras el critico aprende.
+    It returns the mean score of the finished games, so that one can see the search
+    is still playing just as well while the critic learns.
 
-    Detalle importante: `next_obs` se captura DESPUES del paso pero ANTES del
-    auto-reset. Es el `bootstrap_obs` de Stoix: si se cogiera despues del reset,
-    el bootstrap miraria a un tablero vacio de una partida nueva.
+    An important detail: `next_obs` is captured AFTER the step but BEFORE the
+    auto-reset. It is Stoix's `bootstrap_obs`: if it were taken after the reset,
+    the bootstrap would be looking at an empty board from a new game.
     """
     blocks = (NUM_ENVS + TPB_TTT - 1) // TPB_TTT
 
-    # Historia por env, en host: [T, ...] por cada uno.
+    # Per-env history, on the host: [T, ...] for each one.
     obs_hist = List[Scalar[dtype]]()
     next_hist = List[Scalar[dtype]]()
     rew_hist = List[Scalar[dtype]]()
@@ -209,7 +211,7 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
     losses = 0
 
     for t in range(ROLLOUT):
-        # La observacion ANTES de decidir.
+        # The observation BEFORE deciding.
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
             obs_buf.unsafe_ptr(), state.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
@@ -225,7 +227,7 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             u_rival.unsafe_ptr(), reward.unsafe_ptr(), done.unsafe_ptr(),
             NUM_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
 
-        # La observacion siguiente, ANTES del auto-reset.
+        # The next observation, BEFORE the auto-reset.
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
             next_obs_buf.unsafe_ptr(), state.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
@@ -251,7 +253,7 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
             state.unsafe_ptr(), done.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
 
-    # Cada env aporta una secuencia entera.
+    # Each env contributes a whole sequence.
     zeros_t = List[Scalar[dtype]]()
     for _ in range(ROLLOUT):
         zeros_t.append(Scalar[dtype](0))      # truncated: en TTT nunca ocurre
@@ -277,7 +279,7 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
 
 def update(ctx: DeviceContext, mut critic: Critic, buf: TrajectoryBuffer,
            step: Int, seed: UInt32) raises -> Scalar[dtype]:
-    """Un paso de gradiente sobre el critico. Devuelve la perdida ANTES del paso."""
+    """One gradient step on the critic. Returns the loss BEFORE the step."""
     idx = buf.sample_indices(BATCH, seed, UInt32(step))
     n = BATCH * ROLLOUT          # filas de red: cada paso de cada secuencia
 
@@ -293,7 +295,7 @@ def update(ctx: DeviceContext, mut critic: Critic, buf: TrajectoryBuffer,
         disc_host.append((Scalar[dtype](1) - done_host[i]) * GAMMA)
     discount = upload[dtype](ctx, disc_host)
 
-    # 1. Los valores del TARGET, que son los que arman los objetivos.
+    # 1. The TARGET's values, which are what build the targets.
     v_tm1 = zero_buffer[dtype](ctx, n)
     v_t = zero_buffer[dtype](ctx, n)
     critic_forward(ctx, critic.target, critic.tcache, obs, n)
@@ -305,13 +307,13 @@ def update(ctx: DeviceContext, mut critic: Critic, buf: TrajectoryBuffer,
         v_t.unsafe_ptr(), critic.tcache.value.unsafe_ptr(), n,
         grid_dim=(n + 255) // 256, block_dim=256)
 
-    # 2. Los objetivos, con la GAE truncada.
+    # 2. The targets, with the truncated GAE.
     adv = zero_buffer[dtype](ctx, n)
     targets = zero_buffer[dtype](ctx, n)
     truncated_gae(ctx, adv, targets, reward, discount, v_tm1, v_t, trunc,
                   BATCH, ROLLOUT, GAE_LAMBDA)
 
-    # 3. La prediccion de la red ONLINE, que es la que se entrena.
+    # 3. The ONLINE network's prediction, which is the one being trained.
     critic_forward(ctx, critic.online, critic.cache, obs, n)
     ctx.synchronize()
 
@@ -323,7 +325,7 @@ def update(ctx: DeviceContext, mut critic: Critic, buf: TrajectoryBuffer,
         loss += Scalar[dtype](0.5) * d * d
     loss /= Scalar[dtype](n)
 
-    # 4. Gradientes, clip GLOBAL sobre los seis tensores, y Adam.
+    # 4. Gradients, GLOBAL clip over the six tensors, and Adam.
     critic_backward(ctx, critic.online, critic.cache, critic.grads,
                     critic.scratch, obs, targets, n)
     ctx.synchronize()
@@ -349,7 +351,7 @@ def update(ctx: DeviceContext, mut critic: Critic, buf: TrajectoryBuffer,
     adam_step(ctx, critic.online.b3, critic.grads.db3, critic.a_b3,
               OUT_DIM, CRITIC_LR, scale, step)
 
-    # 5. Y el target se acerca un poquito al online.
+    # 5. And the target moves a little towards the online one.
     ema_update(ctx, critic.target.w1, critic.online.w1, OBS_DIM * HIDDEN, TAU)
     ema_update(ctx, critic.target.b1, critic.online.b1, HIDDEN, TAU)
     ema_update(ctx, critic.target.w2, critic.online.w2, HIDDEN * HIDDEN, TAU)
@@ -367,20 +369,21 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
              done: DeviceBuffer[idx_dtype], u_rival: DeviceBuffer[dtype],
              eval_cache: CriticCache, steps: Int,
              seed: UInt32) raises -> Scalar[dtype]:
-    """¿Predice V el resultado de la partida? Devuelve la correlacion.
+    """Does V predict the game's outcome? Returns the correlation.
 
-    Que la perdida baje NO demuestra que el critico haya aprendido algo util:
-    podria estar prediciendo siempre la media y bajaria igual. La prueba de verdad
-    es si su valor SEPARA las partidas que se ganan de las que no.
+    The loss going down does NOT prove the critic has learned anything useful: it
+    could be predicting the mean every time and it would go down all the same. The
+    real test is whether its value SEPARATES the games that are won from those that
+    are not.
 
-    Se juega, se anota V(s) en cada paso, y cuando la partida acaba se le asigna a
-    todos sus pasos el resultado real (1 / 0.5 / 0). Al final se calcula la
-    correlacion de Pearson entre las dos series. Cerca de 0 = el critico no
-    distingue nada; positiva y alta = predice.
+    It plays, records V(s) at each step, and when the game ends assigns the real
+    outcome (1 / 0.5 / 0) to all of its steps. At the end the Pearson correlation
+    between the two series is computed. Near 0 = the critic distinguishes nothing;
+    positive and high = it predicts.
     """
     blocks = (NUM_ENVS + TPB_TTT - 1) // TPB_TTT
 
-    # Por env: los valores predichos de la partida en curso.
+    # Per env: the predicted values of the game in progress.
     pending = List[Scalar[dtype]]()
     pending_count = List[Int]()
     for _ in range(NUM_ENVS * 16):
@@ -395,7 +398,7 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
             obs_buf.unsafe_ptr(), state.unsafe_ptr(), NUM_ENVS,
             grid_dim=blocks, block_dim=TPB_TTT)
-        # El valor que el critico le da al tablero ACTUAL.
+        # The value the critic gives the CURRENT board.
         critic_forward(ctx, critic.online, eval_cache, obs_buf, NUM_ENVS)
         search[TicTacToe](ctx, ws, cfg, model, state,
                           seed ^ (UInt32(9000 + t) * 2654435761))
@@ -417,7 +420,7 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
                 pending[e * 16 + c] = v[e]
                 pending_count[e] = c + 1
             if Int(d[e]) != 0:
-                # La partida acabo: todos sus pasos comparten el resultado.
+                # The game ended: all of its steps share the outcome.
                 for k in range(pending_count[e]):
                     vs.append(pending[e * 16 + k])
                     outs.append(r[e])
@@ -432,11 +435,10 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
         print("      (muy pocas partidas para evaluar)")
         return Scalar[dtype](0)
 
-    # Media de V separada por resultado. Se usa esto y NO la correlacion porque
-    # las clases estan MUY desbalanceadas: la busqueda gana el ~96%, asi que el
-    # resultado es casi constante y correlacionar contra algo casi constante mide
-    # ruido, no capacidad predictiva. Comparar medias por grupo si aguanta el
-    # desbalanceo.
+    # Mean V split by outcome. This is used and NOT the correlation because the
+    # classes are VERY imbalanced: the search wins ~96%, so the outcome is nearly
+    # constant and correlating against something nearly constant measures noise,
+    # not predictive power. Comparing group means does hold up under the imbalance.
     sum_win = Scalar[dtype](0); n_win = 0
     sum_draw = Scalar[dtype](0); n_draw = 0
     sum_loss = Scalar[dtype](0); n_loss = 0
@@ -452,10 +454,9 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
     md = sum_draw / Scalar[dtype](n_draw) if n_draw > 0 else Scalar[dtype](0)
     ml = sum_loss / Scalar[dtype](n_loss) if n_loss > 0 else Scalar[dtype](0)
 
-    # La desviacion de cada grupo, para saber si la diferencia de medias es real o
-    # ruido. Con solo ~50 posiciones perdidas de ~1900, una separacion pequena
-    # puede ser puro azar, y afirmarla sin comprobarlo seria inventarse un
-    # resultado.
+    # Each group's deviation, to know whether the difference of means is real or
+    # noise. With only ~50 lost positions out of ~1900, a small separation can be
+    # pure chance, and claiming it without checking would be inventing a result.
     var_w = Scalar[dtype](0)
     var_l = Scalar[dtype](0)
     for i in range(n):
@@ -476,7 +477,7 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
     if n_loss < 2 or n_win < 2:
         return Scalar[dtype](0)
 
-    # Error estandar de la diferencia de medias, y cuantas sigmas es.
+    # Standard error of the difference of means, and how many sigmas it is.
     se = (var_w / Scalar[dtype](n_win) + var_l / Scalar[dtype](n_loss)) ** 0.5
     diff = mw - ml
     sigmas = diff / se if se > Scalar[dtype](0) else Scalar[dtype](0)
@@ -519,7 +520,7 @@ def main() raises:
         ctx.enqueue_function[ttt_reset_kernel, ttt_reset_kernel](
             state.unsafe_ptr(), NUM_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
 
-        # La correlacion ANTES de entrenar: con pesos al azar deberia ser ~0.
+        # The correlation BEFORE training: with random weights it should be ~0.
         print("  ANTES de entrenar:")
         corr0 = evaluate(ctx, critic, cfg, model, ws, state, obs_buf, reward,
                          done, u_rival, eval_cache, 400, SEED)

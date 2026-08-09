@@ -1,19 +1,19 @@
-"""Demo 1: el E-step en vivo.
+"""Demo 1: the E-step in action.
 
-Ensena lo que hace SPO antes de que exista ninguna red neuronal: partiendo de una
-politica que no sabe nada (prior uniforme), la busqueda SMC produce una politica
-mejorada q solo por simular. Es la Figura 1 del paper convertida en demo.
+It shows what SPO does before any neural network exists: starting from a policy
+that knows nothing (uniform prior), the SMC search produces an improved policy q
+just by simulating. It is Figure 1 of the paper turned into a demo.
 
     ./run.sh demos/demo_estep.mojo
 
-Imprime tres cosas y deja dos CSV en results/ con los numeros crudos:
+It prints three things and leaves two CSVs in results/ with the raw numbers:
 
-  1. prior vs q          la mejora, que es el resultado principal
-  2. ESS y entropia por profundidad   como se degrada la busqueda y como la
-                                      recupera el resampling
-  3. barridos de temperatura y de numero de particulas
-                         eta controla lo agresiva que es la mejora,
-                         N controla lo fiable que es la estimacion
+  1. prior vs q          the improvement, which is the main result
+  2. ESS and entropy per depth   how the search degrades and how resampling
+                                 recovers it
+  3. temperature and particle-count sweeps
+                         eta controls how aggressive the improvement is,
+                         N controls how reliable the estimate is
 """
 
 from std.gpu.host import DeviceContext
@@ -29,25 +29,25 @@ from tests.helpers import upload, download
 
 comptime SEED = UInt32(20260719)
 comptime NUM_ENVS = 64
-"""Bastantes envs: cada uno es una busqueda independiente desde el mismo estado,
-asi que promediar sobre ellos da una medida estable sin repetir el experimento."""
+"""Plenty of envs: each one is an independent search from the same state, so
+averaging over them gives a stable measurement without repeating the experiment."""
 
 
 @fieldwise_init
 struct SearchStats(Movable):
-    """Lo que se mide de una configuracion de busqueda."""
+    """What gets measured from one search configuration."""
     var q_good: Scalar[dtype]
-    """Masa que la politica mejorada pone en la accion buena, promediada."""
+    """Mass the improved policy puts on the good action, averaged."""
     var ess: List[Scalar[dtype]]
-    """ESS medio por profundidad."""
+    """Mean ESS per depth."""
     var entropy: List[Scalar[dtype]]
-    """Entropia media de los pesos por profundidad."""
+    """Mean entropy of the weights per depth."""
 
 
 def run_search(ctx: DeviceContext, num_particles: Int,
                temperature: Scalar[dtype], depth: Int, period: Int,
                toy: ToyChain) raises -> SearchStats:
-    """Corre una busqueda completa y resume el resultado."""
+    """Runs a complete search and summarises the result."""
     cfg = SPOConfig(
         num_envs=NUM_ENVS, num_particles=num_particles, num_actions=NUM_ACTIONS,
         state_dim=STATE_DIM, search_depth=depth, resample_period=period,
@@ -57,7 +57,7 @@ def run_search(ctx: DeviceContext, num_particles: Int,
 
     root_state = List[Scalar[dtype]]()
     for _ in range(NUM_ENVS):
-        root_state.append(0.0)      # todos en la casilla de salida
+        root_state.append(0.0)      # all at the starting cell
 
     search[ToyChain](ctx, ws, cfg, toy, upload[dtype](ctx, root_state), SEED)
     ctx.synchronize()
@@ -66,7 +66,7 @@ def run_search(ctx: DeviceContext, num_particles: Int,
     actions = download[idx_dtype](ws.output.sampled_actions, p_total)
     weights = download[dtype](ws.output.sampled_action_weights, p_total)
 
-    # q(GOOD) = histograma de las acciones raiz ponderado por sus pesos.
+    # q(GOOD) = histogram of the root actions weighted by their weights.
     q_total = Scalar[dtype](0)
     for e in range(NUM_ENVS):
         for n in range(num_particles):
@@ -92,7 +92,7 @@ def run_search(ctx: DeviceContext, num_particles: Int,
 
 
 def bar(value: Scalar[dtype], width: Int) -> String:
-    """Barra de texto, para poder ensenar el resultado sin salir de la terminal."""
+    """A text bar, so the result can be shown without leaving the terminal."""
     filled = Int(value * Scalar[dtype](width))
     out = String("")
     for i in range(width):
@@ -109,11 +109,11 @@ def main() raises:
         print(" Todo lo que mejore la politica viene de simular.")
         print()
 
-        # La configuracion del paper: prior contra politica mejorada.
+        # The paper's configuration: prior against improved policy.
         short = default_toy_chain()
-        # Para el panel del ESS hace falta un pasillo largo: con el corto todas
-        # las particulas se truncan en la profundidad 4 y a partir de ahi sus
-        # pesos quedan congelados, o sea ESS = N artificialmente.
+        # The ESS panel needs a long corridor: with the short one every particle is
+        # truncated at depth 4 and from then on their weights are frozen, that is,
+        # ESS = N artificially.
         long_chain = ToyChain(chain_length=30, horizon=30, value_scale=1.0)
 
         base = run_search(ctx, 16, 0.5, 4, 4, short)
@@ -129,7 +129,7 @@ def main() raises:
               "   ", bar(base.q_good, 20), " ", base.q_good)
         print()
 
-        # Como evoluciona la salud de la busqueda con la profundidad.
+        # How the search's health evolves with depth.
         deep = run_search(ctx, 16, 0.5, 8, 4, long_chain)
         print(" 2. Salud de la busqueda por profundidad (ESS de 16, periodo 4)")
         print("    (pasillo largo, para que las particulas no mueran antes de tiempo)")
@@ -143,7 +143,7 @@ def main() raises:
                   deep.ess[d], "   ", deep.entropy[d], mark)
         print()
 
-        # Barrido de temperatura.
+        # Temperature sweep.
         print(" 3. Que hace la temperatura eta")
         print("    Baja = solo sobreviven las mejores (mas mejora, menos ESS).")
         print("    Alta = todas parecidas (menos mejora, mas ESS).")
@@ -157,7 +157,7 @@ def main() raises:
                   "   ", st.ess[len(st.ess) - 1])
         print()
 
-        # Barrido del numero de particulas.
+        # Particle-count sweep.
         print(" 4. Que hace el numero de particulas N")
         print("    Mas particulas = mejor estimacion de la politica mejorada.")
         print()
@@ -169,7 +169,7 @@ def main() raises:
             print("      ", counts[i], "    ", bar(st.q_good, 20), " ", st.q_good)
         print()
 
-        # Los numeros crudos a disco, por si quiero mirarlos luego.
+        # The raw numbers to disk, in case I want to look at them later.
         with open("results/estep_policy.csv", "w") as f:
             f.write(String("setting,temperature,num_particles,action,probability\n"))
             f.write(String("prior,0.5,16,BAD,", prior_good, "\n"))

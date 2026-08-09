@@ -1,41 +1,42 @@
-"""Metricas del benchmark: mismo esquema CSV que la implementacion MCTS.
+"""Benchmark metrics: the same CSV schema as the MCTS implementation.
 
-Las columnas son EXACTAMENTE las de `MCTS-mojo-tictactoe/src/metrics.mojo`, en el
-mismo orden, para que los dos CSV se puedan concatenar y comparar fila a fila. El
-esquema esta pensado para MCTS, asi que hay que decir con que se corresponde cada
-columna en una busqueda SMC:
+The columns are EXACTLY those of `MCTS-mojo-tictactoe/src/metrics.mojo`, in the
+same order, so that the two CSVs can be concatenated and compared row by row. The
+schema was designed for MCTS, so what each column corresponds to in an SMC search
+has to be spelled out:
 
-    columna              MCTS                        busqueda SMC
+    column               MCTS                        SMC search
     -------------------  --------------------------  --------------------------
     mode                 mcts_vs_random              smc_vs_random
-    iterations           simulaciones por decision   particulas por decision
-    exploration          constante UCT               temperatura
-    total_simulations    rollouts                    pasos de particula
-                                                     (particulas x profundidad)
-    total_nodes          nodos del arbol             0: la busqueda SMC no
-                                                     construye arbol
-    mcts_decisions       decisiones tomadas          idem (turnos del agente)
+    iterations           simulations per decision    particles per decision
+    exploration          UCT constant                temperature
+    total_simulations    rollouts                    particle steps
+                                                     (particles x depth)
+    total_nodes          tree nodes                  0: the SMC search builds no
+                                                     tree
+    mcts_decisions       decisions taken             idem (agent turns)
 
-`total_nodes = 0` no es un hueco por rellenar: es el dato. La diferencia estructural
-entre los dos planificadores es justo esa -- uno acumula un arbol y el otro pisa un
-conjunto de particulas -- y por eso uno necesita empaquetar el tablero en bitboards
-y el otro no.
+`total_nodes = 0` is not a blank to be filled in: it is the datum. The structural
+difference between the two planners is exactly that -- one accumulates a tree and
+the other overwrites a set of particles -- and that is why one needs to pack the
+board into bitboards and the other does not.
 
-Sobre el tiempo, la comparacion honesta necesita DOS numeros y no uno:
+On timing, an honest comparison needs TWO numbers and not one:
 
-  * LATENCIA: lo que tarda UNA decision aislada. Es lo que mide el MCTS, que juega
-    partidas en serie en la CPU.
-  * THROUGHPUT: decisiones por segundo con el lote entero. La busqueda planifica
-    para 64 partidas a la vez en la GPU, asi que su coste por decision repartido es
-    mucho menor que su latencia.
+  * LATENCY: how long ONE isolated decision takes. It is what the MCTS measures,
+    since it plays games serially on the CPU.
+  * THROUGHPUT: decisions per second with the whole batch. The search plans for 64
+    games at once on the GPU, so its amortised cost per decision is far lower than
+    its latency.
 
-Comparar el throughput de la GPU contra la latencia de la CPU seria hacer trampa, y
-comparar solo latencias esconderia justo la ventaja del enfoque por lotes.
+Comparing the GPU's throughput against the CPU's latency would be cheating, and
+comparing only latencies would hide precisely the batched approach's advantage.
 """
 
 from std.math import sqrt
 
-# El orden canonico de columnas, copiado literal del MCTS para poder concatenar.
+# The canonical column order, copied verbatim from the MCTS so as to be able to
+# concatenate.
 comptime CSV_HEADER: StaticString = (
     "language,mode,games,iterations,exploration,seed,"
     "total_runtime_s,total_moves,mcts_decisions,total_simulations,"
@@ -45,10 +46,10 @@ comptime CSV_HEADER: StaticString = (
 
 
 def fmt_fixed(value: Float64, decimals: Int) -> String:
-    """Formatea con exactamente `decimals` decimales (el "%.Nf" de printf).
+    """Formats with exactly `decimals` decimals (printf's "%.Nf").
 
-    Con aritmetica entera sobre el valor escalado, igual que en el MCTS, para que
-    las dos implementaciones escriban los numeros de la misma forma.
+    With integer arithmetic on the scaled value, just as in the MCTS, so that both
+    implementations write the numbers the same way.
     """
     scale = Int64(1)
     for _ in range(decimals):
@@ -67,7 +68,7 @@ def fmt_fixed(value: Float64, decimals: Int) -> String:
 
 
 def wilson_lo(successes: Int, n: Int) -> Float64:
-    """Extremo inferior del intervalo de Wilson al 95%."""
+    """Lower end of the 95% Wilson interval."""
     if n <= 0:
         return 0.0
     z = 1.959963984540054
@@ -81,13 +82,13 @@ def wilson_lo(successes: Int, n: Int) -> Float64:
 
 
 def wilson_hi(successes: Int, n: Int) -> Float64:
-    """Extremo superior del intervalo de Wilson al 95%.
+    """Upper end of the 95% Wilson interval.
 
-    Wilson y no el Wald de manual (p +- z*sqrt(p(1-p)/n)), que en p=0 o p=1 da un
-    intervalo de ancho cero -- justo el regimen de un planificador que gana casi
-    siempre al azar. Wilson se queda dentro de [0,1] y mantiene la cobertura.
-    Se devuelve en dos funciones porque una tupla de Float64 como valor de retorno
-    da problemas en 1.0.0b1 (ver docs/api_notes.md).
+    Wilson and not the textbook Wald (p +- z*sqrt(p(1-p)/n)), which at p=0 or p=1
+    gives an interval of zero width -- precisely the regime of a planner that
+    almost always beats random play. Wilson stays inside [0,1] and keeps its
+    coverage. It is returned as two functions because a tuple of Float64 as a
+    return value causes trouble in 1.0.0b1 (see docs/api_notes.md).
     """
     if n <= 0:
         return 0.0
@@ -102,7 +103,7 @@ def wilson_hi(successes: Int, n: Int) -> Float64:
 
 
 def rate_with_ci(successes: Int, n: Int) -> String:
-    """`(tasa, 95% CI [lo, hi])`, el mismo formato que el resumen del MCTS."""
+    """`(rate, 95% CI [lo, hi])`, the same format as the MCTS's summary."""
     safe = n if n > 0 else 1
     rate = Float64(successes) / Float64(safe)
     return ("(" + fmt_fixed(rate, 3) + ", 95% CI ["
@@ -112,24 +113,24 @@ def rate_with_ci(successes: Int, n: Int) -> String:
 
 @fieldwise_init
 struct PlannerMetrics(Copyable, Movable):
-    """Una tanda de partidas de un planificador, en el esquema comun."""
+    """One batch of games from a planner, in the common schema."""
 
     var mode: String
-    """smc_vs_random, para distinguirlo del mcts_vs_random del MCTS."""
+    """smc_vs_random, to tell it apart from the MCTS's mcts_vs_random."""
 
     var games: Int
     var iterations: Int
-    """Particulas por decision: el analogo de las iteraciones del MCTS."""
+    """Particles per decision: the analogue of the MCTS's iterations."""
 
     var exploration: Float64
-    """La temperatura de la busqueda, en la columna de la constante UCT."""
+    """The search's temperature, in the UCT constant's column."""
 
     var seed: Int
     var total_runtime_s: Float64
     var total_moves: Int
     var decisions: Int
     var total_simulations: Int
-    """Pasos de particula: particulas x profundidad x decisiones."""
+    """Particle steps: particles x depth x decisions."""
 
     var x_wins: Int
     var o_wins: Int
@@ -145,20 +146,20 @@ struct PlannerMetrics(Copyable, Movable):
         return Float64(self.total_simulations) / self.runtime_or_eps()
 
     def avg_decision_time_s(self) -> Float64:
-        """Coste por decision REPARTIDO: con lotes, muchas decisiones salen a la
-        vez, asi que esto es throughput y no latencia. Ver la cabecera."""
+        """AMORTISED cost per decision: with batching, many decisions come out at
+        once, so this is throughput and not latency. See the header."""
         d = self.decisions if self.decisions > 0 else 1
         return self.total_runtime_s / Float64(d)
 
     def score(self) -> Float64:
-        """1 victoria, 0.5 empate, 0 derrota. Comparable con el 0.6484 del azar y
-        el 0.9974 del juego optimo, los dos calculados exactamente."""
+        """1 win, 0.5 draw, 0 loss. Comparable with random play's 0.6484 and
+        optimal play's 0.9974, both computed exactly."""
         return (Float64(self.x_wins) + 0.5 * Float64(self.draws)) \
                / Float64(self.games_or_one())
 
     def to_csv_row(self) -> String:
         cols = List[String]()
-        cols.append("mojo-gpu")          # language: distingue del "mojo" (CPU) del MCTS
+        cols.append("mojo-gpu")          # language: tells it apart from the MCTS's "mojo" (CPU)
         cols.append(self.mode)
         cols.append(String(self.games))
         cols.append(String(self.iterations))
@@ -168,12 +169,12 @@ struct PlannerMetrics(Copyable, Movable):
         cols.append(String(self.total_moves))
         cols.append(String(self.decisions))
         cols.append(String(self.total_simulations))
-        cols.append("0")                 # total_nodes: la busqueda SMC no tiene arbol
+        cols.append("0")                 # total_nodes: the SMC search has no tree
         cols.append(String(self.x_wins))
         cols.append(String(self.o_wins))
         cols.append(String(self.draws))
         cols.append(fmt_fixed(self.simulations_per_second(), 6))
-        cols.append(fmt_fixed(0.0, 6))   # nodes_per_second: sin arbol, no aplica
+        cols.append(fmt_fixed(0.0, 6))   # nodes_per_second: no tree, not applicable
         cols.append(fmt_fixed(self.avg_decision_time_s(), 6))
         return String(",").join(cols)
 
@@ -208,21 +209,21 @@ struct PlannerMetrics(Copyable, Movable):
 
 
 def write_csv(metrics: PlannerMetrics, path: String) raises:
-    """Escribe UNA fila, empezando el fichero de cero."""
+    """Writes ONE row, starting the file from scratch."""
     rows = List[PlannerMetrics]()
     rows.append(metrics)
     write_csv_rows(rows, path)
 
 
 def write_csv_rows(rows: List[PlannerMetrics], path: String) raises:
-    """Escribe VARIAS filas de una tanda, con la cabecera delante.
+    """Writes SEVERAL rows from one batch, with the header in front.
 
-    Una tanda puede necesitar mas de una fila porque el esquema de 17 columnas solo
-    tiene un hueco para el tiempo (`avg_decision_time_s`) y la comparacion del
-    Milestone 4 necesita dos numeros distintos: la latencia de una decision suelta y
-    el coste repartido de un lote. Meterlos en la misma fila obligaria a cambiar el
-    esquema y romperia la concatenacion con el CSV del MCTS, que ya esta escrito.
-    Van como filas separadas, distinguidas por la etiqueta `mode`.
+    A batch may need more than one row because the 17-column schema has only one
+    slot for time (`avg_decision_time_s`) and Milestone 4's comparison needs two
+    different numbers: the latency of a single decision and a batch's amortised
+    cost. Putting them in the same row would force a schema change and break the
+    concatenation with the MCTS's CSV, which is already written. They go as
+    separate rows, told apart by the `mode` label.
     """
     text = String(CSV_HEADER) + "\n"
     for m in rows:

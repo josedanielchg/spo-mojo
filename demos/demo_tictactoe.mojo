@@ -1,48 +1,49 @@
-"""Demo 2: la busqueda SMC juega al tres en raya.
+"""Demo 2: the SMC search plays tic-tac-toe.
 
-La pregunta que decide la fase A: ¿planificar juega mejor que tirar al azar? No hay
-ninguna red entrenada -- el prior es uniforme sobre las casillas legales y V=0, asi
-que toda la mejora viene de simular partidas hacia delante.
+The question that settles phase A: does planning play better than throwing at
+random? There is no trained network -- the prior is uniform over the legal cells
+and V=0, so all the improvement comes from simulating games forward.
 
     ./run.sh demos/demo_tictactoe.mojo
 
-Las dos referencias son EXACTAS, no estimadas: en un juego tan pequeno se calculan
-por recursion sobre todos los estados (`ttt_exact.py` / `ttt_optimal.py`).
+The two references are EXACT, not estimated: in such a small game they are computed
+by recursion over all states (`ttt_exact.py` / `ttt_optimal.py`).
 
-    suelo   X al azar    vs O al azar : gana 58.49%  empata 12.70%  pierde 28.81%  score 0.6484
-    techo   X optimo     vs O al azar : gana 99.48%  empata  0.52%  pierde  0.00%  score 0.9974
-    aqui    X = busqueda vs O al azar : gana 96.80%  empata  1.18%  pierde  2.02%  score 0.9739
+    floor    random X    vs random O : wins 58.49%  draws 12.70%  loses 28.81%  score 0.6484
+    ceiling  optimal X   vs random O : wins 99.48%  draws  0.52%  loses  0.00%  score 0.9974
+    here     X = search  vs random O : wins 96.80%  draws  1.18%  loses  2.02%  score 0.9739
 
-O sea 1.50x el azar, y el 97.6% del maximo alcanzable. Tener el techo importa: dice
-cuanto margen queda de verdad (poco) y da la referencia con la que comparar el MCTS.
-La cifra que mas informa es la de DERROTAS, porque el juego optimo no pierde NUNCA:
-ese 2% son amenazas del rival que la busqueda no bloqueo.
+That is 1.50x random play, and 97.6% of the achievable maximum. Having the ceiling
+matters: it says how much headroom really remains (little) and gives the reference
+to compare the MCTS against. The most informative figure is the LOSSES one, because
+optimal play NEVER loses: that 2% is rival threats the search did not block.
 
-Imprime cuatro cosas:
-  1. linea base vs busqueda      el resultado principal
-  2. barrido del descuento       por que la recompensa tiene que descontarse
-  3. barrido de profundidad      cuanto ayuda simular mas turnos
-  4. barrido de particulas       cuanto ayuda simular mas variantes
+It prints four things:
+  1. baseline vs search       the main result
+  2. discount sweep           why the reward has to be discounted
+  3. depth sweep              how much simulating more turns helps
+  4. particle sweep           how much simulating more variants helps
 
-Los dos hallazgos que hicieron falta para llegar aqui, los dos encontrados con esta
-demo (primero daba 0.997x, o sea igual que el azar):
+The two findings it took to get here, both found with this demo (it used to give
+0.997x, that is, the same as random):
 
-  * Un bug del nucleo: `root_fn` no ponia a cero los acumuladores, asi que al
-    reutilizar el workspace la segunda busqueda heredaba `terminal = 1` y la
-    mascara congelaba TODOS los pesos. La busqueda degeneraba en elegir al azar sin
-    fallar en nada. Tiene test de regresion en test_search.mojo.
-  * El descuento por profundidad (`reward_gamma`): sin el, ganar en el primer turno
-    vale lo mismo que ganar en el cuarto, y el softmax no puede distinguir "gane
-    seguro" de "gane con suerte". Se ve en el barrido 2: gamma=1 da 0.81 y
-    gamma=0.7 da 0.97.
+  * A core bug: `root_fn` did not zero the accumulators, so on reusing the
+    workspace the second search inherited `terminal = 1` and the mask froze ALL the
+    weights. The search degenerated into choosing at random without failing at
+    anything. It has a regression test in test_search.mojo.
+  * The depth discount (`reward_gamma`): without it, winning on the first turn is
+    worth the same as winning on the fourth, and the softmax cannot tell "I win for
+    sure" from "I won by luck". It shows up in sweep 2: gamma=1 gives 0.81 and
+    gamma=0.7 gives 0.97.
 
-Los parametros salen de barrer cada uno midiendo partidas: la temperatura es lo que
-mas manda (0.5 -> 0.78, 0.1 -> 0.94, 0.02 -> 0.974, y ahi satura), el descuento
-tiene un valle plano entre 0.5 y 0.7, y el periodo de resampling apenas se nota.
+The parameters come from sweeping each one while measuring games: the temperature
+matters most (0.5 -> 0.78, 0.1 -> 0.94, 0.02 -> 0.974, and there it saturates), the
+discount has a flat valley between 0.5 and 0.7, and the resampling period is barely
+noticeable.
 
-Nota de escala para leer el barrido de profundidad: cada paso del modelo es un turno
-completo (agente + rival) y una partida dura como mucho 5 jugadas del agente, asi
-que la mejora satura en cuanto la profundidad cubre el final de la partida.
+A note on scale for reading the depth sweep: each model step is a full turn (agent
++ rival) and a game lasts at most 5 agent moves, so the improvement saturates as
+soon as the depth covers the end of the game.
 """
 
 from std.gpu.host import DeviceContext
@@ -60,20 +61,20 @@ from systems.spo.search import search
 
 comptime SEED = UInt32(20260724)
 comptime NUM_ENVS = 64
-"""Partidas en paralelo. Cada una es independiente, asi que mas envs = mas partidas
-por turno y una medida mas estable."""
+"""Games in parallel. Each one is independent, so more envs = more games per turn
+and a more stable measurement."""
 
 comptime EXACT_RANDOM_SCORE = Scalar[dtype](0.6484)
-"""Puntuacion del agente aleatorio, calculada exactamente (no medida)."""
+"""The random agent's score, computed exactly (not measured)."""
 
 
 def search_config(num_particles: Int, depth: Int, period: Int,
                   temperature: Scalar[dtype]) -> SPOConfig:
-    """Config de busqueda para TTT.
+    """Search config for TTT.
 
-    `search_gamma` se queda en 1 porque solo multiplica al bootstrap `V(s')`, y aqui
-    V es 0: no tiene ningun efecto. El descuento que SI importa es el del modelo
-    (`reward_gamma`), que se aplica a la recompensa por profundidad.
+    `search_gamma` stays at 1 because it only multiplies the bootstrap `V(s')`, and
+    here V is 0: it has no effect at all. The discount that DOES matter is the
+    model's (`reward_gamma`), which is applied to the reward by depth.
     """
     return SPOConfig(
         num_envs=NUM_ENVS, num_particles=num_particles, num_actions=NUM_ACTIONS,
@@ -83,17 +84,17 @@ def search_config(num_particles: Int, depth: Int, period: Int,
 
 def play_search_games(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
                       num_steps: Int, seed: UInt32) raises -> MatchStats:
-    """Juega partidas de verdad usando la BUSQUEDA como politica.
+    """Plays real games using the SEARCH as the policy.
 
-    En cada turno: se planifica desde el estado real (una busqueda completa por
-    env), se ejecuta la accion elegida, se anota la partida si acabo y se reinicia.
+    On every turn: plan from the real state (one full search per env), execute the
+    chosen action, record the game if it ended and reset it.
 
-    Vive en demos/ y no en envs/ a proposito: esto importa el algoritmo de busqueda,
-    y la regla del proyecto es que un entorno nunca dependa del algoritmo. El nivel
-    de aplicacion (una demo) si puede depender de los dos.
+    It lives in demos/ and not in envs/ on purpose: this imports the search
+    algorithm, and the project's rule is that an environment never depends on the
+    algorithm. The application level (a demo) may depend on both.
 
-    El `SearchWorkspace` se reserva UNA vez fuera del bucle: aqui la busqueda corre
-    en cada turno, asi que reservar sus buffers cada vez seria trabajo puro por nada.
+    The `SearchWorkspace` is allocated ONCE outside the loop: here the search runs
+    every turn, so allocating its buffers each time would be pure work for nothing.
     """
     ws = SearchWorkspace(ctx, cfg)
     num_envs = cfg.num_envs
@@ -112,14 +113,14 @@ def play_search_games(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
     losses = 0
 
     for step in range(num_steps):
-        # Planifica desde el estado real. La busqueda copia el tablero a sus
-        # particulas, asi que no toca el estado del entorno.
-        # La seed cambia por turno (con un multiplicador impar grande) para que dos
-        # turnos desde el mismo tablero no sorteen exactamente las mismas variantes.
+        # Plan from the real state. The search copies the board to its particles,
+        # so it does not touch the environment's state.
+        # The seed changes per turn (with a large odd multiplier) so that two turns
+        # from the same board do not draw exactly the same variants.
         search[TicTacToe](ctx, ws, cfg, model, state,
                           seed ^ (UInt32(step) * 2654435761))
 
-        # Y ejecuta la accion elegida en el entorno real.
+        # And execute the chosen action in the real environment.
         ctx.enqueue_function[fill_uniform, fill_uniform](
             u_rival.unsafe_ptr(), seed, RNG_RIVAL + UInt32(step), num_envs,
             grid_dim=blocks, block_dim=TPB_TTT)
@@ -149,7 +150,7 @@ def play_search_games(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
 
 
 def show(label: String, s: MatchStats) raises:
-    """Una linea de marcador, con la mejora sobre el azar exacto."""
+    """One scoreboard line, with the improvement over exact random play."""
     print("  ", label,
           "  partidas", s.games(),
           " gana", s.win_rate(),

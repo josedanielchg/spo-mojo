@@ -1,50 +1,50 @@
-"""E1.11: entrenar el critico, enchufarlo a la busqueda y medir si sirve.
+"""E1.11: train the critic, plug it into the search and measure whether it helps.
 
-La pregunta de la etapa 1 entera es una sola: **¿bajan las derrotas?** El
-planificador sin critico pierde el 2.02% de las partidas medido en A7; el juego
-optimo pierde el 0.00%. Ese 2% son amenazas del rival que la busqueda no vio.
+The whole of stage 1 asks a single question: **do the losses go down?** The
+critic-less planner loses 2.02% of its games as measured in A7; optimal play loses
+0.00%. That 2% is rival threats the search did not see.
 
-Que hace exactamente el critico en el peso, sacado del codigo y no de la intuicion.
-`update_particles_kernel` acumula `weights += r_d + next_value_d - value_d` y
-justo despues hace `value_{d+1} = next_value_d`, asi que la suma TELESCOPA y el
-peso final de una particula es
+What the critic does exactly in the weight, taken from the code and not from
+intuition. `update_particles_kernel` accumulates
+`weights += r_d + next_value_d - value_d` and right afterwards does
+`value_{d+1} = next_value_d`, so the sum TELESCOPES and a particle's final weight is
 
-    peso = SUMA_d r_d  +  (ultimo bootstrap)  -  V(s_raiz)
+    weight = SUM_d r_d  +  (last bootstrap)  -  V(s_root)
 
-Y `root.mojo:49` reparte el MISMO V(s_raiz) a todas las particulas de un env, asi
-que ese termino es una constante por env y el softmax lo cancela entero. O sea que
-el critico NO entra como linea base: su unico efecto es el bootstrap de las
-particulas que siguen VIVAS al final de la busqueda. Escrito por casos, con V ~ c:
+And `root.mojo:49` hands the SAME V(s_root) to every particle of an env, so that
+term is a per-env constant and the softmax cancels it entirely. That is, the critic
+does NOT come in as a baseline: its only effect is the bootstrap of the particles
+still ALIVE at the end of the search. Written out by cases, with V ~ c:
 
-                        sin critico          con critico
-    ganar en d          gamma_r^d            gamma_r^d
-    perder en d         0                    0
-    seguir viva         0                    c ~ 0.93
+                        no critic            with critic
+    win at d            gamma_r^d            gamma_r^d
+    lose at d           0                    0
+    stay alive          0                    c ~ 0.93
 
-Ahi esta el problema. Con `reward_gamma = 0.7`, ganar en la profundidad 1 vale 0.7
-y seguir vivo vale 0.93: **sobrevivir puntua mas que ganar**, salvo que se gane en
-el acto. La busqueda con critico prefiere no resolver la partida. Y no es un fallo
-del critico, es un desajuste de escalas: la recompensa lleva gamma_r^d plegado
-(decision de A6) y el valor no.
+There is the problem. With `reward_gamma = 0.7`, winning at depth 1 is worth 0.7 and
+staying alive is worth 0.93: **surviving scores higher than winning**, unless the
+win is immediate. The search with a critic prefers not to settle the game. And it is
+not a fault of the critic, it is a scale mismatch: the reward carries gamma_r^d
+folded in (an A6 decision) and the value does not.
 
-De ahi salen los seis montajes que se miden abajo:
+That is where the six setups measured below come from:
 
-  1-4. el cruce {sin critico, con critico} x {gamma_r 0.7, 1.0}, que es el barrido
-       que el plan pedia re-medir ahora que el bootstrap tiene efecto;
-  5.   el bootstrap descontado por profundidad (`depth_discounted`), que pone las
-       dos mitades de la suma en la misma escala y deja el orden que se quiere:
+  1-4. the cross {no critic, with critic} x {gamma_r 0.7, 1.0}, which is the sweep
+       the plan asked to re-measure now that the bootstrap has an effect;
+  5.   the depth-discounted bootstrap (`depth_discounted`), which puts both halves
+       of the sum on the same scale and leaves the desired order:
 
-           ganar pronto  >  ganar tarde  >  sobrevivir  >  perder
+           win early  >  win late  >  survive  >  lose
 
-       Es la configuracion que la teoria dice que deberia funcionar, y esta aqui
-       para no declarar un resultado negativo sin haber probado el caso favorable.
-  6.   el mismo montaje 5 pero con un "critico" que devuelve siempre la constante
-       c. Separa NIVEL de INFORMACION: si empata con el critico entrenado, es que
-       la red no aporta nada mas que su media, y la separacion de 0.0072 que se
-       midio en E1.10 no llega a cambiar ninguna decision.
+       It is the configuration theory says should work, and it is here so as not to
+       declare a negative result without having tried the favourable case.
+  6.   the same setup 5 but with a "critic" that always returns the constant c. It
+       separates LEVEL from INFORMATION: if it ties with the trained critic, then
+       the network adds nothing beyond its mean, and the separation of 0.0072
+       measured in E1.10 does not go far enough to change any decision.
 
-Todos los brazos juegan las MISMAS partidas: mismo numero de envs, mismos pasos y
-la misma semilla para el rival. Lo unico que cambia entre ellos es el modelo.
+Every arm plays the SAME games: the same number of envs, the same steps and the
+same seed for the rival. The only thing that changes between them is the model.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
@@ -72,8 +72,8 @@ from demos.train_critic import (Critic, init_critic_weights, collect, update,
                                 BUFFER_CAP, NUM_PARTICLES, SEARCH_DEPTH,
                                 RESAMPLE_PERIOD, TEMPERATURE, REWARD_GAMMA)
 
-# La evaluacion es aparte del entrenamiento: mas partidas y mas envs, porque lo
-# que se quiere es un intervalo de confianza estrecho sobre una tasa del ~2%.
+# Evaluation is kept apart from training: more games and more envs, because what
+# is wanted is a narrow confidence interval over a rate of ~2%.
 comptime EVAL_ENVS = 128
 comptime EVAL_STEPS = 400
 comptime EVAL_SEED = UInt32(20260730)
@@ -84,7 +84,7 @@ comptime UPDATES_PER_ROUND = 20
 
 @fieldwise_init
 struct Arm(Copyable, Movable):
-    """El resultado de un brazo del experimento."""
+    """One experiment arm's result."""
     var name: String
     var wins: Int
     var draws: Int
@@ -100,7 +100,7 @@ struct Arm(Copyable, Movable):
 
 
 def eval_config(reward_gamma: Scalar[dtype]) -> SPOConfig:
-    """La config de busqueda de A7, con EVAL_ENVS partidas a la vez."""
+    """A7's search config, with EVAL_ENVS games at a time."""
     return SPOConfig(num_envs=EVAL_ENVS, num_particles=NUM_PARTICLES,
                      num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                      search_depth=SEARCH_DEPTH, resample_period=RESAMPLE_PERIOD,
@@ -111,15 +111,16 @@ def eval_config(reward_gamma: Scalar[dtype]) -> SPOConfig:
 def play[M: SearchModel](ctx: DeviceContext, name: String, model: M,
                          cfg: SPOConfig, steps: Int,
                          greedy: Bool = False) raises -> Arm:
-    """Juega `steps` turnos en EVAL_ENVS partidas y cuenta el marcador.
+    """Plays `steps` turns across EVAL_ENVS games and counts the scoreboard.
 
-    Es el bucle de A7 tal cual: buscar, jugar, dejar responder al rival, anotar
-    las que acaben y resetear las acabadas. La semilla del rival depende solo del
-    paso, asi que todos los brazos se enfrentan a la misma secuencia de rivales.
+    It is A7's loop as it stands: search, play, let the rival answer, record the
+    ones that end and reset the finished ones. The rival's seed depends only on the
+    step, so every arm faces the same sequence of rivals.
 
-    Con `greedy` la jugada es la MODA de q en vez de una muestra de q. Muestrear
-    es lo correcto para entrenar (es de donde sale la exploracion) pero mete
-    jugadas subobtimas a proposito, asi que al medir fuerza hay que separarlo.
+    With `greedy` the move is the MODE of q instead of a sample from q. Sampling is
+    the right thing for training (it is where the exploration comes from) but it
+    deliberately injects suboptimal moves, so when measuring strength it has to be
+    separated out.
     """
     ws = SearchWorkspace(ctx, cfg)
     q_buf = zero_buffer[dtype](ctx, EVAL_ENVS * NUM_ACTIONS)
@@ -174,11 +175,11 @@ def pct(x: Float64) -> String:
 
 
 def show(arm: Arm) raises:
-    """Una linea de la tabla, con el IC de Wilson sobre las DERROTAS.
+    """One table row, with the Wilson CI over the LOSSES.
 
-    El intervalo va en las derrotas y no en las victorias porque es la columna que
-    responde a la pregunta: el juego optimo pierde 0.00%, asi que las derrotas
-    miden directamente lo que la busqueda no vio.
+    The interval goes on the losses and not on the wins because it is the column
+    that answers the question: optimal play loses 0.00%, so the losses directly
+    measure what the search did not see.
     """
     n = arm.games()
     lo = wilson_lo(arm.losses, n)
@@ -193,11 +194,11 @@ def show(arm: Arm) raises:
 
 
 def verdict(base: Arm, other: Arm) raises:
-    """Compara dos brazos por la tasa de derrotas y dice si se puede afirmar algo.
+    """Compares two arms by their loss rate and says whether anything can be claimed.
 
-    La regla que nos pusimos: si los intervalos de Wilson se SOLAPAN, no se afirma
-    mejora. No solaparse es una condicion mas exigente que el test formal de dos
-    proporciones, asi que quedarse con ella es conservador y facil de defender.
+    The rule we set ourselves: if the Wilson intervals OVERLAP, no improvement is
+    claimed. Not overlapping is a stricter condition than the formal two-proportion
+    test, so sticking to it is conservative and easy to defend.
     """
     n1 = base.games(); n2 = other.games()
     lo1 = wilson_lo(base.losses, n1); hi1 = wilson_hi(base.losses, n1)
@@ -219,11 +220,11 @@ def verdict(base: Arm, other: Arm) raises:
 
 def mean_value(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
                model: TicTacToe) raises -> Scalar[dtype]:
-    """V medio del critico sobre tableros de partidas reales.
+    """The critic's mean V over boards from real games.
 
-    Es el numero `c` del razonamiento de la cabecera: el nivel de referencia con
-    el que se van a comparar las recompensas. Se imprime para poder seguir la
-    cuenta a mano en el informe.
+    It is the `c` of the header's reasoning: the reference level the rewards are
+    going to be compared against. It gets printed so that the arithmetic can be
+    followed by hand in the report.
     """
     blocks = (EVAL_ENVS + TPB_TTT - 1) // TPB_TTT
     cache = CriticCache(ctx, EVAL_ENVS, HIDDEN, OUT_DIM)
@@ -267,8 +268,8 @@ def mean_value(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
 
 
 def train(ctx: DeviceContext, mut critic: Critic) raises:
-    """El entrenamiento de E1.10, tal cual: el critico aprende de la busqueda
-    SIN critico, que es la unica politica que hay todavia."""
+    """E1.10's training, as it stands: the critic learns from the search WITHOUT a
+    critic, which is the only policy there is so far."""
     cfg = SPOConfig(num_envs=NUM_ENVS, num_particles=NUM_PARTICLES,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                     search_depth=SEARCH_DEPTH, resample_period=RESAMPLE_PERIOD,
@@ -340,18 +341,18 @@ def main() raises:
         m_c10.sync_from(ctx, critic.online)
         m_dd.sync_from(ctx, critic.online)
 
-        # El control que separa NIVEL de INFORMACION: un "critico" que devuelve la
-        # constante c y nada mas. Con w3 = 0 la red ignora la entrada y saca b3.
-        # Si este brazo empata con el critico entrenado, entonces lo que aporta el
-        # entrenado es solo su media, y la separacion de 0.0072 que se midio en
-        # E1.10 no llega a mover ninguna decision.
+        # The control that separates LEVEL from INFORMATION: a "critic" that
+        # returns the constant c and nothing else. With w3 = 0 the network ignores
+        # the input and outputs b3. If this arm ties with the trained critic, then
+        # what the trained one adds is only its mean, and the separation of 0.0072
+        # measured in E1.10 does not go far enough to move any decision.
         m_const = TicTacToeCritic(ctx, max_batch, HIDDEN, Scalar[dtype](0.7),
                                   depth_discounted=True)
         b3 = List[Scalar[dtype]](); b3.append(c)
         write_into[dtype](m_const.params.b3, b3)   # w1,w2,w3 se quedan a cero
         ctx.synchronize()
 
-        # Calentamiento: la primera busqueda de cada tipo paga la compilacion.
+        # Warm-up: the first search of each kind pays for compilation.
         _ = play[TicTacToe](ctx, "warmup", TicTacToe(REWARD_GAMMA),
                             eval_config(REWARD_GAMMA), 3)
         _ = play[TicTacToeCritic](ctx, "warmup", m_c07, eval_config(0.7), 3)

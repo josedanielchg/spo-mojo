@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Wrapper para no tener que acordarme del PATH de pixi ni del -I.
+# Wrapper so as not to have to remember pixi's PATH nor the -I.
 #
 #   ./run.sh tests/test_scan.mojo        # normal
-#   ASSERTS=1 ./run.sh tests/test_scan.mojo   # con debug_assert activo
+#   ASSERTS=1 ./run.sh tests/test_scan.mojo   # with debug_assert active
 #
-# Los debug_assert de los kernels estan compilados fuera por defecto (no cuestan
-# nada en la GPU). Con ASSERTS=1 se activan y ademas dicen que bloque y que hilo
-# fallo, que es justo lo que hace falta cuando algo peta dentro de un kernel.
+# The kernels' debug_asserts are compiled out by default (they cost nothing on the
+# GPU). With ASSERTS=1 they are switched on and additionally say which block and
+# which thread failed, which is exactly what is needed when something blows up
+# inside a kernel.
 set -euo pipefail
 
 export PATH="$HOME/.pixi/bin:$PATH"
@@ -16,7 +17,7 @@ if [ "$#" -lt 1 ]; then
   exit 1
 fi
 
-# -I con la raiz del proyecto para que los `from ops...` resuelvan.
+# -I with the project's root so that the `from ops...` imports resolve.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FLAGS=()

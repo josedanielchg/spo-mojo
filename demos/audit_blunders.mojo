@@ -1,34 +1,34 @@
-"""¿Como puede perder? Auditoria jugada a jugada del planificador.
+"""How can it lose? A move-by-move audit of the planner.
 
-El juego optimo contra un rival aleatorio pierde el 0.00% de las partidas. El
-nuestro pierde ~2%. Este demo no mide: DIAGNOSTICA. En cada turno del agente mira
-el tablero desde fuera, con reglas de tres en raya escritas a mano en el host, y
-clasifica la posicion antes de dejar jugar a la busqueda:
+Optimal play against a random rival loses 0.00% of its games. Ours loses ~2%. This
+demo does not measure: it DIAGNOSES. On every agent turn it looks at the board from
+the outside, with tic-tac-toe rules written by hand on the host, and classifies the
+position before letting the search play:
 
-    puede ganar ya          hay una casilla que le hace tres en raya
-    tiene que bloquear      el rival tiene dos en raya y una casilla libre
-    doble amenaza          el rival tiene DOS casillas ganadoras -> ya no hay
-                            bloqueo posible, el error fue antes
-    tranquila               ni una cosa ni la otra
+    can win now            there is a cell that makes it three in a row
+    has to block           the rival has two in a row and one free cell
+    double threat          the rival has TWO winning cells -> no block is possible
+                           any more, the mistake happened earlier
+    quiet                  neither one nor the other
 
-Y despues compara con lo que jugo la busqueda. Asi se separa lo que son dos fallos
-completamente distintos:
+And then it compares against what the search played. That separates two completely
+different faults:
 
-  - **fallo tactico**: habia una amenaza a un solo movimiento y no la bloqueo.
-    Eso significa que la busqueda no vio algo que estaba a profundidad 1.
-  - **fallo estrategico**: llego a una posicion con doble amenaza, donde ya no se
-    puede hacer nada. El error real fue varias jugadas antes, al permitir la
-    horquilla.
+  - **tactical fault**: there was a threat one move away and it did not block it.
+    That means the search failed to see something at depth 1.
+  - **strategic fault**: it reached a position with a double threat, where nothing
+    can be done any more. The real mistake was several moves earlier, when the fork
+    was allowed.
 
-La diferencia importa mucho para saber que arreglar. Si son fallos tacticos, el
-problema es de resolucion de la busqueda (particulas, temperatura, readout). Si
-son horquillas, el problema es que la busqueda maximiza el resultado ESPERADO
-contra un rival aleatorio y una horquilla solo se castiga en las pocas particulas
-donde el rival aleatorio acierta a explotarla.
+The difference matters a great deal for knowing what to fix. If they are tactical
+faults, the problem is the search's resolution (particles, temperature, readout).
+If they are forks, the problem is that the search maximises the EXPECTED result
+against a random rival and a fork is only punished in the few particles where the
+random rival happens to exploit it.
 
-Ademas, en las posiciones donde falla, se imprime cuanta masa de q le dio la
-busqueda a la jugada correcta. Eso distingue "no lo vio" de "lo vio y aun asi
-eligio otra".
+On top of that, in the positions where it fails, how much q mass the search gave to
+the correct move gets printed. That tells "it did not see it" from "it saw it and
+still chose otherwise".
 """
 
 from std.gpu.host import DeviceContext
@@ -58,12 +58,12 @@ comptime RESAMPLE_PERIOD = 3
 comptime TEMPERATURE = Scalar[dtype](0.02)
 comptime REWARD_GAMMA = Scalar[dtype](0.7)
 
-# Las 8 lineas, como en el kernel del entorno pero aqui en el host.
+# The 8 lines, as in the environment's kernel but here on the host.
 comptime LINES = 8
 
 
 def line_cell(line: Int, k: Int) -> Int:
-    """La casilla k (0..2) de la linea `line` (0..7). Filas, columnas, diagonales."""
+    """Cell k (0..2) of line `line` (0..7). Rows, columns, diagonals."""
     if line == 0: return k            # fila 0: 0,1,2
     if line == 1: return 3 + k
     if line == 2: return 6 + k
@@ -76,12 +76,12 @@ def line_cell(line: Int, k: Int) -> Int:
 
 def winning_cells(board: List[Scalar[dtype]], base: Int,
                   player: Scalar[dtype]) -> List[Int]:
-    """Las casillas que le dan la victoria INMEDIATA a `player`.
+    """The cells that give `player` an IMMEDIATE win.
 
-    Una casilla vale si hay una linea con dos fichas de `player` y esa casilla
-    vacia. Se devuelven todas y sin repetir, porque el numero de casillas
-    distintas es justo lo que separa "amenaza simple" (bloqueable) de "horquilla"
-    (ya perdida).
+    A cell counts if there is a line with two of `player`'s marks and that cell
+    empty. All of them are returned, without repeats, because the number of
+    distinct cells is precisely what separates a "simple threat" (blockable) from a
+    "fork" (already lost).
     """
     found = List[Int]()
     for line in range(LINES):
@@ -117,7 +117,7 @@ def ratio(a: Int, b: Int) -> String:
 
 @fieldwise_init
 struct Audit(Copyable, Movable):
-    """Lo que sale de una auditoria."""
+    """What comes out of an audit."""
     var temperature: Scalar[dtype]
     var reward_gamma: Scalar[dtype]
     var loss_penalty: Scalar[dtype]
@@ -146,7 +146,7 @@ def audit(ctx: DeviceContext, temperature: Scalar[dtype],
           num_particles: Int = NUM_PARTICLES,
           expected: Bool = False,
           period: Int = RESAMPLE_PERIOD) raises -> Audit:
-    """Juega y clasifica cada turno del agente. Ver la cabecera del fichero."""
+    """Plays and classifies every agent turn. See the file header."""
     cfg = SPOConfig(num_envs=ENVS, num_particles=num_particles,
                     num_actions=NUM_ACTIONS, state_dim=STATE_DIM,
                     search_depth=SEARCH_DEPTH, resample_period=period,
@@ -349,7 +349,7 @@ def main() raises:
         print("   subir N tiene que arreglarlo. Si es SESGO del estimador, no.")
         print()
         ns = List[Int]()
-        # El tope es TPB_PARTICLES=128: los kernels por env usan un bloque.
+        # The cap is TPB_PARTICLES=128: the per-env kernels use one block.
         ns.append(16); ns.append(32); ns.append(64); ns.append(128)
         for ni in range(len(ns)):
             a = audit(ctx, TEMPERATURE, REWARD_GAMMA, SWEEP_STEPS_BIG,
