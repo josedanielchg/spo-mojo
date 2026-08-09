@@ -108,7 +108,7 @@ struct TicTacToeActor(SearchModel, Movable):
     def sync_critic_from(self, ctx: DeviceContext, src: CriticParams) raises:
         """Brings in the weights of the critic being trained."""
         if src.in_dim != OBS_DIM or src.hidden != self.hidden or src.out_dim != 1:
-            raise Error("el critico no tiene la forma del modelo: ", src.in_dim,
+            raise Error("the critic does not have the model's shape: ", src.in_dim,
                         "x", src.hidden, "x", src.out_dim)
         h = self.hidden
         self._copy(ctx, self.critic.w1, src.w1, OBS_DIM * h)
@@ -128,8 +128,8 @@ struct TicTacToeActor(SearchModel, Movable):
         """
         if src.in_dim != OBS_DIM or src.hidden != self.hidden \
                 or src.out_dim != NUM_ACTIONS:
-            raise Error("el actor que se intenta copiar no tiene la forma del "
-                        "modelo: ", src.in_dim, "x", src.hidden, "x",
+            raise Error("the actor being copied does not have the model's "
+                        "shape: ", src.in_dim, "x", src.hidden, "x",
                         src.out_dim)
         h = self.hidden
         self._copy(ctx, self.params.w1, src.w1, OBS_DIM * h)
@@ -153,8 +153,8 @@ struct TicTacToeActor(SearchModel, Movable):
         source of truth about what is legal), and the network sets the logits.
         """
         if m > self.max_batch:
-            raise Error("el modelo se reservo para ", self.max_batch,
-                        " tableros y se le piden ", m)
+            raise Error("the model was reserved for ", self.max_batch,
+                        " boards and is being asked for ", m)
         blocks = (m + TPB_TTT - 1) // TPB_TTT
 
         ctx.enqueue_function[ttt_legal_mask_kernel, ttt_legal_mask_kernel](

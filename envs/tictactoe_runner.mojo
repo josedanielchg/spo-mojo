@@ -152,9 +152,9 @@ def main() raises:
     """
     with DeviceContext() as ctx:
         stats = play_random_games(ctx, 64, 200, UInt32(12345))
-        print("linea base (agente al azar vs rival al azar):")
-        print("  partidas :", stats.games())
-        print("  gana X   :", stats.wins, "(", stats.win_rate(), ")")
-        print("  empate   :", stats.draws)
-        print("  gana O   :", stats.losses)
-        print("  score    :", stats.score(), " (exacto: 0.6484 )")
+        print("baseline (random agent vs random opponent):")
+        print("  games    :", stats.games())
+        print("  X wins   :", stats.wins, "(", stats.win_rate(), ")")
+        print("  draws    :", stats.draws)
+        print("  O wins   :", stats.losses)
+        print("  score    :", stats.score(), " (exact: 0.6484 )")

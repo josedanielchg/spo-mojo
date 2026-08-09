@@ -161,8 +161,8 @@ struct Actor(Movable):
         buffer. It costs one host-side comparison per call.
         """
         if m > self.max_batch:
-            raise Error("el actor se reservo para ", self.max_batch,
-                        " tableros y se le piden ", m)
+            raise Error("the actor was reserved for ", self.max_batch,
+                        " boards and is being asked for ", m)
 
     def mask_from_state(self, ctx: DeviceContext, state: DeviceBuffer[dtype],
                         m: Int) raises:

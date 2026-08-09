@@ -150,8 +150,8 @@ struct TicTacToeCritic(SearchModel, Movable):
         every iteration.
         """
         if src.in_dim != OBS_DIM or src.hidden != self.hidden or src.out_dim != 1:
-            raise Error("el critico que se intenta copiar no tiene la forma del "
-                        "modelo: ", src.in_dim, "x", src.hidden, "x", src.out_dim)
+            raise Error("the critic being copied does not have the model's "
+                        "shape: ", src.in_dim, "x", src.hidden, "x", src.out_dim)
 
         h = self.hidden
         self._copy(ctx, self.params.w1, src.w1, OBS_DIM * h)
