@@ -152,28 +152,28 @@ def play_search_games(ctx: DeviceContext, cfg: SPOConfig, model: TicTacToe,
 def show(label: String, s: MatchStats) raises:
     """One scoreboard line, with the improvement over exact random play."""
     print("  ", label,
-          "  partidas", s.games(),
-          " gana", s.win_rate(),
-          " empata", Scalar[dtype](s.draws) / Scalar[dtype](s.games()),
-          " pierde", Scalar[dtype](s.losses) / Scalar[dtype](s.games()),
+          "  games", s.games(),
+          " wins", s.win_rate(),
+          " draws", Scalar[dtype](s.draws) / Scalar[dtype](s.games()),
+          " loses", Scalar[dtype](s.losses) / Scalar[dtype](s.games()),
           " score", s.score(),
-          " (x", s.score() / EXACT_RANDOM_SCORE, "vs azar )")
+          " (x", s.score() / EXACT_RANDOM_SCORE, "vs random )")
 
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== 1. linea base vs busqueda ===")
+        print("=== 1. baseline vs search ===")
         base = play_random_games(ctx, NUM_ENVS, 200, SEED)
-        show("azar     ", base)
-        print("            (exacto: gana 0.5849  empata 0.1270  pierde 0.2881  score 0.6484 )")
+        show("random     ", base)
+        print("            (exact: wins 0.5849  draws 0.1270  loses 0.2881  score 0.6484 )")
 
         cfg = search_config(num_particles=64, depth=6, period=3, temperature=0.02)
         srch = play_search_games(ctx, cfg, TicTacToe(reward_gamma=0.7), 60, SEED)
-        show("busqueda ", srch)
+        show("search ", srch)
 
         print()
-        print("=== 2. barrido del descuento de recompensa (N=64, depth=6, temp=0.02) ===")
-        print("    gamma=1 deja el peso SMC casi ciego: ganar ya vale igual que ganar despues")
+        print("=== 2. reward-discount sweep (N=64, depth=6, temp=0.02) ===")
+        print("    gamma=1 leaves the SMC weight nearly blind: winning now is worth as much as winning later")
         gammas = List[Scalar[dtype]]()
         gammas.append(1.0); gammas.append(0.9); gammas.append(0.7); gammas.append(0.5)
         for i in range(len(gammas)):
@@ -182,7 +182,7 @@ def main() raises:
             show(String("gamma ", gammas[i], "  "), s)
 
         print()
-        print("=== 3. barrido de profundidad (N=64, gamma=0.7) ===")
+        print("=== 3. depth sweep (N=64, gamma=0.7) ===")
         depths = List[Int]()
         depths.append(1); depths.append(2); depths.append(3)
         depths.append(5); depths.append(8)
@@ -193,7 +193,7 @@ def main() raises:
             show(String("depth ", d, "  "), s)
 
         print()
-        print("=== 4. barrido de particulas (depth=6, gamma=0.7) ===")
+        print("=== 4. particle sweep (depth=6, gamma=0.7) ===")
         counts = List[Int]()
         counts.append(4); counts.append(16); counts.append(64); counts.append(128)
         for i in range(len(counts)):

@@ -171,11 +171,11 @@ def play_g(ctx: DeviceContext, actor: ActorLearner, critic: Critic,
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== La temperatura: nuestro 0.02 contra el 0.5 de Stoix ===")
-        print("   SPO literal + actor + critico + ruido de Dirichlet 0.25")
-        print("   Se ENTRENA con cada temperatura, porque cambia la q que el")
-        print("   actor aprende, no solo como se juega.")
-        print("   referencias exactas: azar 0.6484 | optimo 0.9974 (pierde 0.00%)")
+        print("=== Temperature: our 0.02 against Stoix's 0.5 ===")
+        print("   SPO literal + actor + critic + Dirichlet noise 0.25")
+        print("   It is TRAINED at each temperature, because that changes the q")
+        print("   the actor learns, not only how it plays.")
+        print("   exact references: random 0.6484 | optimal 0.9974 (loses 0.00%)")
         print()
 
         temps = List[Float64]()
@@ -183,14 +183,14 @@ def main() raises:
         temps.append(0.1)
         temps.append(0.5)       # Stoix's `fixed_temperature`
         names = List[String]()
-        names.append(String("0.02  (nuestro, M1)"))
+        names.append(String("0.02  (ours, M1)"))
         names.append(String("0.10               "))
         names.append(String("0.50  (Stoix)      "))
 
         rows = List[String]()
         for i in range(len(temps)):
             t = Scalar[dtype](temps[i])
-            print("--- entrenando con temperatura", t, "---")
+            print("--- training at temperature", t, "---")
             r = train_run(ctx, names[i], True, True, PERIOD, GAMMA_R, PENALTY,
                           PARTICLES, True, False, NOISE, t)
             for g in range(2):
@@ -198,13 +198,13 @@ def main() raises:
                 res = play(ctx, r.actor, r.critic, t, EVAL_STEPS, greedy)
                 n = res[0] + res[1] + res[2]
                 score = (Float64(res[0]) + 0.5 * Float64(res[1])) / Float64(n)
-                tag = String("moda      ") if greedy \
-                      else String("MUESTREADA")
+                tag = String("mode      ") if greedy \
+                      else String("SAMPLED   ")
                 line = String("   tau=", names[i], " ", tag, " n=", n,
-                              "  gana ", pct(Float64(res[0]) / Float64(n)),
-                              "  empata ", pct(Float64(res[1]) / Float64(n)),
-                              "  PIERDE ", pct(Float64(res[2]) / Float64(n)),
-                              " IC[", fmt_fixed(wilson_lo(res[2], n) * 100.0, 2),
+                              "  wins ", pct(Float64(res[0]) / Float64(n)),
+                              "  draws ", pct(Float64(res[1]) / Float64(n)),
+                              "  LOSES ", pct(Float64(res[2]) / Float64(n)),
+                              " CI[", fmt_fixed(wilson_lo(res[2], n) * 100.0, 2),
                               ",", fmt_fixed(wilson_hi(res[2], n) * 100.0, 2),
                               "]  score ", fmt_fixed(score, 4),
                               "  KL ", r.result.kl_last)
@@ -212,15 +212,15 @@ def main() raises:
                 print(line)
             print()
 
-        print("=== resumen ===")
+        print("=== summary ===")
         for i in range(len(rows)):
             print(rows[i])
         print()
-        print("=== gamma_r bajo LOS DOS protocolos ===")
-        print("   El veredicto de la auditoria (gamma_r=1.0 mejor que 0.7) se")
-        print("   midio SOLO con la moda. Con juego muestreado la cosa puede")
-        print("   cambiar: gamma_r rompe empates entre acciones que ganan, y esos")
-        print("   empates solo importan si se sortea.")
+        print("=== gamma_r under BOTH protocols ===")
+        print("   The audit's verdict (gamma_r=1.0 better than 0.7) was measured")
+        print("   ONLY with the mode. With sampled play it may change: gamma_r")
+        print("   breaks ties between winning actions, and those ties only")
+        print("   matter if a draw is taken.")
         print()
         gs = List[Float64]()
         gs.append(1.0); gs.append(0.7)
@@ -236,12 +236,12 @@ def main() raises:
                 n = res[0] + res[1] + res[2]
                 sc = (Float64(res[0]) + 0.5 * Float64(res[1])) / Float64(n)
                 print("   gamma_r=", g, " ",
-                      "moda      " if greedy else "MUESTREADA",
-                      " pierde ", pct(Float64(res[2]) / Float64(n)),
-                      " IC[", fmt_fixed(wilson_lo(res[2], n) * 100.0, 2), ",",
+                      "mode      " if greedy else "SAMPLED   ",
+                      " loses ", pct(Float64(res[2]) / Float64(n)),
+                      " CI[", fmt_fixed(wilson_lo(res[2], n) * 100.0, 2), ",",
                       fmt_fixed(wilson_hi(res[2], n) * 100.0, 2), "]",
                       " score ", fmt_fixed(sc, 4))
         print()
-        print("   La fila MUESTREADA es el protocolo de Stoix (evaluator.py:57).")
-        print("   La fila moda es una desviacion NUESTRA del protocolo de medida,")
-        print("   que hasta ahora estabamos usando sin haberlo verificado.")
+        print("   The SAMPLED row is Stoix's protocol (evaluator.py:57).")
+        print("   The mode row is OUR deviation from the measurement protocol,")
+        print("   which until now we had been using without checking it.")

@@ -103,10 +103,10 @@ def bar(value: Scalar[dtype], width: Int) -> String:
 def main() raises:
     with DeviceContext() as ctx:
         print("=" * 66)
-        print(" Demo 1 - El E-step en vivo (MDP de juguete, sin redes)")
+        print(" Demo 1 - The E-step live (toy MDP, no networks)")
         print("=" * 66)
-        print(" El prior es uniforme y no se ha entrenado NADA.")
-        print(" Todo lo que mejore la politica viene de simular.")
+        print(" The prior is uniform and NOTHING has been trained.")
+        print(" Everything that improves the policy comes from simulating.")
         print()
 
         # The paper's configuration: prior against improved policy.
@@ -119,10 +119,10 @@ def main() raises:
         base = run_search(ctx, 16, 0.5, 4, 4, short)
         prior_good = Scalar[dtype](1.0) / Scalar[dtype](NUM_ACTIONS)
 
-        print(" 1. La politica antes y despues de la busqueda")
-        print("    (16 particulas, profundidad 4, temperatura 0.5)")
+        print(" 1. The policy before and after the search")
+        print("    (16 particles, depth 4, temperature 0.5)")
         print()
-        print("      accion   prior              q mejorada")
+        print("      action   prior              improved q")
         print("      BAD      ", bar(prior_good, 20), " ", prior_good,
               "   ", bar(1.0 - base.q_good, 20), " ", 1.0 - base.q_good)
         print("      GOOD     ", bar(prior_good, 20), " ", prior_good,
@@ -131,12 +131,12 @@ def main() raises:
 
         # How the search's health evolves with depth.
         deep = run_search(ctx, 16, 0.5, 8, 4, long_chain)
-        print(" 2. Salud de la busqueda por profundidad (ESS de 16, periodo 4)")
-        print("    (pasillo largo, para que las particulas no mueran antes de tiempo)")
-        print("    El ESS baja segun las particulas se separan y el resampling")
-        print("    lo recupera. La flecha marca donde se resamplea.")
+        print(" 2. Health of the search by depth (ESS out of 16, period 4)")
+        print("    (long corridor, so the particles do not die too early)")
+        print("    The ESS falls as the particles spread apart and resampling")
+        print("    brings it back. The arrow marks where resampling happens.")
         print()
-        print("      depth   ESS                          entropia")
+        print("      depth   ESS                          entropy")
         for d in range(len(deep.ess)):
             mark = "  <- resampling" if (d + 1) % 4 == 0 else ""
             print("      ", d, "     ", bar(deep.ess[d] / 16.0, 20), " ",
@@ -144,9 +144,9 @@ def main() raises:
         print()
 
         # Temperature sweep.
-        print(" 3. Que hace la temperatura eta")
-        print("    Baja = solo sobreviven las mejores (mas mejora, menos ESS).")
-        print("    Alta = todas parecidas (menos mejora, mas ESS).")
+        print(" 3. What the temperature eta does")
+        print("    Low = only the best survive (more improvement, less ESS).")
+        print("    High = all alike (less improvement, more ESS).")
         print()
         print("      eta     q(GOOD)                      ESS final")
         temps = List[Scalar[dtype]]()
@@ -158,8 +158,8 @@ def main() raises:
         print()
 
         # Particle-count sweep.
-        print(" 4. Que hace el numero de particulas N")
-        print("    Mas particulas = mejor estimacion de la politica mejorada.")
+        print(" 4. What the number of particles N does")
+        print("    More particles = a better estimate of the improved policy.")
         print()
         print("      N       q(GOOD)")
         counts = List[Int]()
@@ -188,5 +188,5 @@ def main() raises:
             for d in range(len(deep.ess)):
                 f.write(String(d, ",", deep.ess[d], ",", deep.entropy[d], ",16,4\n"))
 
-        print(" Numeros crudos en results/estep_policy.csv y results/estep_ess.csv")
+        print(" Raw numbers in results/estep_policy.csv and results/estep_ess.csv")
         print("=" * 66)

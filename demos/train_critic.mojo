@@ -256,7 +256,7 @@ def collect(ctx: DeviceContext, mut buf: TrajectoryBuffer, cfg: SPOConfig,
     # Each env contributes a whole sequence.
     zeros_t = List[Scalar[dtype]]()
     for _ in range(ROLLOUT):
-        zeros_t.append(Scalar[dtype](0))      # truncated: en TTT nunca ocurre
+        zeros_t.append(Scalar[dtype](0))      # truncated: never happens in TTT
     for e in range(NUM_ENVS):
         seq_obs = List[Scalar[dtype]]()
         seq_next = List[Scalar[dtype]]()
@@ -281,7 +281,7 @@ def update(ctx: DeviceContext, mut critic: Critic, buf: TrajectoryBuffer,
            step: Int, seed: UInt32) raises -> Scalar[dtype]:
     """One gradient step on the critic. Returns the loss BEFORE the step."""
     idx = buf.sample_indices(BATCH, seed, UInt32(step))
-    n = BATCH * ROLLOUT          # filas de red: cada paso de cada secuencia
+    n = BATCH * ROLLOUT          # network rows: every step of every sequence
 
     obs = upload[dtype](ctx, buf.gather(idx))
     boot = upload[dtype](ctx, buf.gather_bootstrap(idx))
@@ -289,7 +289,7 @@ def update(ctx: DeviceContext, mut critic: Critic, buf: TrajectoryBuffer,
     done_host = buf.gather_steps(idx, 1)
     trunc = upload[dtype](ctx, buf.gather_steps(idx, 2))
 
-    # discount = (1 - done) * gamma, tal cual lo monta ff_spo._critic_loss_fn.
+    # discount = (1 - done) * gamma, exactly as ff_spo._critic_loss_fn builds it.
     disc_host = List[Scalar[dtype]]()
     for i in range(n):
         disc_host.append((Scalar[dtype](1) - done_host[i]) * GAMMA)
@@ -391,8 +391,8 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
     for _ in range(NUM_ENVS):
         pending_count.append(0)
 
-    vs = List[Scalar[dtype]]()      # V(s) de pasos de partidas ya terminadas
-    outs = List[Scalar[dtype]]()    # y el resultado real de su partida
+    vs = List[Scalar[dtype]]()      # V(s) of steps from games already finished
+    outs = List[Scalar[dtype]]()    # and their game's real outcome
 
     for t in range(steps):
         ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
@@ -432,7 +432,7 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
 
     n = len(vs)
     if n < 10:
-        print("      (muy pocas partidas para evaluar)")
+        print("      (far too few games to evaluate)")
         return Scalar[dtype](0)
 
     # Mean V split by outcome. This is used and NOT the correlation because the
@@ -471,8 +471,8 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
     if n_loss > 1:
         var_l /= Scalar[dtype](n_loss - 1)
 
-    print("      posiciones:", n, " -> ganadas", n_win, "(V medio", mw, ")",
-          " empatadas", n_draw, "(", md, ")", " perdidas", n_loss, "(", ml, ")")
+    print("      positions:", n, " -> won", n_win, "(mean V", mw, ")",
+          " drawn", n_draw, "(", md, ")", " lost", n_loss, "(", ml, ")")
 
     if n_loss < 2 or n_win < 2:
         return Scalar[dtype](0)
@@ -481,18 +481,18 @@ def evaluate(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
     se = (var_w / Scalar[dtype](n_win) + var_l / Scalar[dtype](n_loss)) ** 0.5
     diff = mw - ml
     sigmas = diff / se if se > Scalar[dtype](0) else Scalar[dtype](0)
-    print("      separacion", diff, " +/-", se, " -> ", sigmas, "sigmas")
+    print("      separation", diff, " +/-", se, " -> ", sigmas, "sigmas")
     if sigmas > Scalar[dtype](2):
-        print("      (>2 sigmas: la separacion es real, no ruido)")
+        print("      (>2 sigmas: the separation is real, not noise)")
     else:
-        print("      (<2 sigmas: NO se puede afirmar que separe)")
+        print("      (<2 sigmas: it CANNOT be claimed that it separates)")
     return diff
 
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== entrenamiento del critico sobre tres en raya ===")
-        print("  envs", NUM_ENVS, " rollout", ROLLOUT, " red", HIDDEN,
+        print("=== training the critic on tic-tac-toe ===")
+        print("  envs", NUM_ENVS, " rollout", ROLLOUT, " net", HIDDEN,
               " batch", BATCH, " lr", CRITIC_LR)
         print()
 
@@ -521,10 +521,10 @@ def main() raises:
             state.unsafe_ptr(), NUM_ENVS, grid_dim=blocks, block_dim=TPB_TTT)
 
         # The correlation BEFORE training: with random weights it should be ~0.
-        print("  ANTES de entrenar:")
+        print("  BEFORE training:")
         corr0 = evaluate(ctx, critic, cfg, model, ws, state, obs_buf, reward,
                          done, u_rival, eval_cache, 400, SEED)
-        print("      separacion V(ganadas) - V(perdidas):", corr0)
+        print("      separation V(won) - V(lost):", corr0)
         print()
 
         step = 0
@@ -540,17 +540,17 @@ def main() raises:
                 if e == 0:
                     first = l
                 last = l
-            print("  ronda", round_idx, " secuencias", buf.size(),
-                  " score de la busqueda", score,
-                  " perdida", first, "->", last)
+            print("  round", round_idx, " sequences", buf.size(),
+                  " search score", score,
+                  " loss", first, "->", last)
 
         print()
-        print("  DESPUES de entrenar:")
+        print("  AFTER training:")
         corr1 = evaluate(ctx, critic, cfg, model, ws, state, obs_buf, reward,
                          done, u_rival, eval_cache, 400, SEED)
-        print("      separacion V(ganadas) - V(perdidas):", corr1)
+        print("      separation V(won) - V(lost):", corr1)
         print()
-        print("  separacion antes", corr0, " -> despues", corr1)
-        print("  Que la perdida baje no basta: un critico que prediga siempre la")
-        print("  media tambien la bajaria. Lo que dice si aprendio algo util es si")
-        print("  su valor SEPARA las partidas que se ganan de las que se pierden.")
+        print("  separation before", corr0, " -> after", corr1)
+        print("  A falling loss is not enough: a critic that always predicts the")
+        print("  mean would lower it too. What says whether it learned anything")
+        print("  useful is whether its value SEPARATES won games from lost ones.")

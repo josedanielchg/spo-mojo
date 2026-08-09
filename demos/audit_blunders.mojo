@@ -110,7 +110,7 @@ def pct(x: Float64) -> String:
 
 def ratio(a: Int, b: Int) -> String:
     if b == 0:
-        return String("  -   (0 casos)")
+        return String("  -   (0 cases)")
     return (fmt_fixed(100.0 * Float64(a) / Float64(b), 2) + "%  ("
             + String(a) + " de " + String(b) + ")")
 
@@ -261,13 +261,13 @@ def row(a: Audit) raises:
           if a.can_win > 0 else 0.0
     print("   tau=", fmt_fixed(Float64(a.temperature), 2),
           " gamma_r=", fmt_fixed(Float64(a.reward_gamma), 2),
-          " castigo=", fmt_fixed(Float64(a.loss_penalty), 2),
+          " penalty=", fmt_fixed(Float64(a.loss_penalty), 2),
           " N=", a.particles,
           "  " + ("MEDIA" if a.expected else " SPO "),
           " resamp=" + ("no " if a.period > SEARCH_DEPTH else "si "),
-          "  bloquea ", fmt_fixed(blk, 1), "%",
-          "  remata ", fmt_fixed(fin, 1), "%",
-          "  pierde ", pct(Float64(a.losses) / Float64(n)),
+          "  blocks ", fmt_fixed(blk, 1), "%",
+          "  takes win ", fmt_fixed(fin, 1), "%",
+          "  loses ", pct(Float64(a.losses) / Float64(n)),
           " IC[", fmt_fixed(wilson_lo(a.losses, n) * 100.0, 2), ",",
           fmt_fixed(wilson_hi(a.losses, n) * 100.0, 2), "]",
           "  score ", fmt_fixed((Float64(a.wins) + 0.5 * Float64(a.draws))
@@ -276,43 +276,43 @@ def row(a: Audit) raises:
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== auditoria: por que pierde el planificador ===")
-        print("   ", ENVS, "partidas en paralelo, jugando la moda de q")
+        print("=== audit: why the planner loses ===")
+        print("   ", ENVS, "games in parallel, playing the mode of q")
         print()
 
         base = audit(ctx, TEMPERATURE, REWARD_GAMMA, STEPS)
         n = base.games()
-        print("--- 1. el montaje actual (tau=0.02, gamma_r=0.7) ---")
-        print("   partidas", n,
-              "  gana", pct(Float64(base.wins) / Float64(n)),
-              "  empata", pct(Float64(base.draws) / Float64(n)),
-              "  pierde", pct(Float64(base.losses) / Float64(n)))
+        print("--- 1. the current setup (tau=0.02, gamma_r=0.7) ---")
+        print("   games", n,
+              "  wins", pct(Float64(base.wins) / Float64(n)),
+              "  draws", pct(Float64(base.draws) / Float64(n)),
+              "  loses", pct(Float64(base.losses) / Float64(n)))
         print()
-        print("   remata cuando puede ganar ya:   ",
+        print("   takes the win when it can win:  ",
               ratio(base.took_win, base.can_win))
-        print("   bloquea cuando hay UNA amenaza: ",
+        print("   blocks when there is ONE threat: ",
               ratio(base.blocked, base.must_block))
         print()
-        print("   turnos que ya llegaban con DOBLE amenaza (irremediables):",
+        print("   turns that already came with a DOUBLE threat (hopeless):",
               base.forked)
-        print("   turnos en los que el agente REGALA una doble amenaza:  ",
+        print("   turns where the agent GIVES AWAY a double threat:       ",
               base.created_fork)
         if base.missed > 0:
-            print("   masa media de q sobre la casilla que no bloqueo:",
+            print("   mean mass of q on the cell it did not block:",
                   base.q_missed / Scalar[dtype](base.missed))
-            print("   (no es ~0: la ve y aun asi la descarta)")
+            print("   (it is not ~0: it sees the cell and discards it anyway)")
         print()
 
-        print("--- 2. la hipotesis, y su barrido ---")
-        print("   Bloquear cuesta un turno. Con el descuento por profundidad")
-        print("   gamma_r, ganar un turno mas tarde vale gamma_r veces menos, y")
-        print("   el softmax a temperatura tau convierte esa diferencia en un")
-        print("   factor e^(delta/tau). Con gamma_r=0.7 y tau=0.02 el bloqueo")
-        print("   sale ~1500 veces peor que rematar. Perder, en cambio, vale 0:")
-        print("   lo MISMO que una partida sin resolver.")
+        print("--- 2. the hypothesis, and its sweep ---")
+        print("   Blocking costs a turn. With the depth discount gamma_r,")
+        print("   winning one turn later is worth gamma_r times less, and the")
+        print("   softmax at temperature tau turns that difference into a")
+        print("   factor e^(delta/tau). With gamma_r=0.7 and tau=0.02 blocking")
+        print("   comes out ~1500 times worse than finishing. Losing, though,")
+        print("   is worth 0: the SAME as an unresolved game.")
         print()
-        print("   Si eso es cierto, subir tau (menos max, mas media) o subir")
-        print("   gamma_r (menos prisa) tiene que subir el bloqueo.")
+        print("   If that is right, raising tau (less max, more mean) or raising")
+        print("   gamma_r (less hurry) has to raise the blocking rate.")
         print()
 
         taus = List[Float64]()
@@ -327,12 +327,12 @@ def main() raises:
                 row(a)
             print()
 
-        print("--- 3. el arreglo directo: que perder CUESTE ---")
-        print("   El barrido de arriba solo mueve el compromiso entre prisa y")
-        print("   prudencia, porque no toca la causa: perder vale 0, lo mismo")
-        print("   que no resolver. Con loss_penalty una derrota vale -p, que es")
-        print("   el convenio +1/0/-1 de los juegos. Es modelado de recompensa")
-        print("   DENTRO de la busqueda; el marcador sigue contando igual.")
+        print("--- 3. the direct fix: make losing COST something ---")
+        print("   The sweep above only moves the trade-off between hurry and")
+        print("   prudence, because it does not touch the cause: losing is")
+        print("   worth 0, the same as not resolving. With loss_penalty a loss")
+        print("   is worth -p, the +1/0/-1 convention of games. It is reward")
+        print("   shaping INSIDE the search; the scoreboard still counts the same.")
         print()
         pens = List[Float64]()
         pens.append(0.0); pens.append(0.5); pens.append(1.0); pens.append(3.0)
@@ -343,10 +343,10 @@ def main() raises:
                 row(a)
             print()
 
-        print("--- 4. ¿es falta de particulas o es el estimador? ---")
-        print("   Con 64 particulas y hasta 9 acciones raiz, cada accion recibe")
-        print("   ~7 muestras: poco. Si el bloqueo fuera un problema de RUIDO,")
-        print("   subir N tiene que arreglarlo. Si es SESGO del estimador, no.")
+        print("--- 4. is it too few particles, or is it the estimator? ---")
+        print("   With 64 particles and up to 9 root actions, each action gets")
+        print("   ~7 samples: few. If blocking were a NOISE problem, raising N")
+        print("   would have to fix it. If it is estimator BIAS, it will not.")
         print()
         ns = List[Int]()
         # The cap is TPB_PARTICLES=128: the per-env kernels use one block.
@@ -357,25 +357,25 @@ def main() raises:
             row(a)
 
         print()
-        print("=== 5. la causa real, y el arreglo ===")
-        print("   La sonda destapo algo que el razonamiento no habia visto: tras")
-        print("   la busqueda los pesos finales son TODOS CERO. Es correcto -")
-        print("   resampling.mojo:151 los pone a cero al remuestrear, porque en")
-        print("   SMC la informacion del peso pasa a la MULTIPLICIDAD de las")
-        print("   particulas. Con profundidad 6 y periodo 3 el ultimo remuestreo")
-        print("   cae casi al final, asi que el readout acaba leyendo el")
-        print("   histograma de cuentas y nada mas.")
+        print("=== 5. the real cause, and the fix ===")
+        print("   The probe uncovered what the reasoning had missed: after the")
+        print("   search the final weights are ALL ZERO. That is correct -")
+        print("   resampling.mojo:151 zeroes them on resampling, because in SMC")
+        print("   the weight's information passes into the particles'")
+        print("   MULTIPLICITY. At depth 6 and period 3 the last resampling")
+        print("   falls almost at the end, so the readout ends up reading the")
+        print("   histogram of counts and nothing else.")
         print()
-        print("   Y ahi esta el fallo de verdad: al remuestrear, una particula que")
-        print("   PIERDE se mata, pero su hueco lo rellena una COPIA de otra")
-        print("   particula con peso alto, que puede tener la misma accion raiz.")
-        print("   Matar perdedoras no le baja la cuenta a su accion. Por eso el")
-        print("   castigo por derrota no hacia nada: la particula ya iba a morir.")
+        print("   And there is the real fault: on resampling, a particle that")
+        print("   LOSES is killed, but its slot is refilled by a COPY of another")
+        print("   particle with high weight, which may hold the same root action.")
+        print("   Killing losers does not lower their action's count. That is why")
+        print("   the loss penalty did nothing: the particle was going to die anyway.")
         print()
-        print("   Dos cambios, y hacen falta LOS DOS:")
-        print("     1. sin remuestreo, para que los pesos lleguen enteros al final")
-        print("     2. promediar por accion antes de exponenciar, para que una")
-        print("        derrota arrastre a su accion en vez de solo desaparecer")
+        print("   Two changes, and BOTH are needed:")
+        print("     1. no resampling, so the weights reach the end intact")
+        print("     2. average per action before exponentiating, so that a loss")
+        print("        drags its action down instead of merely disappearing")
         print()
         gs = List[Float64](); ps = List[Float64]()
         es = List[Float64](); pe = List[Int]()
@@ -391,12 +391,12 @@ def main() raises:
             row(a)
 
         print()
-        print("=== 6. ¿hasta donde llega? ===")
-        print("   Con el estimador de SUMA de exponenciales, subir N saturaba")
-        print("   (28.8 -> 40.0 -> 36.4): era SESGO, no ruido. Con la MEDIA el")
-        print("   sesgo desaparece y lo que queda es varianza, asi que ahora N SI")
-        print("   tiene que ayudar. Es la prueba definitiva de que el diagnostico")
-        print("   era correcto.")
+        print("=== 6. how far does it go? ===")
+        print("   With the SUM-of-exponentials estimator, raising N saturated")
+        print("   (28.8 -> 40.0 -> 36.4): that was BIAS, not noise. With the MEAN")
+        print("   the bias goes away and what is left is variance, so now N MUST")
+        print("   help. That is the decisive proof that the diagnosis was")
+        print("   correct.")
         print()
         ns2 = List[Int]()
         ns2.append(16); ns2.append(32); ns2.append(64); ns2.append(128)
@@ -407,18 +407,18 @@ def main() raises:
             row(a)
         print()
         print()
-        print("   La temperatura NO se barre aqui a proposito: con lectura")
-        print("   codiciosa q = softmax(media/tau) y argmax(softmax(x/tau)) =")
-        print("   argmax(x) para cualquier tau > 0, asi que no puede cambiar la")
-        print("   jugada. Si importaba con el readout de SPO, porque una SUMA de")
-        print("   exponenciales no es invariante de escala. Volvera a importar")
-        print("   cuando la lectura vuelva a muestrear, en el M-step.")
+        print("   Temperature is deliberately NOT swept here: with a greedy")
+        print("   readout q = softmax(mean/tau) and argmax(softmax(x/tau)) =")
+        print("   argmax(x) for any tau > 0, it cannot change the move. It")
+        print("   did matter with SPO's readout, because a SUM of exponentials")
+        print("   is not scale-invariant. It will matter again when the readout")
+        print("   goes back to sampling, in the M-step.")
 
         print()
-        print("=== 7. confirmacion, tanda larga ===")
-        print("   El montaje ganador con", STEPS, "turnos, contra la base en las")
-        print("   mismas condiciones. Referencias exactas por recursion:")
-        print("   el juego optimo pierde 0.00% y saca score 0.9974; al azar,")
+        print("=== 7. confirmation, long run ===")
+        print("   The winning setup with", STEPS, "turns, against the baseline under the")
+        print("   same conditions. Exact references by recursion:")
+        print("   optimal play loses 0.00% and scores 0.9974; at random,")
         print("   28.81% y 0.6484.")
         print()
         final = audit(ctx, TEMPERATURE, Scalar[dtype](0.9), STEPS,
@@ -427,10 +427,10 @@ def main() raises:
         row(final)
         nf = final.games()
         print()
-        print("   derrotas", pct(Float64(base.losses) / Float64(n)), "->",
+        print("   losses", pct(Float64(base.losses) / Float64(n)), "->",
               pct(Float64(final.losses) / Float64(nf)),
-              "   (", base.losses, "->", final.losses, "partidas perdidas )")
+              "   (", base.losses, "->", final.losses, "games lost )")
         if wilson_hi(final.losses, nf) < wilson_lo(base.losses, n):
-            print("   los intervalos NO se solapan: la mejora es real.")
+            print("   the intervals do NOT overlap: the improvement is real.")
         else:
-            print("   los intervalos se solapan: no se afirma mejora.")
+            print("   the intervals overlap: no improvement is claimed.")

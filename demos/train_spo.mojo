@@ -658,8 +658,8 @@ def train_run(ctx: DeviceContext, name: String, use_actor: Bool,
         state.unsafe_ptr(), u_open.unsafe_ptr(), NUM_ENVS,
         grid_dim=blocks, block_dim=TPB_TTT)
 
-    print("--- brazo:", name, "---")
-    print("  ronda   score    critico      H(q)       KL      |g_actor|")
+    print("--- arm:", name, "---")
+    print("  round   score    critic       H(q)       KL      |g_actor|")
     step = 0
     first = Report(0, 0, 0, 0, 0, 0)
     last = Report(0, 0, 0, 0, 0, 0)
@@ -708,35 +708,35 @@ def show(r: ArmResult) raises:
     frac = (r.kl_first - r.kl_last) / reducible if reducible > 0 \
            else Scalar[dtype](0)
     print("  ", r.name)
-    print("      critico ", r.critic_first, " -> ", r.critic_last)
-    print("      KL ", r.kl_first, " -> ", r.kl_last, "   suelo ", r.floor,
-          "   recorrido ", frac * Scalar[dtype](100), "% de lo reducible")
-    print("      score de la busqueda al final: ", r.score)
+    print("      critic ", r.critic_first, " -> ", r.critic_last)
+    print("      KL ", r.kl_first, " -> ", r.kl_last, "   floor ", r.floor,
+          "   covered ", frac * Scalar[dtype](100), "% of what is reducible")
+    print("      search score at the end: ", r.score)
     print("      H(q) ", r.hq_first, " -> ", r.hq_last,
-          "   <- si esto cambia, las KL de los dos brazos miden objetivos "
-          "distintos")
+          "   <- if this changes, the two arms' KLs measure different "
+          "objectives")
 
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== E2.5: el prior del actor entra en la busqueda ===")
-        print("   envs", NUM_ENVS, " rollout", ROLLOUT, " red", HIDDEN,
+        print("=== E2.5: the actor's prior enters the search ===")
+        print("   envs", NUM_ENVS, " rollout", ROLLOUT, " net", HIDDEN,
               " batch", BATCH, " lr", ACTOR_LR)
-        print("   busqueda: N", NUM_PARTICLES, " profundidad", SEARCH_DEPTH,
-              " sin remuestreo, readout de media")
-        print("   Los dos brazos comparten semilla y pasos; lo unico que cambia")
-        print("   es de donde sale el prior.")
+        print("   search: N", NUM_PARTICLES, " depth", SEARCH_DEPTH,
+              " no resampling, mean readout")
+        print("   The two arms share seed and steps; the only thing that changes")
+        print("   is where the prior comes from.")
         print()
 
-        uniform = train_run(ctx, String("prior UNIFORME (E2.4)"), False)
-        learned = train_run(ctx, String("prior del ACTOR (bucle EM cerrado)"),
+        uniform = train_run(ctx, String("UNIFORM prior (E2.4)"), False)
+        learned = train_run(ctx, String("ACTOR prior (closed EM loop)"),
                             True)
 
-        print("=== comparacion ===")
+        print("=== comparison ===")
         show(uniform.result)
         show(learned.result)
         print()
-        print("   El score es contra rival aleatorio, con la accion sorteada de q")
-        print("   (no la moda), asi que no es comparable con el 0.9936 de E1.11c,")
-        print("   que se midio jugando la moda. La medicion buena, con partidas")
-        print("   suficientes y las cuatro celdas del 2x2, es E2.6.")
+        print("   The score is against a random opponent, with the action drawn")
+        print("   from q (not the mode), so it is not comparable with E1.11c's")
+        print("   0.9936, which was measured playing the mode. The good")
+        print("   measurement, with enough games and all four 2x2 cells, is E2.6.")

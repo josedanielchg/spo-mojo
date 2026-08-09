@@ -88,10 +88,10 @@ def pct(x: Float64) -> String:
 def show(a: Arm) raises:
     n = a.games()
     print("   ", a.name, " n=", n,
-          " gana ", pct(Float64(a.wins) / Float64(n)),
-          " empata ", pct(Float64(a.draws) / Float64(n)),
-          " PIERDE ", pct(Float64(a.losses) / Float64(n)),
-          " IC[", fmt_fixed(wilson_lo(a.losses, n) * 100.0, 2), ",",
+          " wins ", pct(Float64(a.wins) / Float64(n)),
+          " draws ", pct(Float64(a.draws) / Float64(n)),
+          " LOSES ", pct(Float64(a.losses) / Float64(n)),
+          " CI[", fmt_fixed(wilson_lo(a.losses, n) * 100.0, 2), ",",
           fmt_fixed(wilson_hi(a.losses, n) * 100.0, 2), "]",
           " score ", fmt_fixed(a.score(), 4))
 
@@ -100,17 +100,17 @@ def verdict(base: Arm, other: Arm, what: String) raises:
     n1 = base.games(); n2 = other.games()
     hi2 = wilson_hi(other.losses, n2); lo1 = wilson_lo(base.losses, n1)
     lo2 = wilson_lo(other.losses, n2); hi1 = wilson_hi(base.losses, n1)
-    print("      ", what, ": derrotas ",
+    print("      ", what, ": losses ",
           pct(Float64(base.losses) / Float64(n1)), " -> ",
           pct(Float64(other.losses) / Float64(n2)),
           "   score ", fmt_fixed(base.score(), 4), " -> ",
           fmt_fixed(other.score(), 4))
     if hi2 < lo1:
-        print("          IC disjuntos, por debajo: MEJORA real.")
+        print("          CIs disjoint, below: a real IMPROVEMENT.")
     elif lo2 > hi1:
-        print("          IC disjuntos, por encima: EMPEORA de verdad.")
+        print("          CIs disjoint, above: it genuinely gets WORSE.")
     else:
-        print("          los IC se solapan: no se afirma diferencia.")
+        print("          the CIs overlap: no difference is claimed.")
 
 
 def play(ctx: DeviceContext, name: String, actor: ActorLearner,
@@ -193,66 +193,66 @@ def play(ctx: DeviceContext, name: String, actor: ActorLearner,
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== Revision: critico reconectado + ruido de Dirichlet ===")
-        print("   ", EVAL_ENVS, "partidas x", EVAL_STEPS, "turnos, moda de q,",
+        print("=== Review: critic reconnected + Dirichlet noise ===")
+        print("   ", EVAL_ENVS, "games x", EVAL_STEPS, "turns, mode of q,",
               " N =", EVAL_PARTICLES)
-        print("   referencias exactas: azar 0.6484 | optimo 0.9974 (pierde 0.00%)")
+        print("   exact references: random 0.6484 | optimal 0.9974 (loses 0.00%)")
         print()
 
-        print("--- entrenamiento: cada montaje con su actor y su critico ---")
+        print("--- training: each setup with its own actor and critic ---")
         # The critic goes in DURING training already: if the search that
         # generates the data does not use it, the q the actor learns is not that of
         # the system measured afterwards.
         spo = train_run(ctx, String("SPO literal"), True, True, SPO_PERIOD,
                         SPO_GAMMA, SPO_PENALTY, EVAL_PARTICLES, True, False, 0)
-        var_ = train_run(ctx, String("variante E1.11c"), True, False,
+        var_ = train_run(ctx, String("variant E1.11c"), True, False,
                          NO_RESAMPLE, VAR_GAMMA, VAR_PENALTY, EVAL_PARTICLES,
                          True, True, 0)
 
-        print("=== 0. la celda de control: SPO literal SIN actor ===")
-        print("    Sin esta celda no se puede atribuir al actor la mejora del")
-        print("    montaje literal, que es la afirmacion mas fuerte del bloque.")
-        base_noactor = play(ctx, String("SPO literal, prior UNIFORME"),
+        print("=== 0. the control cell: SPO literal WITHOUT actor ===")
+        print("    Without this cell the literal setup's improvement cannot be")
+        print("    attributed to the actor, the strongest claim in this block.")
+        base_noactor = play(ctx, String("SPO literal, UNIFORM prior"),
                             spo.actor, spo.critic, True, False,
                             Scalar[dtype](0), EVAL_STEPS, False)
-        base_noactor_c = play(ctx, String("  idem, CON critico        "),
+        base_noactor_c = play(ctx, String("  idem, WITH critic        "),
                               spo.actor, spo.critic, True, True,
                               Scalar[dtype](0), EVAL_STEPS, False)
         show(base_noactor); show(base_noactor_c)
         print()
 
-        print("=== 1. SPO literal (gamma_r=1, con remuestreo, readout de SPO) ===")
-        s00 = play(ctx, String("sin critico, sin ruido "), spo.actor, spo.critic,
+        print("=== 1. SPO literal (gamma_r=1, with resampling, SPO readout) ===")
+        s00 = play(ctx, String("no critic,   no noise   "), spo.actor, spo.critic,
                    True, False, Scalar[dtype](0), EVAL_STEPS)
-        s10 = play(ctx, String("CON critico, sin ruido "), spo.actor, spo.critic,
+        s10 = play(ctx, String("WITH critic, no noise   "), spo.actor, spo.critic,
                    True, True, Scalar[dtype](0), EVAL_STEPS)
-        s01 = play(ctx, String("sin critico, con ruido "), spo.actor, spo.critic,
+        s01 = play(ctx, String("no critic,   WITH noise "), spo.actor, spo.critic,
                    True, False, NOISE, EVAL_STEPS)
-        s11 = play(ctx, String("CON critico, con ruido "), spo.actor, spo.critic,
+        s11 = play(ctx, String("WITH critic, WITH noise "), spo.actor, spo.critic,
                    True, True, NOISE, EVAL_STEPS)
         show(s00); show(s10); show(s01); show(s11)
-        print("    veredictos:")
-        verdict(base_noactor, s00, String("anadir el ACTOR  "))
-        verdict(s00, s10, String("anadir el critico"))
-        verdict(s00, s01, String("anadir el ruido  "))
-        verdict(s00, s11, String("los dos          "))
+        print("    verdicts:")
+        verdict(base_noactor, s00, String("adding the ACTOR  "))
+        verdict(s00, s10, String("adding the critic"))
+        verdict(s00, s01, String("adding the noise  "))
+        verdict(s00, s11, String("both          "))
         print()
 
-        print("=== 2. Variante (gamma_r=0.9, castigo, sin remuestreo, media) ===")
-        v00 = play(ctx, String("sin critico, sin ruido "), var_.actor,
+        print("=== 2. Variant (gamma_r=0.9, penalty, no resampling, mean) ===")
+        v00 = play(ctx, String("no critic,   no noise   "), var_.actor,
                    var_.critic, False, False, Scalar[dtype](0), EVAL_STEPS)
-        v10 = play(ctx, String("CON critico, sin ruido "), var_.actor,
+        v10 = play(ctx, String("WITH critic, no noise   "), var_.actor,
                    var_.critic, False, True, Scalar[dtype](0), EVAL_STEPS)
-        v01 = play(ctx, String("sin critico, con ruido "), var_.actor,
+        v01 = play(ctx, String("no critic,   WITH noise "), var_.actor,
                    var_.critic, False, False, NOISE, EVAL_STEPS)
-        v11 = play(ctx, String("CON critico, con ruido "), var_.actor,
+        v11 = play(ctx, String("WITH critic, WITH noise "), var_.actor,
                    var_.critic, False, True, NOISE, EVAL_STEPS)
         show(v00); show(v10); show(v01); show(v11)
-        print("    veredictos:")
-        verdict(v00, v10, String("anadir el critico"))
-        verdict(v00, v01, String("anadir el ruido  "))
-        verdict(v00, v11, String("los dos          "))
+        print("    verdicts:")
+        verdict(v00, v10, String("adding the critic"))
+        verdict(v00, v01, String("adding the noise  "))
+        verdict(v00, v11, String("both          "))
         print()
-        print("   El ruido y el critico son AMBOS parte de SPO (Stoix los tiene")
-        print("   los dos; el ruido con fraction=0 por defecto). Activarlos no")
-        print("   anade ninguna desviacion que defender.")
+        print("   The noise and the critic are BOTH part of SPO (Stoix has both;")
+        print("   the noise with fraction=0 by default). Switching them on adds")
+        print("   no deviation that would need defending.")

@@ -186,10 +186,10 @@ def show(arm: Arm) raises:
     hi = wilson_hi(arm.losses, n)
     print("  ", arm.name,
           "  n=", n,
-          "  gana ", pct(Float64(arm.wins) / Float64(n)),
-          "  empata ", pct(Float64(arm.draws) / Float64(n)),
-          "  PIERDE ", pct(Float64(arm.losses) / Float64(n)),
-          " IC[", fmt_fixed(lo * 100.0, 2), ", ", fmt_fixed(hi * 100.0, 2), "]",
+          "  wins ", pct(Float64(arm.wins) / Float64(n)),
+          "  draws ", pct(Float64(arm.draws) / Float64(n)),
+          "  LOSES ", pct(Float64(arm.losses) / Float64(n)),
+          " CI[", fmt_fixed(lo * 100.0, 2), ", ", fmt_fixed(hi * 100.0, 2), "]",
           "  score ", fmt_fixed(arm.score(), 4))
 
 
@@ -207,15 +207,15 @@ def verdict(base: Arm, other: Arm) raises:
     p2 = Float64(other.losses) / Float64(n2)
 
     print("   ", other.name, " vs ", base.name, ":")
-    print("      derrotas ", pct(p1), " -> ", pct(p2))
+    print("      losses ", pct(p1), " -> ", pct(p2))
     if hi2 < lo1:
-        print("      los intervalos NO se solapan y el nuevo esta por debajo:",
-              " se puede afirmar que pierde menos.")
+        print("      the intervals do NOT overlap and the new one is below:",
+              " it can be claimed that it loses less.")
     elif lo2 > hi1:
-        print("      los intervalos NO se solapan y el nuevo esta por ENCIMA:",
-              " pierde mas, la diferencia es real.")
+        print("      the intervals do NOT overlap and the new one is ABOVE:",
+              " it loses more, the difference is real.")
     else:
-        print("      los intervalos se SOLAPAN: no se afirma diferencia.")
+        print("      the intervals OVERLAP: no difference is claimed.")
 
 
 def mean_value(ctx: DeviceContext, mut critic: Critic, cfg: SPOConfig,
@@ -297,19 +297,19 @@ def train(ctx: DeviceContext, mut critic: Critic) raises:
         for _ in range(UPDATES_PER_ROUND):
             step += 1
             last = update(ctx, critic, buf, step, SEED)
-    print("   entrenado:", TRAIN_ROUNDS * UPDATES_PER_ROUND,
-          "pasos de gradiente, perdida final", last)
+    print("   trained:", TRAIN_ROUNDS * UPDATES_PER_ROUND,
+          "gradient steps, final loss", last)
 
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== E1.11: el critico entra en la busqueda ===")
-        print("   evaluacion:", EVAL_ENVS, "partidas a la vez x", EVAL_STEPS,
-              "turnos, misma semilla en todos los brazos")
+        print("=== E1.11: the critic enters the search ===")
+        print("   evaluation:", EVAL_ENVS, "games at a time x", EVAL_STEPS,
+              "turns, same seed in every arm")
         print()
 
-        # 1. Entrenar el critico (E1.10).
-        print("--- 1. entrenamiento del critico ---")
+        # 1. Train the critic (E1.10).
+        print("--- 1. training the critic ---")
         critic = Critic(ctx, BATCH * ROLLOUT)
         init_critic_weights(ctx, critic, SEED)
         train(ctx, critic)
@@ -321,17 +321,17 @@ def main() raises:
                               temperature=TEMPERATURE, search_gamma=1.0,
                               search_gae_lambda=1.0)
         c = mean_value(ctx, critic, cfg_train, TicTacToe(REWARD_GAMMA))
-        print("   V medio sobre posiciones reales: c =", c)
-        print("   peso de una particula segun como acabe (V(raiz) se cancela):")
-        print("      ganar en d=0   ", Scalar[dtype](1))
-        print("      ganar en d=1   ", Scalar[dtype](0.7),
-              "   <- con reward_gamma=0.7")
-        print("      ganar en d=3   ", Scalar[dtype](0.343))
-        print("      seguir viva    ", c, "  <- esto es lo que anade el critico")
-        print("      perder         ", Scalar[dtype](0))
+        print("   mean V over real positions: c =", c)
+        print("   a particle's weight by how it ends (V(root) cancels out):")
+        print("      win at d=0     ", Scalar[dtype](1))
+        print("      win at d=1     ", Scalar[dtype](0.7),
+              "   <- with reward_gamma=0.7")
+        print("      win at d=3     ", Scalar[dtype](0.343))
+        print("      stay alive     ", c, "  <- this is what the critic adds")
+        print("      lose           ", Scalar[dtype](0))
         print()
 
-        # 2. Los brazos.
+        # 2. The arms.
         max_batch = EVAL_ENVS * NUM_PARTICLES
         m_c07 = TicTacToeCritic(ctx, max_batch, HIDDEN, Scalar[dtype](0.7))
         m_c10 = TicTacToeCritic(ctx, max_batch, HIDDEN, Scalar[dtype](1.0))
@@ -357,52 +357,52 @@ def main() raises:
                             eval_config(REWARD_GAMMA), 3)
         _ = play[TicTacToeCritic](ctx, "warmup", m_c07, eval_config(0.7), 3)
 
-        print("--- 2. seis montajes, las mismas partidas ---")
-        a_base = play[TicTacToe](ctx, "sin critico  gamma_r=0.7",
+        print("--- 2. six setups, the same games ---")
+        a_base = play[TicTacToe](ctx, "no critic    gamma_r=0.7",
                                  TicTacToe(Scalar[dtype](0.7)),
                                  eval_config(0.7), EVAL_STEPS)
         show(a_base)
-        a_g1 = play[TicTacToe](ctx, "sin critico  gamma_r=1.0",
+        a_g1 = play[TicTacToe](ctx, "no critic    gamma_r=1.0",
                                TicTacToe(Scalar[dtype](1.0)),
                                eval_config(1.0), EVAL_STEPS)
         show(a_g1)
-        a_c07 = play[TicTacToeCritic](ctx, "CON critico  gamma_r=0.7", m_c07,
+        a_c07 = play[TicTacToeCritic](ctx, "WITH critic  gamma_r=0.7", m_c07,
                                       eval_config(0.7), EVAL_STEPS)
         show(a_c07)
-        a_c10 = play[TicTacToeCritic](ctx, "CON critico  gamma_r=1.0", m_c10,
+        a_c10 = play[TicTacToeCritic](ctx, "WITH critic  gamma_r=1.0", m_c10,
                                       eval_config(1.0), EVAL_STEPS)
         show(a_c10)
-        a_dd = play[TicTacToeCritic](ctx, "CON critico  escala coherente", m_dd,
+        a_dd = play[TicTacToeCritic](ctx, "WITH critic  coherent scale  ", m_dd,
                                      eval_config(0.7), EVAL_STEPS)
         show(a_dd)
-        a_const = play[TicTacToeCritic](ctx, "V constante  escala coherente",
+        a_const = play[TicTacToeCritic](ctx, "V constant   coherent scale  ",
                                         m_const, eval_config(0.7), EVAL_STEPS)
         show(a_const)
         print()
 
-        print("--- 2b. los mismos, pero jugando la MODA de q en vez de una muestra ---")
-        g_base = play[TicTacToe](ctx, "sin critico  gamma_r=0.7  CODICIOSO",
+        print("--- 2b. the same, but playing the MODE of q instead of a sample ---")
+        g_base = play[TicTacToe](ctx, "no critic    gamma_r=0.7  GREEDY   ",
                                  TicTacToe(Scalar[dtype](0.7)),
                                  eval_config(0.7), EVAL_STEPS, greedy=True)
         show(g_base)
-        g_dd = play[TicTacToeCritic](ctx, "CON critico  coherente   CODICIOSO",
+        g_dd = play[TicTacToeCritic](ctx, "WITH critic  coherent    GREEDY   ",
                                      m_dd, eval_config(0.7), EVAL_STEPS,
                                      greedy=True)
         show(g_dd)
         print()
 
-        print("--- 3. veredicto (IC de Wilson al 95% sobre las derrotas) ---")
+        print("--- 3. verdict (95% Wilson CI on the losses) ---")
         verdict(a_base, a_c07)
         verdict(a_base, a_c10)
         verdict(a_base, a_g1)
         verdict(a_base, a_dd)
         print()
-        print("--- 4. ¿aporta el critico algo mas que su media? ---")
+        print("--- 4. does the critic add anything beyond its mean? ---")
         verdict(a_dd, a_const)
         print()
-        print("--- 5. ¿cuanto de las derrotas era el muestreo de q? ---")
+        print("--- 5. how much of the losses was q's sampling? ---")
         verdict(a_base, g_base)
         verdict(g_base, g_dd)
         print()
-        print("   referencia exacta: el juego optimo pierde 0.00%;")
-        print("   jugar al azar pierde 28.81%.")
+        print("   exact reference: optimal play loses 0.00%;")
+        print("   random play loses 28.81%.")

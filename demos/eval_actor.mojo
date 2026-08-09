@@ -93,10 +93,10 @@ def show(a: Arm) raises:
     # mean of 1/0.5/0 and its binomial CI does not apply as such, so the losses' CI
     # is reported (the column optimal play pins at 0).
     print("   ", a.name, "  n=", n,
-          "  gana ", pct(Float64(a.wins) / Float64(n)),
-          "  empata ", pct(Float64(a.draws) / Float64(n)),
-          "  PIERDE ", pct(Float64(a.losses) / Float64(n)),
-          " IC[", fmt_fixed(wilson_lo(a.losses, n) * 100.0, 2), ",",
+          "  wins ", pct(Float64(a.wins) / Float64(n)),
+          "  draws ", pct(Float64(a.draws) / Float64(n)),
+          "  LOSES ", pct(Float64(a.losses) / Float64(n)),
+          " CI[", fmt_fixed(wilson_lo(a.losses, n) * 100.0, 2), ",",
           fmt_fixed(wilson_hi(a.losses, n) * 100.0, 2), "]",
           "  score ", fmt_fixed(s, 4))
 
@@ -288,13 +288,13 @@ def diagnose_prior(ctx: DeviceContext, actor: ActorLearner, spo_readout: Bool,
         ctx.synchronize()
 
     c = Scalar[dtype](count)
-    print("      acciones raiz DISTINTAS de", particles, "particulas:",
-          " con prior ", sum_a / c, " | sin prior ", sum_u / c,
-          " | legales ", sum_legal / c)
-    print("      particulas de la accion MENOS muestreada:  con prior ",
-          min_a / c, " | sin prior ", min_u / c)
-    print("      acciones 'flacas' (<4 particulas) por posicion:  con prior ",
-          Scalar[dtype](thin_a) / c, " | sin prior ",
+    print("      DISTINCT root actions out of", particles, "particles:",
+          " with prior ", sum_a / c, " | no prior ", sum_u / c,
+          " | legal ", sum_legal / c)
+    print("      particles on the LEAST sampled action:  with prior ",
+          min_a / c, " | no prior ", min_u / c)
+    print("      'thin' actions (<4 particles) per position:  with prior ",
+          Scalar[dtype](thin_a) / c, " | no prior ",
           Scalar[dtype](thin_u) / c)
 
 
@@ -380,89 +380,89 @@ def verdict(base: Arm, other: Arm) raises:
     lo2 = wilson_lo(other.losses, n2); hi1 = wilson_hi(base.losses, n1)
     p1 = Float64(base.losses) / Float64(n1)
     p2 = Float64(other.losses) / Float64(n2)
-    print("      derrotas ", pct(p1), " -> ", pct(p2),
+    print("      losses ", pct(p1), " -> ", pct(p2),
           "   score ", fmt_fixed(base.score(), 4), " -> ",
           fmt_fixed(other.score(), 4))
     if hi2 < lo1:
-        print("      los IC NO se solapan y el nuevo esta por debajo: pierde menos.")
+        print("      the CIs do NOT overlap and the new one is below: it loses less.")
     elif lo2 > hi1:
-        print("      los IC NO se solapan y el nuevo esta por ENCIMA: pierde mas.")
+        print("      the CIs do NOT overlap and the new one is ABOVE: it loses more.")
     else:
-        print("      los IC se SOLAPAN: no se afirma diferencia en derrotas.")
+        print("      the CIs OVERLAP: no difference in losses is claimed.")
 
 
 def main() raises:
     with DeviceContext() as ctx:
-        print("=== E2.6: la red sola, el 2x2, y la curva de presupuesto ===")
-        print("   evaluacion:", EVAL_ENVS, "partidas a la vez x", EVAL_STEPS,
-              "turnos, jugando la MODA de q")
-        print("   referencias exactas: azar", RANDOM_SCORE, " optimo",
-              OPTIMAL_SCORE, "(este ultimo pierde 0.00%)")
+        print("=== E2.6: the network alone, the 2x2, and the budget curve ===")
+        print("   evaluation:", EVAL_ENVS, "games at a time x", EVAL_STEPS,
+              "turns, playing the MODE of q")
+        print("   exact references: random", RANDOM_SCORE, " optimal",
+              OPTIMAL_SCORE, "(the latter loses 0.00%)")
         print()
 
         # --- train one actor per setup, each with ITS OWN q ---
-        print("--- 1. entrenamiento (un actor por montaje) ---")
-        fixed = train_run(ctx, String("corregido, bucle EM"), True, False,
+        print("--- 1. training (one actor per setup) ---")
+        fixed = train_run(ctx, String("fixed setup, EM loop"), True, False,
                           NO_RESAMPLE, FIX_GAMMA, FIX_PENALTY, EVAL_PARTICLES)
-        spo = train_run(ctx, String("SPO fiel, bucle EM"), True, True,
+        spo = train_run(ctx, String("SPO faithful, EM loop"), True, True,
                         SPO_PERIOD, SPO_GAMMA, SPO_PENALTY, EVAL_PARTICLES)
 
-        print("--- 2. la red SOLA (destilacion: sin buscar nada) ---")
-        net_fix = play_network_only(ctx, String("red del montaje corregido"),
+        print("--- 2. the network ALONE (distillation: no search at all) ---")
+        net_fix = play_network_only(ctx, String("network, fixed setup     "),
                                     fixed.actor.net, EVAL_STEPS)
-        net_spo = play_network_only(ctx, String("red del montaje SPO      "),
+        net_spo = play_network_only(ctx, String("network, SPO setup       "),
                                     spo.actor.net, EVAL_STEPS)
         show(net_fix.arm)
         show(net_spo.arm)
-        print("    jugadas ILEGALES:  corregido ", net_fix.illegal, "  SPO ",
-              net_spo.illegal, "   <- tienen que ser 0, o el score esta inflado")
-        print("    referencia: jugar al azar da score", RANDOM_SCORE,
-              "y pierde 28.81%")
+        print("    ILLEGAL moves:  fixed ", net_fix.illegal, "  SPO ",
+              net_spo.illegal, "   <- must be 0, or the score is inflated")
+        print("    reference: random play scores", RANDOM_SCORE,
+              "and loses 28.81%")
         print()
 
-        print("--- 3. el 2x2 (mismo presupuesto: N =", EVAL_PARTICLES, ") ---")
-        a_spo_no = play_search(ctx, String("SPO fiel   sin actor"), spo.actor,
+        print("--- 3. the 2x2 (same budget: N =", EVAL_PARTICLES, ") ---")
+        a_spo_no = play_search(ctx, String("SPO faithful  no actor  "), spo.actor,
                                False, True, EVAL_PARTICLES, EVAL_STEPS)
-        a_spo_yes = play_search(ctx, String("SPO fiel   CON actor"), spo.actor,
+        a_spo_yes = play_search(ctx, String("SPO faithful  WITH actor"), spo.actor,
                                 True, True, EVAL_PARTICLES, EVAL_STEPS)
-        a_fix_no = play_search(ctx, String("corregido  sin actor"), fixed.actor,
+        a_fix_no = play_search(ctx, String("fixed         no actor  "), fixed.actor,
                                False, False, EVAL_PARTICLES, EVAL_STEPS)
-        a_fix_yes = play_search(ctx, String("corregido  CON actor"), fixed.actor,
+        a_fix_yes = play_search(ctx, String("fixed         WITH actor"), fixed.actor,
                                 True, False, EVAL_PARTICLES, EVAL_STEPS)
         show(a_spo_no); show(a_spo_yes); show(a_fix_no); show(a_fix_yes)
         print()
-        print("--- 4. ¿la red mejora la busqueda que la entreno? ---")
-        print("    (es la celda que demuestra el bucle EM)")
-        print("    SPO fiel:")
+        print("--- 4. does the network improve the search that trained it? ---")
+        print("    (this is the cell that demonstrates the EM loop)")
+        print("    SPO faithful:")
         verdict(a_spo_no, a_spo_yes)
-        print("    corregido:")
+        print("    fixed setup:")
         verdict(a_fix_no, a_fix_yes)
         print()
-        print("--- 4b. ¿por que el prior no ayuda a presupuesto alto? ---")
-        print("    Candidata: un prior picudo colapsa la diversidad de acciones")
-        print("    raiz, y la busqueda se queda sin nada que comparar.")
-        print("    corregido:")
+        print("--- 4b. why does the prior not help at a high budget? ---")
+        print("    Candidate: a peaked prior collapses the diversity of root")
+        print("    actions, and the search is left with nothing to compare.")
+        print("    fixed setup:")
         diagnose_prior(ctx, fixed.actor, False, EVAL_PARTICLES, 40)
-        print("    SPO fiel:")
+        print("    SPO faithful:")
         diagnose_prior(ctx, spo.actor, True, EVAL_PARTICLES, 40)
         print()
 
-        print("--- 5. curva de presupuesto (montaje corregido) ---")
-        print("    nuestro barrido sin red ya medido: 4->0.865  16->0.953  64->0.969")
+        print("--- 5. budget curve (fixed setup) ---")
+        print("    our already-measured no-network sweep: 4->0.865  16->0.953  64->0.969")
         ns = List[Int]()
         ns.append(4); ns.append(16); ns.append(64); ns.append(128)
         for i in range(len(ns)):
-            no = play_search(ctx, String("N=", ns[i], " sin actor"),
+            no = play_search(ctx, String("N=", ns[i], " no actor"),
                              fixed.actor, False, False, ns[i], SWEEP_STEPS)
-            yes = play_search(ctx, String("N=", ns[i], " CON actor"),
+            yes = play_search(ctx, String("N=", ns[i], " WITH actor"),
                               fixed.actor, True, False, ns[i], SWEEP_STEPS)
-            print("    N=", ns[i], "  sin red score ",
-                  fmt_fixed(no.score(), 4), " (pierde ",
+            print("    N=", ns[i], "  no network score ",
+                  fmt_fixed(no.score(), 4), " (loses ",
                   pct(Float64(no.losses) / Float64(no.games())), ")",
-                  "   con red score ", fmt_fixed(yes.score(), 4),
-                  " (pierde ", pct(Float64(yes.losses) / Float64(yes.games())),
+                  "   with network score ", fmt_fixed(yes.score(), 4),
+                  " (loses ", pct(Float64(yes.losses) / Float64(yes.games())),
                   ")")
         print()
-        print("    Si con red se alcanza antes el mismo nivel, ese es el argumento")
-        print("    practico de SPO frente a MCTS: el entrenamiento se paga una vez")
-        print("    y luego cada decision cuesta menos busqueda.")
+        print("    If the same level is reached sooner with the network, that is")
+        print("    SPO's practical argument against MCTS: training is paid once")
+        print("    and then every decision costs less search.")
