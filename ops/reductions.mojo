@@ -61,7 +61,7 @@ def block_reduce_max[TPB: Int](shared: SharedF32, tid: Int) -> Scalar[dtype]:
 def sum_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     """out[row] = sum of the row. Launch with grid_dim=num_rows, block_dim=TPB."""
     # shared is sized with TPB, so launching with more threads would write outside.
-    debug_assert(Int(block_dim.x) == TPB, "sum_rows: block_dim tiene que ser TPB")
+    debug_assert(Int(block_dim.x) == TPB, "sum_rows: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)
@@ -86,7 +86,7 @@ def sum_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
 
 def max_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     """out[row] = maximum of the row."""
-    debug_assert(Int(block_dim.x) == TPB, "max_rows: block_dim tiene que ser TPB")
+    debug_assert(Int(block_dim.x) == TPB, "max_rows: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)
@@ -122,7 +122,7 @@ def argmax_rows[TPB: Int](out_ptr: GlobalI32, a_ptr: GlobalF32, row_size: Int):
     It does not use block_reduce_max because the index has to be carried along
     with the value.
     """
-    debug_assert(Int(block_dim.x) == TPB, "argmax_rows: block_dim tiene que ser TPB")
+    debug_assert(Int(block_dim.x) == TPB, "argmax_rows: block_dim must be TPB")
 
     shared_val = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     shared_idx = stack_allocation[TPB, Scalar[idx_dtype], address_space = AddressSpace.SHARED]()
@@ -180,9 +180,9 @@ def warp_sum_rows(out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     Launch with block_dim=WARP_SIZE.
     """
     debug_assert(row_size <= Int(WARP_SIZE),
-                 "warp_sum_rows: la fila tiene que caber en un warp")
+                 "warp_sum_rows: the row must fit in a warp")
     debug_assert(Int(block_dim.x) == Int(WARP_SIZE),
-                 "warp_sum_rows: block_dim tiene que ser WARP_SIZE")
+                 "warp_sum_rows: block_dim must be WARP_SIZE")
 
     tid = Int(thread_idx.x)
     row = Int(block_idx.x)

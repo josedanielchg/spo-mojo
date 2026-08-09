@@ -57,7 +57,7 @@ def _row_sum_exp[TPB: Int](shared: SharedF32, a_ptr: GlobalF32,
 
 def softmax_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     """out = softmax(a) row by row."""
-    debug_assert(Int(block_dim.x) == TPB, "softmax_rows: block_dim tiene que ser TPB")
+    debug_assert(Int(block_dim.x) == TPB, "softmax_rows: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)
@@ -84,7 +84,7 @@ def logsumexp_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int
     Identity used: log(SUM exp(x)) = m + log(SUM exp(x - m)).
     In SPO it shows up in the M-step's temperature loss (equation 7 of the paper).
     """
-    debug_assert(Int(block_dim.x) == TPB, "logsumexp_rows: block_dim tiene que ser TPB")
+    debug_assert(Int(block_dim.x) == TPB, "logsumexp_rows: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)
@@ -118,7 +118,7 @@ def log_softmax_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32,
     NaN.
     """
     debug_assert(Int(block_dim.x) == TPB,
-                 "log_softmax_rows: block_dim tiene que ser TPB")
+                 "log_softmax_rows: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)

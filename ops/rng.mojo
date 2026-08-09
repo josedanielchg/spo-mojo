@@ -102,8 +102,8 @@ def categorical_from_logits[TPB: Int](out_ptr: GlobalI32, logits_ptr: GlobalF32,
 
     Requires row_size <= TPB. Launch with grid_dim=num_rows, block_dim=TPB.
     """
-    debug_assert(row_size <= TPB, "categorical: row_size tiene que caber en TPB")
-    debug_assert(Int(block_dim.x) == TPB, "categorical: block_dim tiene que ser TPB")
+    debug_assert(row_size <= TPB, "categorical: row_size must fit in TPB")
+    debug_assert(Int(block_dim.x) == TPB, "categorical: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)

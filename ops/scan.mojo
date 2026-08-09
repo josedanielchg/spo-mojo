@@ -41,8 +41,8 @@ def block_scan_inclusive[TPB: Int](shared: SharedF32, tid: Int):
 
 def inclusive_scan_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size: Int):
     """out[i] = a[0] + ... + a[i], row by row."""
-    debug_assert(row_size <= TPB, "inclusive_scan_rows: row_size tiene que caber en TPB")
-    debug_assert(Int(block_dim.x) == TPB, "inclusive_scan_rows: block_dim tiene que ser TPB")
+    debug_assert(row_size <= TPB, "inclusive_scan_rows: row_size must fit in TPB")
+    debug_assert(Int(block_dim.x) == TPB, "inclusive_scan_rows: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)
@@ -65,8 +65,8 @@ def exclusive_scan_rows[TPB: Int](out_ptr: GlobalF32, a_ptr: GlobalF32, row_size
     It is the inclusive one shifted one place to the right. The typical use is
     turning counts into write offsets: each bucket knows where its stretch begins.
     """
-    debug_assert(row_size <= TPB, "exclusive_scan_rows: row_size tiene que caber en TPB")
-    debug_assert(Int(block_dim.x) == TPB, "exclusive_scan_rows: block_dim tiene que ser TPB")
+    debug_assert(row_size <= TPB, "exclusive_scan_rows: row_size must fit in TPB")
+    debug_assert(Int(block_dim.x) == TPB, "exclusive_scan_rows: block_dim must be TPB")
 
     shared = stack_allocation[TPB, Scalar[dtype], address_space = AddressSpace.SHARED]()
     tid = Int(thread_idx.x)
