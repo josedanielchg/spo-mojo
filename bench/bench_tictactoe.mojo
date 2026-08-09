@@ -119,9 +119,9 @@ def main() raises:
     path = String(args[1]) if len(args) > 1 else String("results/bench_smc.csv")
 
     with DeviceContext() as ctx:
-        print("planificador SMC sobre tres en raya (rival aleatorio)")
-        print("  particulas", NUM_PARTICLES, " profundidad", DEPTH,
-              " temperatura", TEMPERATURE, " descuento", REWARD_GAMMA)
+        print("SMC planner on tic-tac-toe (random opponent)")
+        print("  particles", NUM_PARTICLES, " depth", DEPTH,
+              " temperature", TEMPERATURE, " discount", REWARD_GAMMA)
         print()
 
         # A warm-up batch: the first call pays for kernel compilation, and that
@@ -146,11 +146,11 @@ def main() raises:
         single = run_games(ctx, 1, 40)
         latency = single.seconds / Float64(single.decisions)
         print()
-        print("--- latencia (1 partida a la vez, comparable con el MCTS) ---")
+        print("--- latency (1 game at a time, comparable with MCTS) ---")
         print("time/decision   : " + fmt_fixed(latency, 6) + " s")
-        print("speedup por lote: x" + fmt_fixed(latency / m.avg_decision_time_s(), 1)
-              + "  (planificar " + String(NUM_ENVS) + " partidas a la vez)")
+        print("batching speedup: x" + fmt_fixed(latency / m.avg_decision_time_s(), 1)
+              + "  (planning " + String(NUM_ENVS) + " games at a time)")
 
         write_csv(m, path)
         print()
-        print("csv escrito en", path)
+        print("csv written to", path)

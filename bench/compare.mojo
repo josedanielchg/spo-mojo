@@ -62,10 +62,10 @@ def read_row(path: String) raises -> Row:
 
     lines = text.split("\n")
     if len(lines) < 2:
-        raise Error("el csv ", path, " no tiene fila de datos")
+        raise Error("csv ", path, " has no data row")
     c = lines[1].split(",")
     if len(c) < 17:
-        raise Error("el csv ", path, " tiene ", len(c), " columnas, esperaba 17")
+        raise Error("csv ", path, " has ", len(c), " columns, expected 17")
 
     # `split` returns StringSlice, so it has to be wrapped in String/Int/Float64.
     return Row(language=String(c[0]), mode=String(c[1]),
@@ -85,56 +85,56 @@ def show_strength(label: String, r: Row) raises:
     """One line of the strength table, with the wins' Wilson interval."""
     frac = (r.score() - RANDOM_SCORE) / (OPTIMAL_SCORE - RANDOM_SCORE)
     print("  ", label,
-          "  gana ", pct(r.rate(r.x_wins)),
+          "  wins ", pct(r.rate(r.x_wins)),
           " [", fmt_fixed(wilson_lo(r.x_wins, r.games), 3), ",",
           fmt_fixed(wilson_hi(r.x_wins, r.games), 3), "]",
-          "  empata ", pct(r.rate(r.draws)),
-          "  pierde ", pct(r.rate(r.o_wins)),
+          "  draws ", pct(r.rate(r.draws)),
+          "  loses ", pct(r.rate(r.o_wins)),
           "  score ", fmt_fixed(r.score(), 4),
-          "  (", pct(frac), " del camino azar->optimo )")
+          "  (", pct(frac), " of the random->optimal path )")
 
 
 def main() raises:
     args = argv()
     if len(args) < 3:
-        raise Error("uso: compare.mojo <csv_mcts> <csv_smc>")
+        raise Error("usage: compare.mojo <csv_mcts> <csv_smc>")
     mcts = read_row(String(args[1]))
     smc = read_row(String(args[2]))
 
-    print("=== TRES EN RAYA: dos planificadores, mismo juego, mismo rival ===")
+    print("=== TIC-TAC-TOE: two planners, same game, same opponent ===")
     print()
-    print("--- 1. fuerza (contra rival aleatorio) ---")
-    print("   referencia exacta, jugar al azar     gana 58.49%  empata 12.70%  pierde 28.81%  score 0.6484")
+    print("--- 1. strength (against a random opponent) ---")
+    print("   exact reference, random play         wins 58.49%  draws 12.70%  loses 28.81%  score 0.6484")
     show_strength("MCTS  (" + mcts.language + ")", mcts)
     show_strength("SMC   (" + smc.language + ")", smc)
-    print("   referencia exacta, juego optimo      gana 99.48%  empata  0.52%  pierde  0.00%  score 0.9974")
+    print("   exact reference, optimal play        wins 99.48%  draws  0.52%  loses  0.00%  score 0.9974")
     print()
-    print("   Las dos referencias se calculan por recursion sobre todos los estados,")
-    print("   no se estiman. El juego optimo NUNCA pierde, asi que la columna de")
-    print("   derrotas mide directamente las amenazas que cada planificador no vio.")
+    print("   Both references are computed by recursion over every state, not")
+    print("   estimated. Optimal play NEVER loses, so the losses column measures")
+    print("   directly the threats each planner failed to see.")
 
     print()
-    print("--- 2. cuanto trabajo hace cada uno por decision ---")
-    print("   MCTS :", mcts.iterations, "simulaciones/decision, arbol de",
-          mcts.nodes, "nodos en total")
-    print("   SMC  :", smc.iterations, "particulas/decision, sin arbol (",
-          smc.nodes, "nodos )")
+    print("--- 2. how much work each one does per decision ---")
+    print("   MCTS :", mcts.iterations, "simulations/decision, tree of",
+          mcts.nodes, "nodes in total")
+    print("   SMC  :", smc.iterations, "particles/decision, no tree (",
+          smc.nodes, "nodes )")
     print()
-    print("   No es la misma unidad y por eso no se dividen: el MCTS gasta su")
-    print("   presupuesto construyendo un arbol que refina las jugadas siguientes;")
-    print("   la busqueda SMC lo gasta en trayectorias que solo puntuan la primera.")
-    print("   Ahi esta la diferencia de fuerza, y tambien por que uno necesita")
-    print("   empaquetar el tablero en bitboards y el otro no.")
+    print("   It is not the same unit, which is why they are not divided: MCTS")
+    print("   spends its budget building a tree that refines the moves that")
+    print("   follow; the SMC search spends it on trajectories that score only")
+    print("   the first. That is where the strength gap is, and also why one")
+    print("   needs to pack the board into bitboards and the other does not.")
 
     print()
-    print("--- 3. rendimiento ---")
-    print("   MCTS   tiempo/decision", fmt_fixed(mcts.time_per_decision * 1e6, 1),
-          "us   (en serie en CPU: es latencia)")
-    print("   SMC    tiempo/decision", fmt_fixed(smc.time_per_decision * 1e6, 1),
-          "us   (por lotes en GPU: es throughput)")
+    print("--- 3. performance ---")
+    print("   MCTS   time/decision", fmt_fixed(mcts.time_per_decision * 1e6, 1),
+          "us   (serial on CPU: this is latency)")
+    print("   SMC    time/decision", fmt_fixed(smc.time_per_decision * 1e6, 1),
+          "us   (batched on GPU: this is throughput)")
     print("   x", fmt_fixed(mcts.time_per_decision / smc.time_per_decision, 1),
-          "a favor de la busqueda en decisiones por segundo.")
+          "in favour of the search in decisions per second.")
     print()
-    print("   Pero medido a LATENCIA (una partida a la vez) la busqueda esta en")
-    print("   ~330 us, o sea en el mismo orden que el MCTS. Su ventaja no es")
-    print("   decidir mas rapido, es decidir para 64 partidas de una vez.")
+    print("   But measured at LATENCY (one game at a time) the search sits at")
+    print("   ~330 us, the same order as MCTS. Its advantage is not deciding")
+    print("   faster, it is deciding for 64 games at once.")
