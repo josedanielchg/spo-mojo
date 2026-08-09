@@ -82,7 +82,7 @@ def test_value_function(ctx: DeviceContext) raises:
         if want < 0.0:
             want = 0.0
         assert_close(got[p], want, TOL, String("V(", p, ")"))
-    print("PASS toy value = casillas restantes (y >= 0)")
+    print("PASS toy value = remaining cells (and >= 0)")
 
 
 def test_uniform_prior(ctx: DeviceContext) raises:
@@ -102,7 +102,7 @@ def test_uniform_prior(ctx: DeviceContext) raises:
     for i in range(n):
         assert_close(got[i * NUM_ACTIONS + ACTION_BAD],
                      got[i * NUM_ACTIONS + ACTION_GOOD], TOL,
-                     String("prior no uniforme en la particula ", i))
+                     String("non-uniform prior at particle ", i))
     print("PASS prior uniforme")
 
 
@@ -118,14 +118,14 @@ def test_normal_step(ctx: DeviceContext) raises:
     r = run_step(ctx, positions, actions, cfg, 1.0)
 
     for p in range(3):
-        assert_close(r.next_pos[p], Scalar[dtype](p + 1), TOL, String("next_pos desde ", p))
-        assert_close(r.reward[p], 1.0, TOL, String("reward desde ", p))
+        assert_close(r.next_pos[p], Scalar[dtype](p + 1), TOL, String("next_pos from ", p))
+        assert_close(r.reward[p], 1.0, TOL, String("reward from ", p))
         # Still alive: the rec_discount is 1.
-        assert_close(r.discount[p], 1.0, TOL, String("rec_discount desde ", p))
+        assert_close(r.discount[p], 1.0, TOL, String("rec_discount from ", p))
         # bootstrap = 1 * gamma * V(p+1)
         assert_close(r.bootstrap[p], toy_value(Scalar[dtype](p + 1), cfg.chain_length, cfg.value_scale), TOL,
-                     String("bootstrap desde ", p))
-    print("PASS paso normal: avanza, r=1, sigue viva")
+                     String("bootstrap from ", p))
+    print("PASS normal step: advances, r=1, stays alive")
 
 
 def test_terminal_vs_truncation(ctx: DeviceContext) raises:
@@ -142,19 +142,19 @@ def test_terminal_vs_truncation(ctx: DeviceContext) raises:
     r = run_step(ctx, positions, actions, cfg, 1.0)
 
     # The terminal case.
-    assert_close(r.reward[0], 0.0, TOL, "terminal: recompensa")
-    assert_close(r.discount[0], 0.0, TOL, "terminal: rec_discount tiene que ser 0")
+    assert_close(r.reward[0], 0.0, TOL, "terminal: reward")
+    assert_close(r.discount[0], 0.0, TOL, "terminal: rec_discount has to be 0")
     assert_close(r.bootstrap[0], 0.0, TOL,
-                 "terminal: el bootstrap tiene que ser 0, no hay futuro")
+                 "terminal: the bootstrap has to be 0, there is no future")
 
     # And the truncation one, which is where the difference lies.
-    assert_close(r.next_pos[1], 4.0, TOL, "truncacion: posicion final")
-    assert_close(r.reward[1], 1.0, TOL, "truncacion: el paso si dio recompensa")
+    assert_close(r.next_pos[1], 4.0, TOL, "truncation: final position")
+    assert_close(r.reward[1], 1.0, TOL, "truncation: the step did give reward")
     assert_close(r.discount[1], 0.0, TOL,
-                 "truncacion: rec_discount 0, la particula deja de simular")
+                 "truncation: rec_discount 0, the particle stops simulating")
     # And here is the difference: V(4) = 8 - 4 = 4, NOT zero.
     assert_close(r.bootstrap[1], 4.0, TOL,
-                 "truncacion: el bootstrap conserva el valor del futuro")
+                 "truncation: the bootstrap keeps the future's value")
 
     print("PASS terminal (bootstrap 0) vs truncacion (bootstrap", r.bootstrap[1], ")")
 
@@ -175,9 +175,9 @@ def test_zero_value_variant(ctx: DeviceContext) raises:
     r = run_step(ctx, positions, actions, cfg, 1.0)
 
     for i in range(2):
-        assert_close(r.bootstrap[i], 0.0, TOL, String("V==0: bootstrap en ", i))
-        assert_close(r.reward[i], 1.0, TOL, String("V==0: la recompensa no cambia, ", i))
-    print("PASS variante sin critico (value_scale=0)")
+        assert_close(r.bootstrap[i], 0.0, TOL, String("V==0: bootstrap at ", i))
+        assert_close(r.reward[i], 1.0, TOL, String("V==0: the reward does not change, ", i))
+    print("PASS variant with no critic (value_scale=0)")
 
 
 def test_search_gamma_applies(ctx: DeviceContext) raises:
@@ -189,11 +189,11 @@ def test_search_gamma_applies(ctx: DeviceContext) raises:
 
     r = run_step(ctx, positions, actions, cfg, 0.5)
 
-    assert_close(r.reward[0], 1.0, TOL, "gamma no debe tocar la recompensa")
+    assert_close(r.reward[0], 1.0, TOL, "gamma must not touch the reward")
     # 0.5 * V(1) = 0.5 * 7
     assert_close(r.bootstrap[0], 0.5 * toy_value(1.0, cfg.chain_length, cfg.value_scale), TOL,
-                 "el bootstrap tiene que llevar search_gamma")
-    print("PASS search_gamma se aplica solo al bootstrap")
+                 "the bootstrap has to carry search_gamma")
+    print("PASS search_gamma applies only to the bootstrap")
 
 
 def test_types_fit_the_toy_model(ctx: DeviceContext) raises:
@@ -208,7 +208,7 @@ def test_types_fit_the_toy_model(ctx: DeviceContext) raises:
 
     p = cfg.num_search_particles()
     if p != num_envs * 16:
-        raise Error("num_search_particles deberia ser envs*particulas, salio ", p)
+        raise Error("num_search_particles should be envs*particles, got ", p)
 
     particles = Particles(ctx, cfg)
     outputs = StepOutputs(ctx, cfg)
@@ -220,17 +220,17 @@ def test_types_fit_the_toy_model(ctx: DeviceContext) raises:
     gae = download[dtype](particles.gae, p)
     terminal = download[idx_dtype](particles.terminal, p)
     for i in range(p):
-        assert_close(weights[i], 0.0, TOL, String("peso inicial ", i))
-        assert_close(gae[i], 0.0, TOL, String("gae inicial ", i))
+        assert_close(weights[i], 0.0, TOL, String("initial weight ", i))
+        assert_close(gae[i], 0.0, TOL, String("initial gae ", i))
         if Int(terminal[i]) != 0:
-            raise Error("la particula ", i, " nace marcada como terminal")
+            raise Error("particle ", i, " is born marked as terminal")
 
     # The logits buffer is [P, num_actions], not [P].
     logits = download[dtype](outputs.action_logits, p * cfg.num_actions)
     if len(logits) != p * NUM_ACTIONS:
-        raise Error("action_logits deberia ser P*num_actions")
+        raise Error("action_logits should be P*num_actions")
 
-    print("PASS los tipos de la busqueda encajan con el juguete (P =", p, ")")
+    print("PASS the search's shapes fit the toy (P =", p, ")")
 
 
 def main() raises:

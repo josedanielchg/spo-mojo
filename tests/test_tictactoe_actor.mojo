@@ -77,7 +77,7 @@ def test_root_prior_comes_from_the_network(ctx: DeviceContext) raises:
     model = biased_model(ctx, cfg.num_search_particles())
 
     boards = List[Scalar[dtype]]()
-    for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)      # todo libre
+    for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)      # all free
     for b in board9(1,0,-1, 0,0,0, 0,0,0): boards.append(b)     # 0 y 2 ocupadas
     root_state = upload[dtype](ctx, boards)
 
@@ -94,17 +94,17 @@ def test_root_prior_comes_from_the_network(ctx: DeviceContext) raises:
             v = got[e * NUM_ACTIONS + c]
             if boards[e * NUM_CELLS + c] != CELL_EMPTY:
                 if v != NEG_INF:
-                    raise Error("la casilla ocupada ", c, " del env ", e,
-                                " deberia estar tapada y vale ", v)
+                    raise Error("the occupied cell ", c, " of env ", e,
+                                " should be masked and is ", v)
             elif c == 4:
                 assert_close(v, Scalar[dtype](3), TOL,
-                             String("el centro del env ", e))
+                             String("the centre of env ", e))
             else:
                 assert_close(v, Scalar[dtype](0), TOL,
-                             String("la casilla ", c, " del env ", e))
+                             String("cell ", c, " of env ", e))
         # And the value is still 0, like the planner.
         assert_close(got_v[e], Scalar[dtype](0), TOL,
-                     String("V del env ", e, " deberia ser 0"))
+                     String("V of env ", e, " should be 0"))
 
     # The check that really matters: it is NOT uniform.
     all_equal = True
@@ -112,9 +112,9 @@ def test_root_prior_comes_from_the_network(ctx: DeviceContext) raises:
         if got[c] != got[0]:
             all_equal = False
     if all_equal:
-        raise Error("el prior salio uniforme: los logits del actor no estan "
-                    "llegando, y el bucle EM no se cerraria")
-    print("PASS el prior de la raiz sale de la red y no es uniforme")
+        raise Error("the prior came out uniform: the actor's logits are not "
+                    "arriving, and the EM loop would not close")
+    print("PASS the root prior comes from the network and is not uniform")
 
 
 def test_step_prior_uses_the_new_state(ctx: DeviceContext) raises:
@@ -145,19 +145,19 @@ def test_step_prior_uses_the_new_state(ctx: DeviceContext) raises:
     got = download[dtype](outputs.action_logits, NUM_ACTIONS)
 
     if new_board[4] == CELL_EMPTY:
-        raise Error("la casilla 4 deberia estar ocupada tras el paso")
+        raise Error("cell 4 should be occupied after the step")
     if got[4] != NEG_INF:
-        raise Error("la casilla 4 esta ocupada en el estado NUEVO, asi que su "
-                    "logit deberia estar tapado; vale ", got[4],
-                    " (el prior esta mirando el estado viejo)")
+        raise Error("cell 4 is occupied in the NEW state, so its "
+                    "logit should be masked; it is ", got[4],
+                    " (the prior is looking at the old state)")
     for c in range(NUM_ACTIONS):
         want_masked = new_board[c] != CELL_EMPTY
         if want_masked and got[c] != NEG_INF:
-            raise Error("la casilla ", c, " esta ocupada y su logit vale ", got[c])
+            raise Error("cell ", c, " is occupied and its logit is ", got[c])
         if not want_masked:
             assert_close(got[c], Scalar[dtype](0), TOL,
-                         String("logit de la casilla libre ", c))
-    print("PASS el prior del step se evalua en el estado nuevo")
+                         String("logit of the free cell ", c))
+    print("PASS the step's prior is evaluated on the new state")
 
 
 def test_sync_from_brings_the_trained_actor(ctx: DeviceContext) raises:
@@ -184,7 +184,7 @@ def test_sync_from_brings_the_trained_actor(ctx: DeviceContext) raises:
     before = download[dtype](logits, NUM_ACTIONS)
     for c in range(1, NUM_ACTIONS):
         assert_close(before[c], before[0], TOL,
-                     "sin sincronizar, el prior deberia ser uniforme")
+                     "without syncing, the prior should be uniform")
 
     # A pretend-trained actor: it prefers corner 8.
     src = zero_actor_params(ctx, HIDDEN)
@@ -199,8 +199,8 @@ def test_sync_from_brings_the_trained_actor(ctx: DeviceContext) raises:
     ctx.synchronize()
     after = download[dtype](logits, NUM_ACTIONS)
     assert_close(after[8], Scalar[dtype](2.5), TOL,
-                 "tras sync_from el prior deberia venir de los pesos copiados")
-    assert_close(after[0], Scalar[dtype](0), TOL, "y el resto a 0")
+                 "after sync_from the prior should come from the copied weights")
+    assert_close(after[0], Scalar[dtype](0), TOL, "and the rest at 0")
 
     # The copy is independent: touching the source afterwards does not move the model.
     b3b = List[Scalar[dtype]]()
@@ -212,7 +212,7 @@ def test_sync_from_brings_the_trained_actor(ctx: DeviceContext) raises:
     ctx.synchronize()
     again = download[dtype](logits, NUM_ACTIONS)
     assert_close(again[8], Scalar[dtype](2.5), TOL,
-                 "el modelo tiene su propia copia; el origen ya no le afecta")
+                 "the model has its own copy; the source no longer affects it")
 
     # And an incompatible shape is rejected.
     bad = zero_actor_params(ctx, HIDDEN + 1)
@@ -222,8 +222,8 @@ def test_sync_from_brings_the_trained_actor(ctx: DeviceContext) raises:
     except:
         failed = True
     if not failed:
-        raise Error("sync_from deberia rechazar un actor con otra forma")
-    print("PASS sync_from trae el actor entrenado, es independiente y valida")
+        raise Error("sync_from should reject an actor with a different shape")
+    print("PASS sync_from brings in the trained actor, is independent and validates")
 
 
 def test_many_particles_multi_block(ctx: DeviceContext) raises:
@@ -260,20 +260,20 @@ def test_many_particles_multi_block(ctx: DeviceContext) raises:
             v = got[p * NUM_ACTIONS + c]
             if new_boards[p * NUM_CELLS + c] != CELL_EMPTY:
                 if v != NEG_INF:
-                    raise Error("particula ", p, " casilla ", c,
-                                " ocupada pero su logit vale ", v)
+                    raise Error("particle ", p, " cell ", c,
+                                " occupied but its logit is ", v)
             elif c == 4:
                 assert_close(v, Scalar[dtype](3), TOL,
-                             String("particula ", p, " centro"))
+                             String("particle ", p, " centro"))
             else:
                 assert_close(v, Scalar[dtype](0), TOL,
-                             String("particula ", p, " casilla ", c))
-    print("PASS con 65 particulas (varios bloques, tamano no redondo) sale igual")
+                             String("particle ", p, " cell ", c))
+    print("PASS with 65 particles (several blocks, non-round size) it comes out the same")
 
 
 def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
     """Asking for more boards than were allocated raises an error, not silent corruption."""
-    cfg = cfg_for(4, 8)                        # 32 particulas
+    cfg = cfg_for(4, 8)                        # 32 particles
     small = TicTacToeActor(ctx, 4, HIDDEN, Scalar[dtype](0.9))
     particles = Particles(ctx, cfg)
     outputs = StepOutputs(ctx, cfg)
@@ -285,8 +285,8 @@ def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
     except:
         failed = True
     if not failed:
-        raise Error("deberia rechazar 32 particulas con sitio para 4")
-    print("PASS el modelo rechaza mas tableros de los reservados")
+        raise Error("should reject 32 particles with room for 4")
+    print("PASS the model rejects more boards than were reserved")
 
 
 def test_critic_value_reaches_the_search(ctx: DeviceContext) raises:
@@ -323,7 +323,7 @@ def test_critic_value_reaches_the_search(ctx: DeviceContext) raises:
     ctx.synchronize()
     got = download[dtype](value, num_envs)
     for e in range(num_envs):
-        assert_close(got[e], c, TOL, String("V de la raiz del env ", e))
+        assert_close(got[e], c, TOL, String("V of the root of env ", e))
 
     # And the step's bootstrap: gamma * V if still alive, 0 if it ended.
     cfg2 = cfg_for(1, 2)
@@ -335,7 +335,7 @@ def test_critic_value_reaches_the_search(ctx: DeviceContext) raises:
     outputs = StepOutputs(ctx, cfg2)
     st = List[Scalar[dtype]]()
     for b in board9(0,0,0, 0,0,0, 0,0,0): st.append(b)      # sigue viva
-    for b in board9(1,1,0, -1,-1,0, 0,0,0): st.append(b)    # gana con la 2
+    for b in board9(1,1,0, -1,-1,0, 0,0,0): st.append(b)    # wins with 2
     write_into[dtype](particles.state, st)
     acts = List[Scalar[idx_dtype]]()
     acts.append(Scalar[idx_dtype](0)); acts.append(Scalar[idx_dtype](2))
@@ -349,11 +349,11 @@ def test_critic_value_reaches_the_search(ctx: DeviceContext) raises:
     ctx.synchronize()
     nv = download[dtype](outputs.next_value, 2)
     dsc = download[dtype](outputs.discount, 2)
-    assert_close(dsc[1], Scalar[dtype](0), TOL, "la particula 1 deberia acabar")
+    assert_close(dsc[1], Scalar[dtype](0), TOL, "particle 1 should end")
     # search_gamma in cfg_for is 1.0, so the live one's bootstrap is c.
-    assert_close(nv[0], c, TOL, "bootstrap de la particula viva")
+    assert_close(nv[0], c, TOL, "bootstrap of the live particle")
     assert_close(nv[1], Scalar[dtype](0), TOL,
-                 "una particula terminal no arrastra valor futuro")
+                 "a terminal particle carries no future value")
 
     # And without use_critic, V goes back to 0: both modes coexist.
     plain = TicTacToeActor(ctx, cfg.num_search_particles(), HIDDEN,
@@ -364,7 +364,7 @@ def test_critic_value_reaches_the_search(ctx: DeviceContext) raises:
     got0 = download[dtype](value, num_envs)
     for e in range(num_envs):
         assert_close(got0[e], Scalar[dtype](0), TOL,
-                     String("sin use_critic, V del env ", e, " deberia ser 0"))
+                     String("without use_critic, V of env ", e, " should be 0"))
 
     # Forma incompatible: se rechaza.
     bad = zero_critic_params(ctx, OBS_DIM, HIDDEN, 2)
@@ -374,8 +374,8 @@ def test_critic_value_reaches_the_search(ctx: DeviceContext) raises:
     except:
         failed = True
     if not failed:
-        raise Error("sync_critic_from deberia rechazar otra forma")
-    print("PASS el V del critico llega a la busqueda y respeta el terminal")
+        raise Error("sync_critic_from should reject a different shape")
+    print("PASS the critic's V reaches the search and respects the terminal")
 
 
 def main() raises:

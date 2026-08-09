@@ -92,15 +92,15 @@ def test_search_runs_without_nan(ctx: DeviceContext) raises:
 
     for p in range(p_total):
         if isnan(weights[p]):
-            raise Error("peso NaN en la particula ", p)
+            raise Error("NaN weight at particle ", p)
         if isnan(advantages[p]):
-            raise Error("ventaja NaN en la particula ", p)
+            raise Error("NaN advantage at particle ", p)
     for e in range(cfg.num_envs):
         if isnan(values[e]):
-            raise Error("valor NaN en el env ", e)
+            raise Error("NaN value in env ", e)
     for i in range(len(ess)):
         if isnan(ess[i]):
-            raise Error("ESS NaN en el indice ", i)
+            raise Error("NaN ESS at index ", i)
 
     # The weights are a per-env softmax: they have to sum to 1.
     for e in range(cfg.num_envs):
@@ -108,8 +108,8 @@ def test_search_runs_without_nan(ctx: DeviceContext) raises:
         for n in range(cfg.num_particles):
             total += weights[e * cfg.num_particles + n]
         assert_close(total, 1.0, Scalar[dtype](1e-4),
-                     String("los pesos del env ", e, " deberian sumar 1"))
-    print("PASS la busqueda corre sobre TTT sin NaN y los pesos suman 1")
+                     String("the weights of env ", e, " should sum to 1"))
+    print("PASS the search runs on TTT with no NaN and the weights sum to 1")
 
 
 def test_search_only_picks_legal_actions(ctx: DeviceContext) raises:
@@ -134,19 +134,19 @@ def test_search_only_picks_legal_actions(ctx: DeviceContext) raises:
     for e in range(cfg.num_envs):
         a = Int(final_action[e])
         if a < 0 or a >= NUM_ACTIONS:
-            raise Error("accion fuera de rango en el env ", e, ": ", a)
+            raise Error("action out of range in env ", e, ": ", a)
         if roots[e * NUM_CELLS + a] != CELL_EMPTY:
-            raise Error("el env ", e, " eligio la casilla OCUPADA ", a)
+            raise Error("env ", e, " chose the OCCUPIED cell ", a)
 
     for e in range(cfg.num_envs):
         for n in range(cfg.num_particles):
             a = Int(sampled[e * cfg.num_particles + n])
             if a < 0 or a >= NUM_ACTIONS:
-                raise Error("accion raiz fuera de rango en el env ", e, ": ", a)
+                raise Error("root action out of range in env ", e, ": ", a)
             if roots[e * NUM_CELLS + a] != CELL_EMPTY:
-                raise Error("la particula ", n, " del env ", e,
-                            " muestreo la casilla OCUPADA ", a)
-    print("PASS todas las acciones (finales y muestreadas) son legales")
+                raise Error("particle ", n, " of env ", e,
+                            " sampled the OCCUPIED cell ", a)
+    print("PASS every action (final and sampled) is legal")
 
 
 def test_search_is_reproducible(ctx: DeviceContext) raises:
@@ -176,11 +176,11 @@ def test_search_is_reproducible(ctx: DeviceContext) raises:
         else:
             for p in range(p_total):
                 assert_close(w[p], first[p], TOL,
-                             String("dos busquedas con la misma seed difieren en ", p))
+                             String("two searches with the same seed differ at ", p))
             for e in range(cfg.num_envs):
                 if Int(a[e]) != Int(first_actions[e]):
-                    raise Error("la accion del env ", e, " cambio entre corridas")
-    print("PASS la busqueda sobre TTT es reproducible (rival aleatorio incluido)")
+                    raise Error("the action of env ", e, " changed between runs")
+    print("PASS the search on TTT is reproducible (random opponent included)")
 
 
 def test_ess_stays_in_range(ctx: DeviceContext) raises:
@@ -203,16 +203,16 @@ def test_ess_stays_in_range(ctx: DeviceContext) raises:
     lo = Scalar[dtype](1) - Scalar[dtype](1e-4)
     hi = Scalar[dtype](cfg.num_particles) + Scalar[dtype](1e-4)
 
-    print("      ESS medio por profundidad:")
+    print("      mean ESS by depth:")
     for d in range(cfg.search_depth):
         total = Scalar[dtype](0)
         for e in range(cfg.num_envs):
             v = ess[d * cfg.num_envs + e]
             if v < lo or v > hi:
-                raise Error("ESS fuera de rango en depth ", d, " env ", e, ": ", v)
+                raise Error("ESS out of range at depth ", d, " env ", e, ": ", v)
             total += v
         print("        depth", d, "->", total / Scalar[dtype](cfg.num_envs))
-    print("PASS el ESS se queda en [1,", cfg.num_particles, "] en todas las profundidades")
+    print("PASS the ESS stays in [1,", cfg.num_particles, "] at every depth")
 
 
 def main() raises:

@@ -37,8 +37,8 @@ def main() raises:
     want_lse = read_f32("tests/golden/logsumexp_out.bin")
 
     if len(x) != ROWS * COLS:
-        raise Error("golden softmax_in con tamano raro: ", len(x),
-                    " (regenerar con gen_softmax.py?)")
+        raise Error("golden softmax_in with an odd size: ", len(x),
+                    " (regenerate with gen_softmax.py?)")
 
     with DeviceContext() as ctx:
         a = upload[dtype](ctx, x)
@@ -58,14 +58,14 @@ def main() raises:
     for r in range(ROWS):
         for c in range(COLS):
             assert_close(got_sm[r * COLS + c], want_softmax[r * COLS + c], TOL,
-                         String("softmax fila=", r, " col=", c))
-    print("PASS softmax_rows vs numpy (", ROWS, "filas x", COLS, ")")
+                         String("softmax row=", r, " col=", c))
+    print("PASS softmax_rows vs numpy (", ROWS, "rows x", COLS, ")")
 
     # The uniform row has to give exactly 1/COLS.
     uniform = Scalar[dtype](1.0) / Scalar[dtype](COLS)
     for c in range(COLS):
-        assert_close(got_sm[c], uniform, TOL, String("fila uniforme col=", c))
-    print("PASS softmax fila uniforme = 1/", COLS)
+        assert_close(got_sm[c], uniform, TOL, String("uniform row col=", c))
+    print("PASS softmax uniform row = 1/", COLS)
 
     # Every row has to sum to 1, including the +-1000 ones. This check is the one
     # that detects the overflow: if exp overflows, the row sums to nan.
@@ -74,8 +74,8 @@ def main() raises:
         for c in range(COLS):
             total += got_sm[r * COLS + c]
         assert_close(total, 1.0, Scalar[dtype](1e-5),
-                     String("la fila ", r, " no suma 1"))
-    print("PASS softmax suma 1 por fila (sin overflow en +-1000)")
+                     String("row ", r, " does not sum to 1"))
+    print("PASS softmax sums to 1 per row (no overflow at +-1000)")
 
     # The logsumexp is compared with a relative tolerance. The +1000 row gives
     # ~1002.77, and at that magnitude float32's ulp is already ~6e-5: asking for
@@ -86,7 +86,7 @@ def main() raises:
             scale = Scalar[dtype](1.0)
         rel = abs(got_lse[r] - want_lse[r]) / scale
         if rel > TOL:
-            raise Error("logsumexp fila=", r, ": got=", got_lse[r],
+            raise Error("logsumexp row=", r, ": got=", got_lse[r],
                         " want=", want_lse[r], " (error relativo=", rel, ")")
     print("PASS logsumexp_rows vs numpy")
 
@@ -136,14 +136,14 @@ def test_wide_rows(ctx: DeviceContext) raises:
             scale = Scalar[dtype](1.0)
         rel = abs(got_lse[r] - want_lse[r]) / scale
         if rel > TOL:
-            raise Error("wide logsumexp fila=", r, ": got=", got_lse[r],
+            raise Error("wide logsumexp row=", r, ": got=", got_lse[r],
                         " want=", want_lse[r])
         total = Scalar[dtype](0)
         for c in range(WIDE_COLS):
             total += got_sm[r * WIDE_COLS + c]
         assert_close(total, 1.0, Scalar[dtype](1e-5),
-                     String("la fila ancha ", r, " no suma 1"))
-    print("PASS filas de ", WIDE_COLS, " columnas (striding con TPB=", TPB, ")")
+                     String("the wide row ", r, " does not sum to 1"))
+    print("PASS rows of ", WIDE_COLS, " columns (striding with TPB=", TPB, ")")
 
 
 def test_log_softmax_matches_log_of_softmax(ctx: DeviceContext) raises:
@@ -177,6 +177,6 @@ def test_log_softmax_matches_log_of_softmax(ctx: DeviceContext) raises:
                      String("log softmax ", i))
         if got_sm[i] > Scalar[dtype](1e-6):
             assert_close(got_lsm[i], log(got_sm[i]), Scalar[dtype](1e-3),
-                         String("log_softmax vs log(softmax) en ", i))
-    print("PASS log_softmax_rows vs numpy, y coincide con log(softmax) donde "
-          "este no pierde precision")
+                         String("log_softmax vs log(softmax) at ", i))
+    print("PASS log_softmax_rows vs numpy, and matches log(softmax) where "
+          "the latter loses no precision")

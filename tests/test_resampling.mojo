@@ -70,11 +70,11 @@ def test_resample_indices_are_exact(ctx: DeviceContext) raises:
     idx = download[idx_dtype](scratch.indices, p_total)
     state = download[dtype](particles.state, p_total)
     for n in range(4):
-        assert_eq_int(Int(idx[n]), want[n], String("u=", us[n], " -> indice"))
+        assert_eq_int(Int(idx[n]), want[n], String("u=", us[n], " -> index"))
         # and the actual gather brought that particle's state across
         assert_close(state[n], Scalar[dtype](want[n]), TOL,
-                     String("el hueco ", n, " deberia tener el estado de ", want[n]))
-    print("PASS indices de resampling exactos y gather correcto")
+                     String("slot ", n, " should hold the state of ", want[n]))
+    print("PASS exact resampling indices and correct gather")
 
 
 def test_resample_resets_weights_but_keeps_gae(ctx: DeviceContext) raises:
@@ -114,13 +114,13 @@ def test_resample_resets_weights_but_keeps_gae(ctx: DeviceContext) raises:
 
     for n in range(4):
         assert_close(got_w[n], 0.0, TOL,
-                     String("el peso ", n, " deberia resetearse a 0"))
+                     String("weight ", n, " should reset to 0"))
         assert_close(got_gae[n], Scalar[dtype](10 + n), TOL,
-                     String("la gae ", n, " no deberia moverse"))
+                     String("the gae ", n, " should not move"))
         # and the resampling DID indeed reorder (they all copied number 2)
         assert_eq_int(Int(got_idx[n]), 2,
-                      String("el hueco ", n, " deberia copiar a la particula 2"))
-    print("PASS resampling: pesos a 0, gae preservada sin reordenar")
+                      String("slot ", n, " should copy particle 2"))
+    print("PASS resampling: weights to 0, gae preserved without reordering")
 
 
 def test_ess_uniform_vs_concentrated(ctx: DeviceContext) raises:
@@ -149,13 +149,13 @@ def test_ess_uniform_vs_concentrated(ctx: DeviceContext) raises:
     entropy = download[dtype](output.entropy, cfg.num_envs)
 
     assert_close(ess[0], Scalar[dtype](n_particles), Scalar[dtype](1e-3),
-                 "pesos uniformes -> ESS = N")
+                 "uniform weights -> ESS = N")
     assert_close(entropy[0], log(Scalar[dtype](n_particles)), Scalar[dtype](1e-4),
-                 "pesos uniformes -> entropia = log N")
+                 "uniform weights -> entropy = log N")
     assert_close(ess[1], 1.0, Scalar[dtype](1e-3),
-                 "peso concentrado -> ESS = 1")
+                 "concentrated weight -> ESS = 1")
     assert_close(entropy[1], 0.0, Scalar[dtype](1e-4),
-                 "peso concentrado -> entropia = 0")
+                 "concentrated weight -> entropy = 0")
     print("PASS ESS: uniforme", ess[0], "/ concentrado", ess[1])
 
 

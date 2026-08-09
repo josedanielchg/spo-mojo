@@ -31,7 +31,7 @@ def check_case(ctx: DeviceContext, which: Int, m: Int, k: Int, n: Int) raises:
     want = read_f32(GOLDEN + "linear" + String(which) + "_y.bin")
 
     if len(x) != m * k or len(w) != k * n or len(b) != n or len(want) != m * n:
-        raise Error("el golden del caso ", which, " no tiene las shapes esperadas")
+        raise Error("the golden for case ", which, " does not have the expected shapes")
 
     xd = upload[dtype](ctx, x)
     wd = upload[dtype](ctx, w)
@@ -55,8 +55,8 @@ def check_case(ctx: DeviceContext, which: Int, m: Int, k: Int, n: Int) raises:
             worst = d
             worst_at = i
     if worst > tol:
-        raise Error("caso ", which, ": la mayor diferencia es ", worst,
-                    " en el indice ", worst_at, " (got=", got[worst_at],
+        raise Error("case ", which, ": the largest difference is ", worst,
+                    " at index ", worst_at, " (got=", got[worst_at],
                     " want=", want[worst_at], ", tolerancia ", tol, ")")
 
     print("      case", which, " (", m, "x", k, ") @ (", k, "x", n,
@@ -68,7 +68,7 @@ def test_against_numpy(ctx: DeviceContext) raises:
     check_case(ctx, 0, 4, 18, 64)
     check_case(ctx, 1, 64, 64, 64)
     check_case(ctx, 2, 7, 5, 3)
-    print("PASS la capa lineal coincide con numpy en los tres casos")
+    print("PASS the linear layer matches numpy on all three cases")
 
 
 def test_bias_is_added_once(ctx: DeviceContext) raises:
@@ -101,9 +101,9 @@ def test_bias_is_added_once(ctx: DeviceContext) raises:
         for c in range(n):
             v = got[r * n + c]
             if abs(v - bs[c]) > Scalar[dtype](1e-6):
-                raise Error("con W=0 la salida deberia ser el bias: fila ", r,
-                            " col ", c, " dio ", v, " y el bias es ", bs[c])
-    print("PASS el bias se suma exactamente una vez (W=0 -> y = b)")
+                raise Error("with W=0 the output should be the bias: row ", r,
+                            " col ", c, " gave ", v, " and the bias is ", bs[c])
+    print("PASS the bias is added exactly once (W=0 -> y = b)")
 
 
 def test_identity_passes_input_through(ctx: DeviceContext) raises:
@@ -138,9 +138,9 @@ def test_identity_passes_input_through(ctx: DeviceContext) raises:
 
     for i in range(m * n):
         if abs(got[i] - xs[i]) > Scalar[dtype](1e-6):
-            raise Error("W=identidad deberia devolver la entrada: indice ", i,
-                        " dio ", got[i], " y la entrada era ", xs[i])
-    print("PASS W = identidad devuelve la entrada (la orientacion es correcta)")
+            raise Error("W=identity should return the input: index ", i,
+                        " gave ", got[i], " and the input was ", xs[i])
+    print("PASS W = identity returns the input (the orientation is right)")
 
 
 def main() raises:

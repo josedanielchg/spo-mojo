@@ -71,9 +71,9 @@ def test_fraction_zero_is_a_no_op(ctx: DeviceContext) raises:
     got = run_noise(ctx, logits, us, n_envs, Scalar[dtype](0))
     for i in range(n_envs * N_ACT):
         if got[i] != logits[i]:
-            raise Error("con fraction=0 el logit ", i, " cambio: ", logits[i],
+            raise Error("with fraction=0 the logit ", i, " cambio: ", logits[i],
                         " -> ", got[i])
-    print("PASS con fraction = 0 el ruido es inerte (bit a bit)")
+    print("PASS with fraction = 0 the noise is inert (bit for bit)")
 
 
 def test_matches_the_rlax_formula(ctx: DeviceContext) raises:
@@ -105,11 +105,11 @@ def test_matches_the_rlax_formula(ctx: DeviceContext) raises:
             want = (Scalar[dtype](1) - fraction) * logits[e * N_ACT + a] \
                    + fraction * noise
             assert_close(got[e * N_ACT + a], want, TOL,
-                         String("env ", e, " accion ", a))
+                         String("env ", e, " action ", a))
         # The noise is a Dirichlet: its components sum to 1.
         assert_close(noise_sum, Scalar[dtype](1), TOL,
-                     String("el ruido del env ", e, " deberia sumar 1"))
-    print("PASS el ruido coincide con la formula de rlax (Dirichlet alpha=1)")
+                     String("the noise of env ", e, " should sum to 1"))
+    print("PASS the noise matches rlax's formula (Dirichlet alpha=1)")
 
 
 def test_masked_actions_stay_masked(ctx: DeviceContext) raises:
@@ -131,11 +131,11 @@ def test_masked_actions_stay_masked(ctx: DeviceContext) raises:
     for a in range(N_ACT):
         if a % 2 == 0:
             if got[a] > Scalar[dtype](-1e30):
-                raise Error("la accion tapada ", a, " dejo de estarlo: ", got[a])
+                raise Error("the masked action ", a, " stopped being masked: ", got[a])
         else:
             if got[a] <= Scalar[dtype](-1e30):
-                raise Error("la accion legal ", a, " se tapo: ", got[a])
-    print("PASS las acciones tapadas siguen tapadas con fraction = 0.5")
+                raise Error("the legal action ", a, " got masked: ", got[a])
+    print("PASS masked actions stay masked with fraction = 0.5")
 
 
 def test_multi_block(ctx: DeviceContext) raises:
@@ -164,8 +164,8 @@ def test_multi_block(ctx: DeviceContext) raises:
         want = (Scalar[dtype](1) - fraction) * logits[e * N_ACT + a] \
                + fraction * noise
         assert_close(got[e * N_ACT + a], want, TOL,
-                     String("env ", e, " accion ", a))
-    print("PASS con 70 envs (varios bloques, tamano no redondo) sale igual")
+                     String("env ", e, " action ", a))
+    print("PASS with 70 envs (several blocks, non-round size) it comes out the same")
 
 
 def test_noise_flattens_a_peaked_prior(ctx: DeviceContext) raises:
@@ -191,9 +191,9 @@ def test_noise_flattens_a_peaked_prior(ctx: DeviceContext) raises:
         if got[a] > hi: hi = got[a]
     spread_after = hi - lo
     if spread_after >= spread_before:
-        raise Error("el ruido deberia aplanar: rango ", spread_before, " -> ",
+        raise Error("the noise should flatten: range ", spread_before, " -> ",
                     spread_after)
-    print("PASS el ruido aplana un prior picudo: rango ", spread_before, " -> ",
+    print("PASS the noise flattens a peaked prior: range ", spread_before, " -> ",
           spread_after)
 
 

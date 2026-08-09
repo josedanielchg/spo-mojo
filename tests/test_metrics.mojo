@@ -22,19 +22,19 @@ def check(got: Float64, want: Float64, tol: Float64, what: String) raises:
 def test_fmt_fixed() raises:
     """The formatting has to match "%.Nf", rounding and negatives included."""
     if fmt_fixed(1.0, 3) != String("1.000"):
-        raise Error("1.0 con 3 decimales: ", fmt_fixed(1.0, 3))
+        raise Error("1.0 to 3 decimals: ", fmt_fixed(1.0, 3))
     if fmt_fixed(0.5, 2) != String("0.50"):
-        raise Error("0.5 con 2 decimales: ", fmt_fixed(0.5, 2))
+        raise Error("0.5 to 2 decimals: ", fmt_fixed(0.5, 2))
     # Leading zeros in the fractional part: the classic bug.
     if fmt_fixed(1.0005, 3) != String("1.001"):
-        raise Error("1.0005 con 3 decimales: ", fmt_fixed(1.0005, 3))
+        raise Error("1.0005 to 3 decimals: ", fmt_fixed(1.0005, 3))
     if fmt_fixed(2.03, 2) != String("2.03"):
-        raise Error("2.03 con 2 decimales: ", fmt_fixed(2.03, 2))
+        raise Error("2.03 to 2 decimals: ", fmt_fixed(2.03, 2))
     if fmt_fixed(-1.5, 1) != String("-1.5"):
-        raise Error("negativo: ", fmt_fixed(-1.5, 1))
+        raise Error("negative: ", fmt_fixed(-1.5, 1))
     if fmt_fixed(0.0, 4) != String("0.0000"):
-        raise Error("cero: ", fmt_fixed(0.0, 4))
-    print("PASS fmt_fixed coincide con %.Nf")
+        raise Error("zero: ", fmt_fixed(0.0, 4))
+    print("PASS fmt_fixed matches %.Nf")
 
 
 def test_wilson_reference_values() raises:
@@ -54,9 +54,9 @@ def test_wilson_reference_values() raises:
     check(wilson_lo(968, 1000), 0.955175, tol, "wilson_lo 968/1000")
     check(wilson_hi(968, 1000), 0.977243, tol, "wilson_hi 968/1000")
     # And the degenerate case: with no games, there is no interval.
-    check(wilson_lo(0, 0), 0.0, tol, "wilson_lo sin muestras")
-    check(wilson_hi(0, 0), 0.0, tol, "wilson_hi sin muestras")
-    print("PASS intervalos de Wilson contra valores de referencia")
+    check(wilson_lo(0, 0), 0.0, tol, "wilson_lo with no samples")
+    check(wilson_hi(0, 0), 0.0, tol, "wilson_hi with no samples")
+    print("PASS Wilson intervals against reference values")
 
 
 def test_score_matches_the_exact_scale() raises:
@@ -65,7 +65,7 @@ def test_score_matches_the_exact_scale() raises:
     m = PlannerMetrics(mode="test", games=10000, iterations=64, exploration=0.02,
                        seed=1, total_runtime_s=1.0, total_moves=0, decisions=0,
                        total_simulations=0, x_wins=5849, o_wins=2881, draws=1270)
-    check(m.score(), 0.6484, 1e-9, "la puntuacion del azar exacto")
+    check(m.score(), 0.6484, 1e-9, "the exact random score")
 
     # All wins -> 1.0; all draws -> 0.5; all losses -> 0.
     allw = PlannerMetrics(mode="t", games=10, iterations=1, exploration=0.0, seed=0,
@@ -77,10 +77,10 @@ def test_score_matches_the_exact_scale() raises:
     alll = PlannerMetrics(mode="t", games=10, iterations=1, exploration=0.0, seed=0,
                           total_runtime_s=1.0, total_moves=0, decisions=0,
                           total_simulations=0, x_wins=0, o_wins=10, draws=0)
-    check(allw.score(), 1.0, 1e-9, "todo victorias")
-    check(alld.score(), 0.5, 1e-9, "todo empates")
-    check(alll.score(), 0.0, 1e-9, "todo derrotas")
-    print("PASS la puntuacion usa la escala 1 / 0.5 / 0")
+    check(allw.score(), 1.0, 1e-9, "all wins")
+    check(alld.score(), 0.5, 1e-9, "all draws")
+    check(alll.score(), 0.0, 1e-9, "all losses")
+    print("PASS the score uses the 1 / 0.5 / 0 scale")
 
 
 def test_csv_row_matches_the_shared_schema() raises:
@@ -98,13 +98,13 @@ def test_csv_row_matches_the_shared_schema() raises:
     want_cols = len(String(CSV_HEADER).split(","))
     got_cols = len(row.split(","))
     if got_cols != want_cols:
-        raise Error("la fila tiene ", got_cols, " columnas y la cabecera ",
+        raise Error("the row has ", got_cols, " columns and the header ",
                     want_cols)
 
     # The first column distinguishes the platform: the MCTS writes "mojo" (CPU).
     if not row.startswith("mojo-gpu,smc_vs_random,1189,64,"):
-        raise Error("el comienzo de la fila no es el esperado: ", row)
-    print("PASS la fila CSV cuadra con el esquema comun (", want_cols, "columnas )")
+        raise Error("the start of the row is not the expected one: ", row)
+    print("PASS the CSV row matches the shared schema (", want_cols, "columns )")
 
 
 def test_derived_rates() raises:
@@ -112,8 +112,8 @@ def test_derived_rates() raises:
     m = PlannerMetrics(mode="t", games=100, iterations=64, exploration=0.02, seed=1,
                        total_runtime_s=2.0, total_moves=350, decisions=200,
                        total_simulations=76800, x_wins=96, o_wins=2, draws=2)
-    check(m.simulations_per_second(), 38400.0, 1e-6, "pasos por segundo")
-    check(m.avg_decision_time_s(), 0.01, 1e-9, "tiempo por decision")
+    check(m.simulations_per_second(), 38400.0, 1e-6, "steps per second")
+    check(m.avg_decision_time_s(), 0.01, 1e-9, "time per decision")
 
     # With no decisions and no time, it must not blow up.
     z = PlannerMetrics(mode="t", games=0, iterations=1, exploration=0.0, seed=0,
@@ -121,8 +121,8 @@ def test_derived_rates() raises:
                        total_simulations=0, x_wins=0, o_wins=0, draws=0)
     _ = z.simulations_per_second()
     _ = z.avg_decision_time_s()
-    check(z.score(), 0.0, 1e-9, "puntuacion sin partidas")
-    print("PASS tasas derivadas y casos degenerados")
+    check(z.score(), 0.0, 1e-9, "score with no games")
+    print("PASS derived rates and degenerate cases")
 
 
 def main() raises:

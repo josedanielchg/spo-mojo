@@ -55,7 +55,7 @@ def make_inputs() -> List[Scalar[dtype]]:
 
 
 def make_weights() -> List[Scalar[dtype]]:
-    """Los pesos W [K, N], tambien deterministas."""
+    """The weights W [K, N], also deterministic."""
     out = List[Scalar[dtype]]()
     for i in range(K * N):
         out.append(Scalar[dtype](((i * 17) % 11) - 5) * Scalar[dtype](0.2))
@@ -154,10 +154,10 @@ def compare_grads(got: List[Scalar[dtype]], n: Int, ctx: DeviceContext,
             worst = rel
             worst_at = i
         if rel > TOL:
-            raise Error(name, "[", i, "]: analitico ", got[i], " vs medido ", num,
-                        " (error relativo ", rel, ")")
-    print("      ", name, ": ", n, " parametros, peor error relativo ", worst,
-          " (en el ", worst_at, ")")
+            raise Error(name, "[", i, "]: analytic ", got[i], " vs measured ", num,
+                        " (relative error ", rel, ")")
+    print("      ", name, ": ", n, " parameters, worst relative error ", worst,
+          " (at ", worst_at, ")")
 
 
 def test_all_three_gradients(ctx: DeviceContext) raises:
@@ -181,7 +181,7 @@ def test_all_three_gradients(ctx: DeviceContext) raises:
     compare_grads(got_dw, K * N, ctx, x, w, b, g, 1, "dW")
     compare_grads(got_db, N, ctx, x, w, b, g, 2, "db")
     compare_grads(got_dx, M * K, ctx, x, w, b, g, 0, "dx")
-    print("PASS los tres gradientes coinciden con las diferencias finitas")
+    print("PASS all three gradients match the finite differences")
 
 
 def test_db_is_the_column_sum(ctx: DeviceContext) raises:
@@ -206,9 +206,9 @@ def test_db_is_the_column_sum(ctx: DeviceContext) raises:
         for m in range(M):
             want += g[m * N + n]
         if abs(got[n] - want) > Scalar[dtype](1e-5):
-            raise Error("db[", n, "] dio ", got[n], " y la suma de columna es ",
+            raise Error("db[", n, "] gave ", got[n], " and the column sum is ",
                         want)
-    print("PASS db es exactamente la suma de dy por columnas")
+    print("PASS db is exactly the sum of dy over columns")
 
 
 def grads_with(ctx: DeviceContext, x: List[Scalar[dtype]],
@@ -242,19 +242,19 @@ def test_gradients_depend_on_the_right_things(ctx: DeviceContext) raises:
     base = grads_with(ctx, x, w, g)
     other = w.copy()
     for i in range(K * N):
-        other[i] = other[i] + Scalar[dtype](1.5)     # W muy distinto
+        other[i] = other[i] + Scalar[dtype](1.5)     # a very different W
     moved = grads_with(ctx, x, other, g)
 
     for i in range(K * N):
         if abs(base[i] - moved[i]) > Scalar[dtype](1e-6):
-            raise Error("dW cambio al cambiar W, y no deberia: indice ", i)
+            raise Error("dW changed when W changed, and it should not: index ", i)
     changed = False
     for i in range(K * N, K * N + M * K):
         if abs(base[i] - moved[i]) > Scalar[dtype](1e-6):
             changed = True
     if not changed:
-        raise Error("dx NO cambio al cambiar W, y deberia: dx = dy @ W^T")
-    print("PASS dW no depende de W, y dx si (los argumentos no estan cruzados)")
+        raise Error("dx did NOT change when W changed, and it should: dx = dy @ W^T")
+    print("PASS dW does not depend on W, and dx does (the arguments are not crossed)")
 
 
 def check_against_jax(ctx: DeviceContext, which: Int, m: Int, k: Int,
@@ -271,7 +271,7 @@ def check_against_jax(ctx: DeviceContext, which: Int, m: Int, k: Int,
     if (len(x) != m * k or len(w) != k * n or len(dy) != m * n
             or len(want_dw) != k * n or len(want_db) != n
             or len(want_dx) != m * k):
-        raise Error("el golden del caso ", which, " no tiene las shapes esperadas")
+        raise Error("the golden for case ", which, " does not have the expected shapes")
 
     dw = zeros[dtype](ctx, k * n)
     db = zeros[dtype](ctx, n)
@@ -309,7 +309,7 @@ def worst_abs(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
             worst = d
             at = i
     if worst > tol:
-        raise Error(what, ": diferencia ", worst, " en el indice ", at,
+        raise Error(what, ": difference ", worst, " at index ", at,
                     " (got=", got[at], " want=", want[at], ", tol ", tol, ")")
     return worst
 
@@ -322,11 +322,11 @@ def test_against_jax_autodiff(ctx: DeviceContext) raises:
     the forward's tile loop runs exactly once. Here there are cases with several
     tiles across all three dimensions and a degenerate 1x1x1 case.
     """
-    check_against_jax(ctx, 0, 3, 4, 8)       # la red mini, para cruzar con las FD
+    check_against_jax(ctx, 0, 3, 4, 8)       # the mini network, to cross-check against the FD
     check_against_jax(ctx, 1, 20, 18, 64)    # la primera capa real, batch ragged
-    check_against_jax(ctx, 2, 64, 64, 64)    # varios tiles en las tres dims
+    check_against_jax(ctx, 2, 64, 64, 64)    # several tiles across all three dims
     check_against_jax(ctx, 3, 1, 1, 1)       # degenerado
-    print("PASS los gradientes coinciden con el autodiff de JAX en los 4 casos")
+    print("PASS the gradients match JAX's autodiff on all 4 cases")
 
 
 def main() raises:

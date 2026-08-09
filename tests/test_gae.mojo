@@ -42,7 +42,7 @@ def check_case(ctx: DeviceContext, which: Int, b: Int, t: Int) raises:
     want_adv = read_f32(p + "adv.bin")
     want_tgt = read_f32(p + "targets.bin")
     if len(want_adv) != n:
-        raise Error("el golden del caso ", which, " no tiene la shape esperada")
+        raise Error("the golden for case ", which, " does not have the expected shape")
 
     adv = zeros[dtype](ctx, n)
     targets = zeros[dtype](ctx, n)
@@ -77,7 +77,7 @@ def test_against_stoix(ctx: DeviceContext) raises:
     check_case(ctx, 0, 4, 16)     # no truncation
     check_case(ctx, 1, 4, 16)     # WITH truncation
     check_case(ctx, 2, 8, 32)     # like tic-tac-toe
-    print("PASS la GAE truncada coincide con la de Stoix en los tres casos")
+    print("PASS the truncated GAE matches Stoix's on all three cases")
 
 
 def test_single_step_is_td_error(ctx: DeviceContext) raises:
@@ -103,11 +103,11 @@ def test_single_step_is_td_error(ctx: DeviceContext) raises:
     got_adv = download[dtype](adv, 1)[0]
     got_tgt = download[dtype](targets, 1)[0]
     if abs(got_adv - want_adv) > TOL:
-        raise Error("con T=1 la ventaja deberia ser el error TD ", want_adv,
-                    ", dio ", got_adv)
+        raise Error("with T=1 the advantage should be the TD error ", want_adv,
+                    ", gave ", got_adv)
     if abs(got_tgt - (Scalar[dtype](0.5) + want_adv)) > TOL:
-        raise Error("el objetivo deberia ser v_tm1 + ventaja")
-    print("PASS con un solo paso la GAE es exactamente el error TD")
+        raise Error("the target should be v_tm1 + advantage")
+    print("PASS with a single step the GAE is exactly the TD error")
 
 
 def test_truncation_cuts_the_accumulator(ctx: DeviceContext) raises:
@@ -137,11 +137,11 @@ def test_truncation_cuts_the_accumulator(ctx: DeviceContext) raises:
 
     # Step 1 (the last one) has nothing behind it: its advantage is its delta = 10.
     if abs(got[1] - Scalar[dtype](10)) > TOL:
-        raise Error("el ultimo paso deberia valer su delta (10), dio ", got[1])
+        raise Error("the last step should be worth its delta (10), gave ", got[1])
     # Step 0 is truncated: its delta is 1, and it must NOT carry the 10 from behind.
     if abs(got[0] - Scalar[dtype](1)) > TOL:
-        raise Error("el paso truncado deberia valer solo su delta (1) y no "
-                    "arrastrar lo de despues; dio ", got[0])
+        raise Error("the truncated step should be worth only its delta (1) and not "
+                    "carry what follows; gave ", got[0])
 
     # And to show that the check discriminates: without truncating, the same setup
     # DOES carry.
@@ -156,9 +156,9 @@ def test_truncation_cuts_the_accumulator(ctx: DeviceContext) raises:
     got2 = download[dtype](adv2, t_len)
     want2 = Scalar[dtype](1) + GAMMA * LAMBDA * Scalar[dtype](10)
     if abs(got2[0] - want2) > TOL:
-        raise Error("sin truncar, el paso 0 deberia arrastrar: esperaba ", want2,
-                    " y dio ", got2[0])
-    print("PASS la truncacion corta el acumulado pero conserva su propio delta")
+        raise Error("without truncation, step 0 should carry: expected ", want2,
+                    " and gave ", got2[0])
+    print("PASS truncation cuts the accumulation but keeps its own delta")
 
 
 def test_multiblock_batch(ctx: DeviceContext) raises:
@@ -211,9 +211,9 @@ def test_multiblock_batch(ctx: DeviceContext) raises:
             expected = want[from_end]
             v = got[seq * t + step]
             if abs(v - expected) > TOL:
-                raise Error("secuencia ", seq, " paso ", step, ": ", v,
-                            " y deberia ser ", expected)
-    print("PASS multi-bloque: las", b, "secuencias (3 bloques) dan lo mismo")
+                raise Error("sequence ", seq, " step ", step, ": ", v,
+                            " and should be ", expected)
+    print("PASS multi-block: the", b, "sequences (3 blocks) give the same")
 
 
 def main() raises:

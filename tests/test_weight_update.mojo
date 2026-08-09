@@ -66,13 +66,13 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     assert_close(download[dtype](particles.resample_td_weights, 1)[0], 3.0, TOL,
-                 "profundidad 0: peso")
+                 "depth 0: weight")
     assert_close(download[dtype](particles.gae, 1)[0], 3.0, TOL,
-                 "profundidad 0: gae")
+                 "depth 0: gae")
     assert_close(download[dtype](particles.value, 1)[0], 12.0, TOL,
-                 "profundidad 0: el valor nuevo releva al viejo")
+                 "depth 0: the new value replaces the old one")
     assert_eq_int(Int(download[idx_dtype](particles.depth, 1)[0]), 1,
-                  "profundidad 0: depth++")
+                  "depth 0: depth++")
 
     # Depth 1.
     r2 = List[Scalar[dtype]]();  r2.append(2.0)
@@ -83,12 +83,12 @@ def test_two_depths_by_hand(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     assert_close(download[dtype](particles.resample_td_weights, 1)[0], 4.0, TOL,
-                 "profundidad 1: peso acumulado")
+                 "depth 1: accumulated weight")
     assert_close(download[dtype](particles.gae, 1)[0], 4.0, TOL,
-                 "profundidad 1: gae acumulada")
+                 "depth 1: accumulated gae")
     assert_eq_int(Int(download[idx_dtype](particles.depth, 1)[0]), 2,
-                  "profundidad 1: depth++")
-    print("PASS dos profundidades a mano: peso 4, gae 4")
+                  "depth 1: depth++")
+    print("PASS two depths by hand: weight 4, gae 4")
 
 
 def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
@@ -117,9 +117,9 @@ def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     assert_close(download[dtype](particles.resample_td_weights, 1)[0], -9.0, TOL,
-                 "el paso que mata si cuenta")
+                 "the killing step does count")
     assert_eq_int(Int(download[idx_dtype](particles.terminal, 1)[0]), 1,
-                  "discount 0 tiene que marcar terminal")
+                  "discount 0 has to mark terminal")
 
     # Depth 1: it is already dead, so whatever comes gets ignored.
     r2 = List[Scalar[dtype]]();  r2.append(100.0)   # a huge reward on purpose
@@ -130,8 +130,8 @@ def test_death_marks_terminal_and_then_freezes(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     assert_close(download[dtype](particles.resample_td_weights, 1)[0], -9.0, TOL,
-                 "una particula muerta no puede seguir sumando peso")
-    print("PASS la muerte cuenta una vez y luego congela el peso")
+                 "a dead particle cannot go on adding weight")
+    print("PASS the death counts once and then freezes the weight")
 
 
 def test_dead_particle_gae_is_frozen_by_the_decay(ctx: DeviceContext) raises:
@@ -166,8 +166,8 @@ def test_dead_particle_gae_is_frozen_by_the_decay(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     assert_close(download[dtype](particles.gae, 1)[0], 7.0, TOL,
-                 "0^depth deberia anular el delta de una particula muerta")
-    print("PASS la gae de una particula muerta se congela por el decay")
+                 "0^depth should cancel a dead particle's delta")
+    print("PASS a dead particle's gae is frozen by the decay")
 
 
 def test_depth_zero_always_counts(ctx: DeviceContext) raises:
@@ -195,8 +195,8 @@ def test_depth_zero_always_counts(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     assert_close(download[dtype](particles.gae, 1)[0], -9.0, TOL,
-                 "el paso de profundidad 0 tiene que contar entero (0^0 = 1)")
-    print("PASS la profundidad 0 cuenta entera aunque el discount sea 0")
+                 "the depth-0 step has to count in full (0^0 = 1)")
+    print("PASS depth 0 counts in full even when the discount is 0")
 
 
 def test_many_particles_are_independent(ctx: DeviceContext) raises:
@@ -225,8 +225,8 @@ def test_many_particles_are_independent(ctx: DeviceContext) raises:
     for p in range(n):
         # td = 2p + (p+1) - p = 2p + 1
         assert_close(weights[p], Scalar[dtype](2 * p + 1), TOL,
-                     String("peso de la particula ", p))
-    print("PASS", n, "particulas independientes")
+                     String("weight of particle ", p))
+    print("PASS", n, "independent particles")
 
 
 def main() raises:

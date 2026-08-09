@@ -55,7 +55,7 @@ def compare(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
             worst = d
             at = i
     if worst > tol:
-        raise Error(what, ": la mayor diferencia es ", worst, " en el indice ", at,
+        raise Error(what, ": the largest difference is ", worst, " at index ", at,
                     " (got=", got[at], " want=", want[at], ", tol ", tol, ")")
     return worst
 
@@ -71,7 +71,7 @@ def check_batch(ctx: DeviceContext, hidden: Int, m: Int) raises:
     want_a2 = read_f32(t + "a2_" + String(m) + ".bin")
     want_v = read_f32(t + "v" + String(m) + ".bin")
     if len(x) != m * IN_DIM:
-        raise Error("el golden de entrada del batch ", m, " no cuadra")
+        raise Error("the input golden for batch ", m, " does not add up")
 
     critic_forward(ctx, params, cache, upload[dtype](ctx, x), m)
     ctx.synchronize()
@@ -87,11 +87,11 @@ def check_batch(ctx: DeviceContext, hidden: Int, m: Int) raises:
     t3 = Scalar[dtype](3e-5) * sqrt(Scalar[dtype](hidden))
 
     e1 = compare(got_a1, want_a1, m * hidden, t1,
-                 String("h", hidden, " batch ", m, " capa 1"))
+                 String("h", hidden, " batch ", m, " layer 1"))
     e2 = compare(got_a2, want_a2, m * hidden, t2,
-                 String("h", hidden, " batch ", m, " capa 2"))
+                 String("h", hidden, " batch ", m, " layer 2"))
     e3 = compare(got_v, want_v, m * OUT_DIM, t3,
-                 String("h", hidden, " batch ", m, " salida V"))
+                 String("h", hidden, " batch ", m, " V output"))
 
     print("      hidden", hidden, " batch", m,
           " error max: a1", e1, " a2", e2, " V", e3)
@@ -110,7 +110,7 @@ def test_against_numpy(ctx: DeviceContext) raises:
     for i in range(len(hiddens)):
         check_batch(ctx, hiddens[i], 5)     # ragged: 5 is not a multiple of 16
         check_batch(ctx, hiddens[i], 64)    # several tiles across the batch
-    print("PASS el MLP coincide con numpy en las 3 arquitecturas (a1, a2 y V)")
+    print("PASS the MLP matches numpy on all 3 architectures (a1, a2 and V)")
 
 
 def test_relu_actually_fires(ctx: DeviceContext) raises:
@@ -135,23 +135,23 @@ def test_relu_actually_fires(ctx: DeviceContext) raises:
     zeros1 = 0
     for i in range(m * hidden):
         if a1[i] < Scalar[dtype](0):
-            raise Error("a1 tiene un valor negativo en ", i, ": ", a1[i])
+            raise Error("a1 has a negative value at ", i, ": ", a1[i])
         if a1[i] == Scalar[dtype](0):
             zeros1 += 1
     zeros2 = 0
     for i in range(m * hidden):
         if a2[i] < Scalar[dtype](0):
-            raise Error("a2 tiene un valor negativo en ", i, ": ", a2[i])
+            raise Error("a2 has a negative value at ", i, ": ", a2[i])
         if a2[i] == Scalar[dtype](0):
             zeros2 += 1
 
     total = m * hidden
     if zeros1 == 0 or zeros2 == 0:
-        raise Error("el ReLU no recorto nada: el golden no distinguiria una red "
-                    "con ReLU de una sin el")
-    print("      apagadas por el ReLU: capa1", Scalar[dtype](zeros1) / Scalar[dtype](total),
+        raise Error("the ReLU clipped nothing: the golden could not tell a network "
+                    "with a ReLU from one without")
+    print("      switched off by the ReLU: layer1", Scalar[dtype](zeros1) / Scalar[dtype](total),
           " capa2", Scalar[dtype](zeros2) / Scalar[dtype](total))
-    print("PASS el ReLU recorta de verdad (hay ceros y ningun negativo)")
+    print("PASS the ReLU really clips (there are zeros and no negatives)")
 
 
 def test_relu_is_exact(ncx: DeviceContext) raises:
@@ -173,8 +173,8 @@ def test_relu_is_exact(ncx: DeviceContext) raises:
     for i in range(n):
         want = vals[i] if vals[i] > Scalar[dtype](0) else Scalar[dtype](0)
         if got[i] != want:
-            raise Error("relu(", vals[i], ") dio ", got[i], " y deberia ser ", want)
-    print("PASS relu exacto en negativos, cero y valores diminutos")
+            raise Error("relu(", vals[i], ") gave ", got[i], " and should be ", want)
+    print("PASS relu exact on negatives, zero and tiny values")
 
 
 def main() raises:

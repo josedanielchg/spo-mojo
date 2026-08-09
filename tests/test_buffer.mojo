@@ -52,18 +52,18 @@ def test_buffer_fifo_and_wraparound() raises:
     """
     buf = TrajectoryBuffer(3, T_LEN, OBS_DIM)
     if buf.size() != 0:
-        raise Error("un buffer recien creado deberia estar vacio")
+        raise Error("a freshly created buffer should be empty")
 
     for v in range(1, 4):
         add_marked(buf, v)
     if buf.size() != 3 or not buf.is_full():
-        raise Error("tras 3 secuencias con capacidad 3 deberia estar lleno")
+        raise Error("after 3 sequences with capacity 3 it should be full")
 
     # Two more: they overwrite 1 and 2.
     add_marked(buf, 4)
     add_marked(buf, 5)
     if buf.size() != 3:
-        raise Error("la capacidad no puede crecer: ", buf.size())
+        raise Error("the capacity cannot grow: ", buf.size())
 
     # Slot 0 now holds 4, slot 1 holds 5, and slot 2 still holds 3.
     want = List[Int](); want.append(4); want.append(5); want.append(3)
@@ -73,9 +73,9 @@ def test_buffer_fifo_and_wraparound() raises:
         expected = seq_obs(want[slot])
         for i in range(T_LEN * OBS_DIM):
             if got[i] != expected[i]:
-                raise Error("el hueco ", slot, " deberia tener la secuencia ",
-                            want[slot], " pero el valor ", i, " es ", got[i])
-    print("PASS el buffer es FIFO y da la vuelta sin mezclar secuencias")
+                raise Error("slot ", slot, " should hold sequence ",
+                            want[slot], " but the value ", i, " is ", got[i])
+    print("PASS the buffer is FIFO and wraps without mixing sequences")
 
 
 def test_buffer_fields_dont_cross() raises:
@@ -97,18 +97,18 @@ def test_buffer_fields_dont_cross() raises:
     got_t = buf.gather_steps(idx, 2)
     for i in range(T_LEN):
         if got_r[i] != r[i]:
-            raise Error("reward[", i, "] salio ", got_r[i], " y era ", r[i])
+            raise Error("reward[", i, "] came out ", got_r[i], " and was ", r[i])
         if got_d[i] != d[i]:
-            raise Error("done[", i, "] salio ", got_d[i], " y era ", d[i])
+            raise Error("done[", i, "] came out ", got_d[i], " and was ", d[i])
         if got_t[i] != tr[i]:
-            raise Error("truncated[", i, "] salio ", got_t[i])
+            raise Error("truncated[", i, "] came out ", got_t[i])
 
     # And the bootstrap_obs are not the obs.
     got_obs = buf.gather(idx)
     got_boot = buf.gather_bootstrap(idx)
     if got_obs[0] == got_boot[0]:
-        raise Error("obs y bootstrap_obs no deberian coincidir en este montaje")
-    print("PASS los campos del buffer no se cruzan entre si")
+        raise Error("obs and bootstrap_obs should not match in this setup")
+    print("PASS the buffer's fields do not cross over into each other")
 
 
 def test_buffer_sampling_is_deterministic() raises:
@@ -123,18 +123,18 @@ def test_buffer_sampling_is_deterministic() raises:
 
     for i in range(20):
         if a[i] != b[i]:
-            raise Error("la misma semilla deberia dar los mismos indices")
+            raise Error("the same seed should give the same indices")
         if a[i] < 0 or a[i] >= buf.size():
-            raise Error("indice fuera de las secuencias validas: ", a[i])
+            raise Error("index outside the valid sequences: ", a[i])
 
     same = True
     for i in range(20):
         if a[i] != c[i]:
             same = False
     if same:
-        raise Error("dos semillas distintas dieron exactamente los mismos "
-                    "indices: la semilla no se esta usando")
-    print("PASS el muestreo es determinista, depende de la semilla y no se sale")
+        raise Error("two different seeds gave exactly the same "
+                    "indices: the seed is not being used")
+    print("PASS sampling is deterministic, depends on the seed and stays in range")
 
 
 def test_gather_respects_order_and_repeats() raises:
@@ -155,7 +155,7 @@ def test_gather_respects_order_and_repeats() raises:
     got = buf.gather(idx)
     span = T_LEN * OBS_DIM
     if len(got) != len(idx) * span:
-        raise Error("gather deberia devolver ", len(idx), " secuencias")
+        raise Error("gather should return ", len(idx), " sequences")
 
     want_values = List[Int]()
     want_values.append(4); want_values.append(1); want_values.append(3)
@@ -164,14 +164,14 @@ def test_gather_respects_order_and_repeats() raises:
         expected = seq_obs(want_values[k])
         for i in range(span):
             if got[k * span + i] != expected[i]:
-                raise Error("la posicion ", k, " del batch deberia ser la "
-                            "secuencia ", want_values[k], ", pero el valor ", i,
-                            " es ", got[k * span + i])
+                raise Error("position ", k, " of the batch should be "
+                            "sequence ", want_values[k], ", but the value ", i,
+                            " is ", got[k * span + i])
 
     # The same for the per-step fields and for the bootstrap_obs.
     got_r = buf.gather_steps(idx, 0)
     if len(got_r) != len(idx) * T_LEN:
-        raise Error("gather_steps deberia devolver ", len(idx), "x", T_LEN)
+        raise Error("gather_steps should return ", len(idx), "x", T_LEN)
     for k in range(len(idx)):
         expected = seq_steps(want_values[k])
         for i in range(T_LEN):
@@ -184,7 +184,7 @@ def test_gather_respects_order_and_repeats() raises:
         for i in range(span):
             if got_b[k * span + i] != expected[i]:
                 raise Error("gather_bootstrap posicion ", k, " valor ", i)
-    print("PASS gather respeta el orden pedido y admite indices repetidos")
+    print("PASS gather respects the requested order and accepts repeated indices")
 
 
 def test_sampling_more_than_stored() raises:
@@ -199,16 +199,16 @@ def test_sampling_more_than_stored() raises:
 
     idx = buf.sample_indices(32, UInt32(5), UInt32(0))
     if len(idx) != 32:
-        raise Error("deberia devolver 32 indices")
+        raise Error("should return 32 indices")
     for i in range(32):
         if idx[i] < 0 or idx[i] >= 2:
-            raise Error("indice ", idx[i], " fuera de las 2 secuencias validas")
+            raise Error("index ", idx[i], " outside the 2 valid sequences")
 
     # And the gather of that large batch does not blow up.
     got = buf.gather(idx)
     if len(got) != 32 * T_LEN * OBS_DIM:
-        raise Error("el gather del batch grande no tiene el tamano esperado")
-    print("PASS se pueden pedir mas muestras que secuencias (con reemplazo)")
+        raise Error("the big batch's gather does not have the expected size")
+    print("PASS more samples than sequences can be requested (with replacement)")
 
 
 def test_buffer_rejects_bad_input() raises:
@@ -228,7 +228,7 @@ def test_buffer_rejects_bad_input() raises:
     except:
         failed = True
     if not failed:
-        raise Error("deberia rechazar una secuencia con menos pasos de la cuenta")
+        raise Error("should reject a sequence with fewer steps than required")
 
     # And an empty buffer does not allow sampling.
     empty = TrajectoryBuffer(2, T_LEN, OBS_DIM)
@@ -238,8 +238,8 @@ def test_buffer_rejects_bad_input() raises:
     except:
         failed2 = True
     if not failed2:
-        raise Error("muestrear de un buffer vacio deberia dar error")
-    print("PASS el buffer rechaza secuencias mal formadas y el muestreo en vacio")
+        raise Error("sampling from an empty buffer should raise")
+    print("PASS the buffer rejects malformed sequences and sampling when empty")
 
 
 def test_q_roundtrip_and_validation() raises:
@@ -264,7 +264,7 @@ def test_q_roundtrip_and_validation() raises:
         expected = q_for(want_v[k])
         for i in range(span):
             if got[k * span + i] != expected[i]:
-                raise Error("q de la secuencia ", want_v[k], " valor ", i,
+                raise Error("q of sequence ", want_v[k], " valor ", i,
                             ": ", got[k * span + i], " != ", expected[i])
 
     # A q with the wrong size is rejected.
@@ -278,7 +278,7 @@ def test_q_roundtrip_and_validation() raises:
     except:
         failed = True
     if not failed:
-        raise Error("deberia rechazar una q con menos valores de la cuenta")
+        raise Error("should reject a q with fewer values than required")
 
     # And a buffer without q does not allow asking for it.
     plain = TrajectoryBuffer(2, T_LEN, OBS_DIM)
@@ -289,8 +289,8 @@ def test_q_roundtrip_and_validation() raises:
     except:
         failed2 = True
     if not failed2:
-        raise Error("un buffer creado sin q no deberia dejar pedir gather_q")
-    print("PASS la q del buffer va y vuelve intacta, y valida su tamano")
+        raise Error("a buffer created without q should not allow gather_q")
+    print("PASS the buffer's q goes in and comes back intact, and its size is validated")
 
 
 def main() raises:

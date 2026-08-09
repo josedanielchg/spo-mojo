@@ -70,7 +70,7 @@ def check_sum(ctx: DeviceContext, rows: Int, row_size: Int) raises:
     got = download[dtype](o, rows)
     for r in range(rows):
         assert_close(got[r], host_sum(data, r, row_size), TOL,
-                     String("sum_rows row_size=", row_size, " fila=", r))
+                     String("sum_rows row_size=", row_size, " row=", r))
     print("PASS sum_rows row_size", row_size)
 
 
@@ -89,7 +89,7 @@ def check_warp_sum(ctx: DeviceContext, rows: Int, row_size: Int) raises:
     got = download[dtype](o, rows)
     for r in range(rows):
         assert_close(got[r], host_sum(data, r, row_size), TOL,
-                     String("warp_sum_rows row_size=", row_size, " fila=", r))
+                     String("warp_sum_rows row_size=", row_size, " row=", r))
     print("PASS warp_sum_rows row_size", row_size)
 
 
@@ -106,7 +106,7 @@ def check_max(ctx: DeviceContext, rows: Int, row_size: Int) raises:
     for r in range(rows):
         want = data[r * row_size + host_argmax(data, r, row_size)]
         assert_close(got[r], want, TOL,
-                     String("max_rows row_size=", row_size, " fila=", r))
+                     String("max_rows row_size=", row_size, " row=", r))
     print("PASS max_rows row_size", row_size)
 
 
@@ -122,7 +122,7 @@ def check_argmax(ctx: DeviceContext, rows: Int, row_size: Int) raises:
     got = download[idx_dtype](o, rows)
     for r in range(rows):
         assert_eq_int(Int(got[r]), host_argmax(data, r, row_size),
-                      String("argmax_rows row_size=", row_size, " fila=", r))
+                      String("argmax_rows row_size=", row_size, " row=", r))
     print("PASS argmax_rows row_size", row_size)
 
 
@@ -145,8 +145,8 @@ def check_argmax_all_tied(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     got = download[idx_dtype](o, 1)
-    assert_eq_int(Int(got[0]), 0, "argmax con toda la fila empatada")
-    print("PASS argmax_rows empates -> indice menor")
+    assert_eq_int(Int(got[0]), 0, "argmax with the whole row tied")
+    print("PASS argmax_rows ties -> lowest index")
 
 
 def main() raises:

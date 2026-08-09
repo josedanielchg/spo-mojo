@@ -30,7 +30,7 @@ comptime GOLDEN = String("tests/golden/")
 
 def board9(c0: Int, c1: Int, c2: Int, c3: Int, c4: Int,
            c5: Int, c6: Int, c7: Int, c8: Int) -> List[Scalar[dtype]]:
-    """Un tablero legible: 1 = mia, -1 = suya, 0 = vacia."""
+    """A readable board: 1 = mine, -1 = theirs, 0 = empty."""
     out = List[Scalar[dtype]]()
     out.append(Scalar[dtype](c0)); out.append(Scalar[dtype](c1))
     out.append(Scalar[dtype](c2)); out.append(Scalar[dtype](c3))
@@ -55,7 +55,7 @@ def load_actor(ctx: DeviceContext, hidden: Int) raises -> Actor:
 
 
 def check_width(ctx: DeviceContext, hidden: Int, m: Int) raises:
-    """Compara logits enmascarados y probabilidades contra el golden."""
+    """Compares masked logits and probabilities against the golden."""
     tag = String("actor_h", hidden, "_")
     actor = load_actor(ctx, hidden)
 
@@ -77,14 +77,14 @@ def check_width(ctx: DeviceContext, hidden: Int, m: Int) raises:
         if want_masked[i] == NEG_INF:
             if got_masked[i] != NEG_INF:
                 raise Error("h", hidden, " m", m, " logit ", i,
-                            " deberia estar tapado y vale ", got_masked[i])
+                            " should be masked and is ", got_masked[i])
         else:
             assert_close(got_masked[i], want_masked[i], TOL,
                          String("h", hidden, " m", m, " logit ", i))
         assert_close(got_probs[i], want_probs[i], TOL,
                      String("h", hidden, " m", m, " prob ", i))
     print("PASS actor h=", hidden, " m=", m,
-          " coincide con el golden (logits y politica)")
+          " matches the golden (logits and policy)")
 
 
 def test_actor_matches_golden(ctx: DeviceContext) raises:
@@ -134,19 +134,19 @@ def test_illegal_cells_get_exactly_zero(ctx: DeviceContext) raises:
             occupied = boards[e * NUM_CELLS + c] != Scalar[dtype](0)
             if occupied:
                 if v != Scalar[dtype](0):
-                    raise Error("la casilla ocupada ", c, " del tablero ", e,
-                                " tiene probabilidad ", v, " y deberia ser 0")
+                    raise Error("occupied cell ", c, " of board ", e,
+                                " has probability ", v, " and should be 0")
             elif v <= Scalar[dtype](0):
-                raise Error("la casilla libre ", c, " del tablero ", e,
-                            " tiene probabilidad ", v)
+                raise Error("free cell ", c, " of board ", e,
+                            " has probability ", v)
             total += v
         assert_close(total, Scalar[dtype](1), TOL,
-                     String("la fila ", e, " deberia sumar 1"))
+                     String("row ", e, " should sum to 1"))
 
     # The second board has only cell 8 free: all the mass goes there.
     assert_close(p[NUM_ACTIONS + 8], Scalar[dtype](1), TOL,
-                 "con una sola casilla libre, su probabilidad tiene que ser 1")
-    print("PASS las casillas ocupadas salen a cero exacto y las filas suman 1")
+                 "with a single free cell, its probability has to be 1")
+    print("PASS occupied cells come out exactly zero and rows sum to 1")
 
 
 def test_masking_changes_the_ranking(ctx: DeviceContext) raises:
@@ -159,7 +159,7 @@ def test_masking_changes_the_ranking(ctx: DeviceContext) raises:
     """
     actor = load_actor(ctx, 64)
     n = 1
-    board = board9(0,0,0, 0,0,0, 0,0,0)          # todo libre
+    board = board9(0,0,0, 0,0,0, 0,0,0)          # all free
     state = upload[dtype](ctx, board)
     obs = zero_buffer[dtype](ctx, n * OBS_DIM)
     ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
@@ -187,14 +187,14 @@ def test_masking_changes_the_ranking(ctx: DeviceContext) raises:
     p1 = download[dtype](probs, NUM_ACTIONS)
 
     if p1[best] != Scalar[dtype](0):
-        raise Error("la casilla tapada ", best, " sigue con probabilidad ",
+        raise Error("the masked cell ", best, " still has probability ",
                     p1[best])
     best2 = 0
     for c in range(1, NUM_ACTIONS):
         if p1[c] > p1[best2]:
             best2 = c
     if best2 == best:
-        raise Error("tras tapar la favorita deberia ganar otra casilla")
+        raise Error("after masking the favourite another cell should win")
 
     # And the remaining ones keep their relative proportions: masking a cell
     # renormalises, it does not reorder. If this failed, the masking would be
@@ -208,8 +208,8 @@ def test_masking_changes_the_ranking(ctx: DeviceContext) raises:
             # p1[c]/p1[d] has to be p0[c]/p0[d]; it is compared as a cross
             # product so as not to divide.
             assert_close(p1[c] * p0[d], p1[d] * p0[c], Scalar[dtype](1e-4),
-                         String("proporcion entre ", c, " y ", d))
-    print("PASS tapar la favorita cambia la eleccion y solo renormaliza el resto")
+                         String("ratio between ", c, " y ", d))
+    print("PASS masking the favourite changes the choice and only renormalises the rest")
 
 
 def test_full_board_does_not_produce_nan(ctx: DeviceContext) raises:
@@ -237,11 +237,11 @@ def test_full_board_does_not_produce_nan(ctx: DeviceContext) raises:
     for c in range(NUM_ACTIONS):
         v = p[c]
         if v != v:                        # nan != nan
-            raise Error("la casilla ", c, " salio nan con el tablero lleno")
+            raise Error("cell ", c, " came out nan on a full board")
         total += v
     assert_close(total, Scalar[dtype](1), TOL,
-                 "incluso con todo tapado la fila tiene que sumar 1")
-    print("PASS un tablero lleno degenera a uniforme en vez de dar nan")
+                 "even with everything masked the row has to sum to 1")
+    print("PASS a full board degenerates to uniform instead of giving nan")
 
 
 def test_mask_comes_from_the_state(ctx: DeviceContext) raises:
@@ -269,8 +269,8 @@ def test_mask_comes_from_the_state(ctx: DeviceContext) raises:
             want = Scalar[dtype](1) if boards[e * NUM_CELLS + c] == 0 \
                    else Scalar[dtype](0)
             assert_close(got[e * NUM_ACTIONS + c], want, TOL,
-                         String("mascara del tablero ", e, " casilla ", c))
-    print("PASS la mascara sale del estado y coincide con las casillas vacias")
+                         String("mask of board ", e, " cell ", c))
+    print("PASS the mask comes from the state and matches the empty cells")
 
 
 def test_forward_log_is_consistent_with_forward(ctx: DeviceContext) raises:
@@ -310,16 +310,16 @@ def test_forward_log_is_consistent_with_forward(ctx: DeviceContext) raises:
         for c in range(NUM_ACTIONS):
             i = e * NUM_ACTIONS + c
             if lp[i] != lp[i]:
-                raise Error("log pi es NaN en el tablero ", e, " casilla ", c)
+                raise Error("log pi is NaN on board ", e, " cell ", c)
             if boards[e * NUM_CELLS + c] != Scalar[dtype](0):
                 if lp[i] > Scalar[dtype](-1e30):
-                    raise Error("la casilla ocupada ", c, " del tablero ", e,
-                                " deberia tener log pi muy negativo, y vale ",
+                    raise Error("occupied cell ", c, " of board ", e,
+                                " should have a very negative log pi, and is ",
                                 lp[i])
             else:
                 assert_close(exp(lp[i]), p[i], Scalar[dtype](1e-5),
                              String("exp(log pi) vs pi en ", e, ",", c))
-    print("PASS forward_log coincide con log(forward) y no produce NaN")
+    print("PASS forward_log matches log(forward) and produces no NaN")
 
 
 def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
@@ -340,12 +340,12 @@ def test_rejects_more_boards_than_reserved(ctx: DeviceContext) raises:
     except:
         failed = True
     if not failed:
-        raise Error("deberia rechazar 8 tableros con sitio para 2")
+        raise Error("should reject 8 boards with room for 2")
 
     # And with the ones that do fit, it works.
     small.forward(ctx, state, obs, 2)
     ctx.synchronize()
-    print("PASS el actor rechaza mas tableros de los reservados")
+    print("PASS the actor rejects more boards than were reserved")
 
 
 def test_argmax_of_masked_policy_is_always_legal(ctx: DeviceContext) raises:
@@ -393,18 +393,18 @@ def test_argmax_of_masked_policy_is_always_legal(ctx: DeviceContext) raises:
             if p[e * NUM_ACTIONS + c] > p[e * NUM_ACTIONS + best]:
                 best = c
         if boards[e * NUM_CELLS + best] != Scalar[dtype](0):
-            raise Error("el argmax del tablero ", e, " cayo en la casilla ",
-                        best, ", que esta OCUPADA: ttt_apply pisaria la ficha "
-                        "del rival")
+            raise Error("the argmax of board ", e, " landed on cell ",
+                        best, ", which is OCCUPIED: ttt_apply would overwrite the "
+                        "opponent's piece")
         # And the total mass is still 1: if the softmax had degenerated, the
         # argmax could be choosing among zeros.
         total = Scalar[dtype](0)
         for c in range(NUM_ACTIONS):
             total += p[e * NUM_ACTIONS + c]
         assert_close(total, Scalar[dtype](1), Scalar[dtype](1e-5),
-                     String("la fila ", e, " deberia sumar 1"))
-    print("PASS el argmax de la politica enmascarada nunca cae en casilla "
-          "ocupada (60 tableros)")
+                     String("row ", e, " should sum to 1"))
+    print("PASS the masked policy's argmax never lands on an occupied "
+          "cell (60 boards)")
 
 
 def main() raises:

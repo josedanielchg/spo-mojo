@@ -48,13 +48,13 @@ def check_scans(ctx: DeviceContext, rows: Int, row_size: Int) raises:
             i = r * row_size + c
             # the exclusive one is what was accumulated before this element
             assert_close(got_exc[i], running, TOL,
-                         String("exclusive fila=", r, " col=", c))
+                         String("exclusive row=", r, " col=", c))
             running += data[i]
             # and the inclusive one what was accumulated afterwards
             assert_close(got_inc[i], running, TOL,
-                         String("inclusive fila=", r, " col=", c))
+                         String("inclusive row=", r, " col=", c))
         assert_close(got_inc[r * row_size + row_size - 1], running, TOL,
-                     String("el ultimo del inclusivo no es la suma, fila=", r))
+                     String("the last of the inclusive is not the sum, row=", r))
     print("PASS scans row_size", row_size)
 
 
@@ -88,8 +88,8 @@ def check_histogram_positions(ctx: DeviceContext) raises:
 
     got = download[dtype](o, n)
     for i in range(n):
-        assert_close(got[i], want[i], TOL, String("offset de histograma ", i))
-    print("PASS exclusive scan -> offsets de histograma")
+        assert_close(got[i], want[i], TOL, String("histogram offset ", i))
+    print("PASS exclusive scan -> histogram offsets")
 
 
 def main() raises:

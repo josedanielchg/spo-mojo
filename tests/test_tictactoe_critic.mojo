@@ -58,7 +58,7 @@ def constant_model(ctx: DeviceContext, max_batch: Int,
     """A model whose critic always returns `c`, whatever the board."""
     model = TicTacToeCritic(ctx, max_batch, HIDDEN, Scalar[dtype](1))
     b3 = List[Scalar[dtype]](); b3.append(c)
-    write_into[dtype](model.params.b3, b3)      # el resto ya esta a cero
+    write_into[dtype](model.params.b3, b3)      # the rest is already zero
     ctx.synchronize()
     return model^
 
@@ -88,15 +88,15 @@ def test_eval_root_uses_the_network(ctx: DeviceContext) raises:
     got_logits = download[dtype](logits, num_envs * NUM_ACTIONS)
     for e in range(num_envs):
         assert_close(got_value[e], Scalar[dtype](0.375), TOL,
-                     String("V de la raiz del env ", e))
+                     String("V of the root of env ", e))
         # And the prior is still masked just as without a critic: adding the
         # value cannot have broken the part that already worked.
         for c in range(NUM_ACTIONS):
             want = Scalar[dtype](0) if boards[e * NUM_CELLS + c] == CELL_EMPTY \
                    else NEG_INF
             assert_close(got_logits[e * NUM_ACTIONS + c], want, TOL,
-                         String("prior env ", e, " casilla ", c))
-    print("PASS eval_root toma V de la red y mantiene el prior enmascarado")
+                         String("prior env ", e, " cell ", c))
+    print("PASS eval_root takes V from the network and keeps the prior masked")
 
 
 def run_step(ctx: DeviceContext, model: TicTacToeCritic, cfg: SPOConfig,
@@ -157,12 +157,12 @@ def test_bootstrap_formula(ctx: DeviceContext) raises:
     got = run_step(ctx, model, cfg, boards, actions, us)
     nv0 = got[0]; nv1 = got[1]; d0 = got[2]; d1 = got[3]
 
-    assert_close(d0, Scalar[dtype](1), TOL, "la particula 0 deberia seguir viva")
-    assert_close(d1, Scalar[dtype](0), TOL, "la particula 1 deberia haber acabado")
-    assert_close(nv0, GAMMA * c, TOL, "next_value de la particula viva")
+    assert_close(d0, Scalar[dtype](1), TOL, "particle 0 should still be alive")
+    assert_close(d1, Scalar[dtype](0), TOL, "particle 1 should have ended")
+    assert_close(nv0, GAMMA * c, TOL, "next_value of the live particle")
     assert_close(nv1, Scalar[dtype](0), TOL,
-                 "next_value de una particula terminal tiene que ser 0")
-    print("PASS el bootstrap es discount * gamma * V(s') y respeta el terminal")
+                 "next_value of a terminal particle has to be 0")
+    print("PASS the bootstrap is discount * gamma * V(s') and respects the terminal")
 
 
 def test_depth_discounted_bootstrap(ctx: DeviceContext) raises:
@@ -194,7 +194,7 @@ def test_depth_discounted_bootstrap(ctx: DeviceContext) raises:
     depths = List[Int]()
     for p in range(n_p):
         for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
-        actions.append(p)                 # tablero vacio: ninguna jugada acaba
+        actions.append(p)                 # empty board: no move ends the game
         us.append(Scalar[dtype](0.1))
         depths.append(p)                  # profundidades 0, 1, 2, 3
 
@@ -204,11 +204,11 @@ def test_depth_discounted_bootstrap(ctx: DeviceContext) raises:
         for _ in range(p + 1):            # gamma^(d+1), a mano
             want *= gamma_r
         assert_close(got[p], want, TOL,
-                     String("bootstrap en la profundidad ", p))
+                     String("bootstrap at depth ", p))
     # 0.7^1*0.5 = 0.35, and not 0.9*0.5 = 0.45: search_gamma has not slipped in.
     assert_close(got[0], Scalar[dtype](0.35), TOL,
-                 "en la profundidad 0 el factor deberia ser gamma_r, no search_gamma")
-    print("PASS el bootstrap coherente descuenta por profundidad con gamma_r^(d+1)")
+                 "at depth 0 the factor should be gamma_r, not search_gamma")
+    print("PASS the coherent bootstrap discounts by depth with gamma_r^(d+1)")
 
 
 def test_value_depends_on_the_board(ctx: DeviceContext) raises:
@@ -262,9 +262,9 @@ def test_value_depends_on_the_board(ctx: DeviceContext) raises:
     ctx.synchronize()
 
     got = download[dtype](value, num_envs)
-    assert_close(got[0], Scalar[dtype](3), TOL, "V del tablero con 3 fichas mias")
-    assert_close(got[1], Scalar[dtype](1), TOL, "V del tablero con 1 ficha mia")
-    print("PASS V depende del tablero: la observacion llega bien a la red")
+    assert_close(got[0], Scalar[dtype](3), TOL, "V of the board with 3 of my pieces")
+    assert_close(got[1], Scalar[dtype](1), TOL, "V of the board with 1 of my pieces")
+    print("PASS V depends on the board: the observation reaches the network intact")
 
 
 def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
@@ -294,7 +294,7 @@ def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
 
     got = download[dtype](value, 1)
     assert_close(got[0], Scalar[dtype](0.8), TOL,
-                 "tras sync_from, V deberia venir de los pesos copiados")
+                 "after sync_from, V should come from the copied weights")
 
     # And the copy is independent: touching the source afterwards does not move the model.
     b3b = List[Scalar[dtype]](); b3b.append(Scalar[dtype](-0.4))
@@ -304,7 +304,7 @@ def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
     ctx.synchronize()
     got2 = download[dtype](value, 1)
     assert_close(got2[0], Scalar[dtype](0.8), TOL,
-                 "el modelo tiene su propia copia; el origen ya no le afecta")
+                 "the model has its own copy; the source no longer affects it")
 
     # And an incompatible shape is rejected instead of copying garbage.
     bad = zero_critic_params(ctx, OBS_DIM, HIDDEN + 1, 1)
@@ -314,8 +314,8 @@ def test_sync_from_copies_the_weights(ctx: DeviceContext) raises:
     except:
         failed = True
     if not failed:
-        raise Error("sync_from deberia rechazar un critico con otra forma")
-    print("PASS sync_from copia los pesos, es independiente y valida la forma")
+        raise Error("sync_from should reject a critic with a different shape")
+    print("PASS sync_from copies the weights, is independent and validates the shape")
 
 
 def test_many_particles_multi_block(ctx: DeviceContext) raises:
@@ -344,10 +344,10 @@ def test_many_particles_multi_block(ctx: DeviceContext) raises:
     got = run_step(ctx, model, cfg, boards, actions, us)
     for p in range(p_total):
         assert_close(got[p_total + p], Scalar[dtype](1), TOL,
-                     String("discount de la particula ", p))
+                     String("discount of particle ", p))
         assert_close(got[p], GAMMA * c, TOL,
-                     String("next_value de la particula ", p))
-    print("PASS con 65 particulas (varios bloques, tamano no redondo) sale igual")
+                     String("next_value of particle ", p))
+    print("PASS with 65 particles (several blocks, non-round size) it comes out the same")
 
 
 def main() raises:

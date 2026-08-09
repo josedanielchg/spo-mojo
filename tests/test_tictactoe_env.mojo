@@ -60,8 +60,8 @@ def test_reset_clears_the_board(ctx: DeviceContext) raises:
 
     got = download[dtype](state, n * NUM_CELLS)
     for i in range(n * NUM_CELLS):
-        assert_close(got[i], CELL_EMPTY, TOL, String("tras el reset, celda ", i))
-    print("PASS reset deja el tablero vacio")
+        assert_close(got[i], CELL_EMPTY, TOL, String("after the reset, cell ", i))
+    print("PASS reset leaves the board empty")
 
 
 def test_env_step_reports_done(ctx: DeviceContext) raises:
@@ -80,15 +80,15 @@ def test_env_step_reports_done(ctx: DeviceContext) raises:
     # The agent wins by completing row 0.
     boards.append(board9(1,1,0, -1,-1,0, 0,0,0)); acts.append(Scalar[idx_dtype](2))
     us.append(Scalar[dtype](0.5)); exp_reward.append(Scalar[dtype](1))
-    exp_done.append(1); names.append("gana agente")
+    exp_done.append(1); names.append("agent wins")
     # Draw: the agent's move fills the board with no line.
     boards.append(board9(1,-1,1, 1,-1,-1, -1,1,0)); acts.append(Scalar[idx_dtype](8))
     us.append(Scalar[dtype](0.5)); exp_reward.append(Scalar[dtype](0.5))
-    exp_done.append(1); names.append("empate al llenar")
+    exp_done.append(1); names.append("draw on filling")
     # The rival wins: only cell 6 is left and with it it completes column 0.
     boards.append(board9(-1,1,0, -1,1,-1, 0,-1,1)); acts.append(Scalar[idx_dtype](2))
     us.append(Scalar[dtype](0.5)); exp_reward.append(Scalar[dtype](0))
-    exp_done.append(1); names.append("gana rival")
+    exp_done.append(1); names.append("opponent wins")
     # The game goes on: there are gaps left and nobody has won.
     boards.append(board9(1,-1,1, -1,1,0, -1,0,0)); acts.append(Scalar[idx_dtype](5))
     us.append(Scalar[dtype](0.1)); exp_reward.append(Scalar[dtype](0))
@@ -112,7 +112,7 @@ def test_env_step_reports_done(ctx: DeviceContext) raises:
     for i in range(n):
         assert_close(got_r[i], exp_reward[i], TOL, String("reward '", names[i], "'"))
         assert_eq_int(Int(got_d[i]), exp_done[i], String("done '", names[i], "'"))
-    print("PASS un turno real: recompensa y done en los cuatro finales")
+    print("PASS one real turn: reward and done on all four endings")
 
 
 def test_auto_reset_only_finished_games(ctx: DeviceContext) raises:
@@ -134,10 +134,10 @@ def test_auto_reset_only_finished_games(ctx: DeviceContext) raises:
     got = download[dtype](state, n * NUM_CELLS)
     for c in range(NUM_CELLS):
         assert_close(got[c], CELL_EMPTY, TOL,
-                     String("el env que termino deberia estar vacio, celda ", c))
+                     String("the env that ended should be empty, cell ", c))
         assert_close(got[NUM_CELLS + c], boards[1][c], TOL,
-                     String("el env que sigue no deberia tocarse, celda ", c))
-    print("PASS auto-reset: reinicia solo las partidas terminadas")
+                     String("the env that continues should not be touched, cell ", c))
+    print("PASS auto-reset: restarts only the finished games")
 
 
 def test_random_policy_only_legal(ctx: DeviceContext) raises:
@@ -169,9 +169,9 @@ def test_random_policy_only_legal(ctx: DeviceContext) raises:
     for i in range(n):
         a = Int(got[i])
         if a < 0 or a >= NUM_ACTIONS:
-            raise Error("accion fuera de rango con u=", us[i], ": ", a)
+            raise Error("action out of range with u=", us[i], ": ", a)
         if b[a] != CELL_EMPTY:
-            raise Error("la politica aleatoria eligio la casilla OCUPADA ", a)
+            raise Error("the random policy chose the OCCUPIED cell ", a)
         seen = False
         for j in range(len(distinct)):
             if distinct[j] == a:
@@ -180,9 +180,9 @@ def test_random_policy_only_legal(ctx: DeviceContext) raises:
             distinct.append(a)
 
     if len(distinct) < 2:
-        raise Error("la politica aleatoria devolvio siempre la misma casilla")
-    print("PASS la politica aleatoria solo juega casillas libres (", len(distinct),
-          "distintas )")
+        raise Error("the random policy always returned the same cell")
+    print("PASS the random policy only plays free cells (", len(distinct),
+          "distinct )")
 
 
 def test_random_baseline_matches_exact_odds(ctx: DeviceContext) raises:
@@ -206,46 +206,46 @@ def test_random_baseline_matches_exact_odds(ctx: DeviceContext) raises:
     stats = play_random_games(ctx, 64, 200, UInt32(12345))
     n = stats.games()
     if n < 2000:
-        raise Error("se esperaban miles de partidas en 200 turnos, salieron ", n)
+        raise Error("thousands of games were expected in 200 turns, got ", n)
 
     draw_rate = Scalar[dtype](stats.draws) / Scalar[dtype](n)
     loss_rate = Scalar[dtype](stats.losses) / Scalar[dtype](n)
     tol = Scalar[dtype](0.04)
 
-    print("      partidas:", n, " gana X:", stats.win_rate(),
-          " empate:", draw_rate, " gana O:", loss_rate,
+    print("      games:", n, " X wins:", stats.win_rate(),
+          " draw:", draw_rate, " O wins:", loss_rate,
           " score:", stats.score())
 
     if abs(stats.win_rate() - Scalar[dtype](0.5849)) > tol:
-        raise Error("la tasa de victoria se aleja del valor exacto 0.5849: ",
+        raise Error("the win rate strays from the exact value 0.5849: ",
                     stats.win_rate())
     if abs(draw_rate - Scalar[dtype](0.1270)) > tol:
-        raise Error("la tasa de empate se aleja del valor exacto 0.1270: ", draw_rate)
+        raise Error("the draw rate strays from the exact value 0.1270: ", draw_rate)
     if abs(loss_rate - Scalar[dtype](0.2881)) > tol:
-        raise Error("la tasa de derrota se aleja del valor exacto 0.2881: ", loss_rate)
+        raise Error("the loss rate strays from the exact value 0.2881: ", loss_rate)
     if abs(stats.score() - Scalar[dtype](0.6484)) > tol:
-        raise Error("la puntuacion se aleja del valor exacto 0.6484: ", stats.score())
+        raise Error("the score strays from the exact value 0.6484: ", stats.score())
 
     # And the three categories have to add up exactly to the games counted.
     assert_eq_int(stats.wins + stats.draws + stats.losses, n,
-                  "victorias + empates + derrotas deberia ser el total")
-    print("PASS la linea base reproduce las probabilidades exactas de TTT al azar")
+                  "wins + draws + losses should be the total")
+    print("PASS the baseline reproduces the exact probabilities of random TTT")
 
 
 def test_baseline_is_reproducible(ctx: DeviceContext) raises:
     """Same seed, same scoreboard. Without this nothing can be compared."""
     a = play_random_games(ctx, 32, 60, UInt32(777))
     b = play_random_games(ctx, 32, 60, UInt32(777))
-    assert_eq_int(a.wins, b.wins, "las victorias deberian repetirse con la misma seed")
-    assert_eq_int(a.draws, b.draws, "los empates deberian repetirse con la misma seed")
-    assert_eq_int(a.losses, b.losses, "las derrotas deberian repetirse con la misma seed")
+    assert_eq_int(a.wins, b.wins, "the wins should repeat with the same seed")
+    assert_eq_int(a.draws, b.draws, "the draws should repeat with the same seed")
+    assert_eq_int(a.losses, b.losses, "the losses should repeat with the same seed")
 
     # And with another seed the scoreboard has to change (otherwise the seed is
     # not being used).
     c = play_random_games(ctx, 32, 60, UInt32(4242))
     if c.wins == a.wins and c.draws == a.draws and c.losses == a.losses:
-        raise Error("dos semillas distintas dieron el mismo marcador exacto")
-    print("PASS la linea base es reproducible y depende de la semilla")
+        raise Error("two different seeds gave exactly the same scoreboard")
+    print("PASS the baseline is reproducible and depends on the seed")
 
 
 def main() raises:

@@ -77,34 +77,34 @@ def test_one_depth_all_three_endings(ctx: DeviceContext) raises:
 
     # The first takes a normal step: it stays alive and carries V(1) = 7.
     assert_close(state[0], 1.0, TOL, "normal: posicion")
-    assert_close(reward[0], 1.0, TOL, "normal: recompensa")
+    assert_close(reward[0], 1.0, TOL, "normal: reward")
     assert_close(discount[0], 1.0, TOL, "normal: sigue viva")
     assert_close(next_value[0], 7.0, TOL, "normal: bootstrap = V(1)")
 
     # The second is truncated: it stops simulating but keeps V(4) = 4.
-    assert_close(state[1], 4.0, TOL, "truncada: posicion")
-    assert_close(reward[1], 1.0, TOL, "truncada: el paso dio recompensa")
-    assert_close(discount[1], 0.0, TOL, "truncada: rec_discount 0")
+    assert_close(state[1], 4.0, TOL, "truncated: position")
+    assert_close(reward[1], 1.0, TOL, "truncated: the step gave reward")
+    assert_close(discount[1], 0.0, TOL, "truncated: rec_discount 0")
     assert_close(next_value[1], 4.0, TOL,
-                 "truncada: el bootstrap no es 0, habia futuro")
+                 "truncated: the bootstrap is not 0, there was a future")
 
     # The third really dies: it stops simulating and also loses the future.
-    assert_close(reward[2], 0.0, TOL, "terminal: sin recompensa")
+    assert_close(reward[2], 0.0, TOL, "terminal: no reward")
     assert_close(discount[2], 0.0, TOL, "terminal: rec_discount 0")
     assert_close(next_value[2], 0.0, TOL, "terminal: bootstrap 0")
 
     # The last two share rec_discount but not the bootstrap: that contrast is what
     # separates "time ran out" from "you died".
     if discount[1] != discount[2]:
-        raise Error("truncada y terminal deberian compartir rec_discount")
+        raise Error("truncated and terminal should share rec_discount")
     if next_value[1] == next_value[2]:
-        raise Error("truncada y terminal NO deberian compartir bootstrap")
+        raise Error("truncated and terminal should NOT share bootstrap")
 
     # And the old value has to stay intact, because the TD error needs it.
-    assert_close(old_value[0], 8.0, TOL, "recurrent_fn no debe tocar particles.value")
-    assert_close(old_value[1], 5.0, TOL, "recurrent_fn no debe tocar particles.value")
+    assert_close(old_value[0], 8.0, TOL, "recurrent_fn must not touch particles.value")
+    assert_close(old_value[1], 5.0, TOL, "recurrent_fn must not touch particles.value")
 
-    print("PASS una profundidad: normal / truncada / terminal")
+    print("PASS one depth: normal / truncated / terminal")
 
 
 def test_next_action_is_sampled_and_scored(ctx: DeviceContext) raises:
@@ -148,20 +148,20 @@ def test_next_action_is_sampled_and_scored(ctx: DeviceContext) raises:
     for p in range(p_total):
         a = Int(next_actions[p])
         if a < 0 or a >= NUM_ACTIONS:
-            raise Error("accion siguiente invalida en ", p, ": ", a)
+            raise Error("invalid next action at ", p, ": ", a)
         if a == 0:
             seen_zero = True
         else:
             seen_one = True
         assert_close(logps[p], want_logp, Scalar[dtype](1e-5),
-                     String("log-prob de la particula ", p))
+                     String("log-prob of particle ", p))
 
     # With uniforms spread on both sides of the cut, both actions have to come
     # out; if only one did, the sampling would be broken even if the log-probs
     # lined up.
     if not seen_zero or not seen_one:
-        raise Error("el muestreo devolvio siempre la misma accion")
-    print("PASS accion siguiente muestreada y puntuada con el prior")
+        raise Error("sampling always returned the same action")
+    print("PASS next action sampled and scored with the prior")
 
 
 def test_dead_particle_keeps_walking_is_not_a_problem(ctx: DeviceContext) raises:
@@ -202,9 +202,9 @@ def test_dead_particle_keeps_walking_is_not_a_problem(ctx: DeviceContext) raises
     # V is clipped at 0, so going past the end gives no negative values.
     assert_close(next_value[0], toy_value(7.0, toy.chain_length,
                                           toy.value_scale), TOL,
-                 "V(7) tras pasar el horizonte")
-    assert_close(next_value[1], 0.0, TOL, "V no puede ser negativo pasado el final")
-    print("PASS pasarse del final no produce valores negativos")
+                 "V(7) after passing the horizon")
+    assert_close(next_value[1], 0.0, TOL, "V cannot be negative past the end")
+    print("PASS going past the end produces no negative values")
 
 
 def main() raises:

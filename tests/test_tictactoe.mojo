@@ -50,10 +50,10 @@ def test_cell_codes(ctx: DeviceContext) raises:
     confused with one another.
     """
     assert_close(CELL_AGENT + CELL_RIVAL, CELL_EMPTY, TOL,
-                 "X y O deberian ser simetricos respecto a la casilla vacia")
+                 "X and O should be symmetric about the empty cell")
     assert_close(CELL_AGENT - CELL_RIVAL, Scalar[dtype](2), TOL,
-                 "X y O deberian ser distinguibles")
-    print("PASS codigos de casilla simetricos (X+O=vacia) y distinguibles")
+                 "X and O should be distinguishable")
+    print("PASS cell codes symmetric (X+O=empty) and distinguishable")
 
 
 def test_layout_roundtrip(ctx: DeviceContext) raises:
@@ -63,7 +63,7 @@ def test_layout_roundtrip(ctx: DeviceContext) raises:
     some cell would come out with the neighbour's value and the test would catch it.
     """
     b0 = board9( 1, 0,-1,   0, 1, 0,  -1, 0, 0)   # X . O / . X . / O . .
-    b1 = board9( 0, 0, 0,   1, 1, 1,   0, 0, 0)   # fila del medio de X
+    b1 = board9( 0, 0, 0,   1, 1, 1,   0, 0, 0)   # X's middle row
     b2 = board9(-1,-1,-1,   0, 0, 0,   1, 1, 0)   # fila de O arriba
 
     boards = List[Scalar[dtype]]()
@@ -83,8 +83,8 @@ def test_layout_roundtrip(ctx: DeviceContext) raises:
     for p in range(n):
         for c in range(NUM_CELLS):
             assert_close(got[p * NUM_CELLS + c], boards[p * NUM_CELLS + c], TOL,
-                         String("particula ", p, " casilla ", c))
-    print("PASS layout: 9 casillas por particula, sin solaparse")
+                         String("particle ", p, " cell ", c))
+    print("PASS layout: 9 cells per particle, no overlap")
 
 
 def run_has_won(ctx: DeviceContext, boards: List[Scalar[dtype]], n: Int,
@@ -103,14 +103,14 @@ def test_wins_on_every_line(ctx: DeviceContext) raises:
     """The 8 lines: one board per line with X completing it, all of them win."""
     wins = List[List[Scalar[dtype]]]()
     names = List[String]()
-    wins.append(board9(1,1,1, 0,0,0, 0,0,0)); names.append("fila 0")
-    wins.append(board9(0,0,0, 1,1,1, 0,0,0)); names.append("fila 1")
-    wins.append(board9(0,0,0, 0,0,0, 1,1,1)); names.append("fila 2")
-    wins.append(board9(1,0,0, 1,0,0, 1,0,0)); names.append("columna 0")
-    wins.append(board9(0,1,0, 0,1,0, 0,1,0)); names.append("columna 1")
-    wins.append(board9(0,0,1, 0,0,1, 0,0,1)); names.append("columna 2")
-    wins.append(board9(1,0,0, 0,1,0, 0,0,1)); names.append("diagonal principal")
-    wins.append(board9(0,0,1, 0,1,0, 1,0,0)); names.append("diagonal inversa")
+    wins.append(board9(1,1,1, 0,0,0, 0,0,0)); names.append("row 0")
+    wins.append(board9(0,0,0, 1,1,1, 0,0,0)); names.append("row 1")
+    wins.append(board9(0,0,0, 0,0,0, 1,1,1)); names.append("row 2")
+    wins.append(board9(1,0,0, 1,0,0, 1,0,0)); names.append("column 0")
+    wins.append(board9(0,1,0, 0,1,0, 0,1,0)); names.append("column 1")
+    wins.append(board9(0,0,1, 0,0,1, 0,0,1)); names.append("column 2")
+    wins.append(board9(1,0,0, 0,1,0, 0,0,1)); names.append("main diagonal")
+    wins.append(board9(0,0,1, 0,1,0, 1,0,0)); names.append("anti-diagonal")
 
     n = len(wins)
     batch = List[Scalar[dtype]]()
@@ -121,17 +121,17 @@ def test_wins_on_every_line(ctx: DeviceContext) raises:
     got = run_has_won(ctx, batch, n, CELL_AGENT)
     for i in range(n):
         assert_close(got[i], Scalar[dtype](1), TOL,
-                     String("deberia ganar por la ", names[i]))
-    print("PASS victoria en las 8 lineas (filas, columnas, diagonales)")
+                     String("should win by the ", names[i]))
+    print("PASS win on all 8 lines (rows, columns, diagonals)")
 
 
 def test_no_false_win(ctx: DeviceContext) raises:
     """Boards with no completed line do not count as a win."""
     boards = List[List[Scalar[dtype]]]()
     names = List[String]()
-    boards.append(board9(0,0,0, 0,0,0, 0,0,0)); names.append("vacio")
-    boards.append(board9(1,0,1, 0,1,0, 0,0,0)); names.append("X disperso sin linea")
-    boards.append(board9(1,1,0, 0,0,0, 0,0,0)); names.append("dos de tres (falta una)")
+    boards.append(board9(0,0,0, 0,0,0, 0,0,0)); names.append("empty")
+    boards.append(board9(1,0,1, 0,1,0, 0,0,0)); names.append("X scattered, no line")
+    boards.append(board9(1,1,0, 0,0,0, 0,0,0)); names.append("two of three (one missing)")
 
     n = len(boards)
     batch = List[Scalar[dtype]]()
@@ -142,8 +142,8 @@ def test_no_false_win(ctx: DeviceContext) raises:
     got = run_has_won(ctx, batch, n, CELL_AGENT)
     for i in range(n):
         assert_close(got[i], Scalar[dtype](0), TOL,
-                     String("no deberia ser victoria: ", names[i]))
-    print("PASS sin falsos positivos (vacio, disperso, dos de tres)")
+                     String("should not be a win: ", names[i]))
+    print("PASS no false positives (empty, scattered, two of three)")
 
 
 def test_players_dont_cross(ctx: DeviceContext) raises:
@@ -162,11 +162,11 @@ def test_players_dont_cross(ctx: DeviceContext) raises:
     agent = run_has_won(ctx, batch, 2, CELL_AGENT)   # espera [0, 1]
     rival = run_has_won(ctx, batch, 2, CELL_RIVAL)   # espera [1, 0]
 
-    assert_close(agent[0], Scalar[dtype](0), TOL, "la fila de O no es victoria de X")
-    assert_close(agent[1], Scalar[dtype](1), TOL, "la diagonal de X si es victoria de X")
-    assert_close(rival[0], Scalar[dtype](1), TOL, "la fila de O si es victoria de O")
-    assert_close(rival[1], Scalar[dtype](0), TOL, "la diagonal de X no es victoria de O")
-    print("PASS las fichas de X y O no se mezclan en el chequeo")
+    assert_close(agent[0], Scalar[dtype](0), TOL, "O's row is not a win for X")
+    assert_close(agent[1], Scalar[dtype](1), TOL, "X's diagonal is a win for X")
+    assert_close(rival[0], Scalar[dtype](1), TOL, "O's row is a win for O")
+    assert_close(rival[1], Scalar[dtype](0), TOL, "X's diagonal is not a win for O")
+    print("PASS X's and O's pieces do not mix in the check")
 
 
 def run_legal_mask(ctx: DeviceContext, boards: List[Scalar[dtype]],
@@ -185,10 +185,10 @@ def test_legal_mask(ctx: DeviceContext) raises:
     """The mask marks 1 on the free cells and 0 on the occupied ones."""
     boards_l = List[List[Scalar[dtype]]]()
     exp_l = List[List[Scalar[dtype]]]()
-    # Con huecos: ocupadas 0,2,4,6 -> libres 1,3,5,7,8.
+    # With gaps: occupied 0,2,4,6 -> free 1,3,5,7,8.
     boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))
     exp_l.append(   board9(0,1, 0, 1,0,1,  0,1,1))
-    # Vacio: todo legal.
+    # Empty: everything legal.
     boards_l.append(board9(0,0,0, 0,0,0, 0,0,0))
     exp_l.append(   board9(1,1,1, 1,1,1, 1,1,1))
     # Lleno: nada legal.
@@ -204,8 +204,8 @@ def test_legal_mask(ctx: DeviceContext) raises:
     for i in range(n):
         for c in range(NUM_ACTIONS):
             assert_close(got[i * NUM_ACTIONS + c], exp_l[i][c], TOL,
-                         String("mascara legal tablero ", i, " casilla ", c))
-    print("PASS mascara legal (huecos, vacio, lleno)")
+                         String("legal mask board ", i, " cell ", c))
+    print("PASS legal mask (gaps, empty, full)")
 
 
 def test_apply_changes_one_cell(ctx: DeviceContext) raises:
@@ -218,8 +218,8 @@ def test_apply_changes_one_cell(ctx: DeviceContext) raises:
     for c in range(NUM_CELLS): batch.append(startB[c])
 
     actions = List[Scalar[idx_dtype]]()
-    actions.append(Scalar[idx_dtype](3))   # particula 0 -> casilla 3
-    actions.append(Scalar[idx_dtype](8))   # particula 1 -> casilla 8
+    actions.append(Scalar[idx_dtype](3))   # particle 0 -> cell 3
+    actions.append(Scalar[idx_dtype](8))   # particle 1 -> cell 8
 
     state = upload[dtype](ctx, batch)
     action = upload[idx_dtype](ctx, actions)
@@ -229,12 +229,12 @@ def test_apply_changes_one_cell(ctx: DeviceContext) raises:
     ctx.synchronize()
     got = download[dtype](state, 2 * NUM_CELLS)
 
-    expA = board9(1,0,-1, 1,1,0, -1,0,0)   # casilla 3 -> X
-    expB = board9(0,0,-1, 0,1,0, 0,0,1)    # casilla 8 -> X
+    expA = board9(1,0,-1, 1,1,0, -1,0,0)   # cell 3 -> X
+    expB = board9(0,0,-1, 0,1,0, 0,0,1)    # cell 8 -> X
     for c in range(NUM_CELLS):
-        assert_close(got[c], expA[c], TOL, String("apply X tablero 0 casilla ", c))
+        assert_close(got[c], expA[c], TOL, String("apply X board 0 cell ", c))
         assert_close(got[NUM_CELLS + c], expB[c], TOL,
-                     String("apply X tablero 1 casilla ", c))
+                     String("apply X board 1 cell ", c))
 
     # One O move, to check the player argument.
     startC = board9(0,0,0, 0,0,0, 0,0,0)
@@ -247,11 +247,11 @@ def test_apply_changes_one_cell(ctx: DeviceContext) raises:
         grid_dim=1, block_dim=TPB_TTT)
     ctx.synchronize()
     gotC = download[dtype](stateC, NUM_CELLS)
-    expC = board9(0,0,0, 0,-1,0, 0,0,0)    # casilla 4 -> O
+    expC = board9(0,0,0, 0,-1,0, 0,0,0)    # cell 4 -> O
     for c in range(NUM_CELLS):
-        assert_close(gotC[c], expC[c], TOL, String("apply O casilla ", c))
+        assert_close(gotC[c], expC[c], TOL, String("apply O cell ", c))
 
-    print("PASS aplicar jugada cambia solo esa casilla (X y O)")
+    print("PASS applying a move changes only that cell (X and O)")
 
 
 @fieldwise_init
@@ -264,7 +264,7 @@ struct Outcome(Movable):
 
 def run_outcome(ctx: DeviceContext, boards: List[Scalar[dtype]],
                 n: Int) raises -> Outcome:
-    """Corre ttt_outcome_kernel sobre n tableros y baja terminal + reward."""
+    """Runs ttt_outcome_kernel over n boards and brings down terminal + reward."""
     state = upload[dtype](ctx, boards)
     term = zeros[dtype](ctx, n)
     rew = zeros[dtype](ctx, n)
@@ -285,15 +285,15 @@ def test_terminal_and_reward(ctx: DeviceContext) raises:
     # Gana X (fila 0).
     boards_l.append(board9(1,1,1, -1,-1,0, 0,0,0))
     term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](1))
-    names.append("gana X")
-    # Gana O (fila 0) -> derrota del agente.
+    names.append("X wins")
+    # O wins (row 0) -> the agent loses.
     boards_l.append(board9(-1,-1,-1, 1,1,0, 0,0,1))
     term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](0))
-    names.append("gana O (derrota)")
-    # Empate: tablero lleno sin ninguna linea.
+    names.append("O wins (a loss)")
+    # Draw: full board with no line.
     boards_l.append(board9(1,-1,1, 1,-1,-1, -1,1,1))
     term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](0.5))
-    names.append("empate")
+    names.append("draw")
     # No terminal: quedan huecos y nadie gano.
     boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))
     term_exp.append(Scalar[dtype](0)); rew_exp.append(Scalar[dtype](0))
@@ -301,7 +301,7 @@ def test_terminal_and_reward(ctx: DeviceContext) raises:
     # X wins and also fills the board: it is a win, not a draw.
     boards_l.append(board9(1,1,1, -1,-1,1, -1,1,-1))
     term_exp.append(Scalar[dtype](1)); rew_exp.append(Scalar[dtype](1))
-    names.append("gana X en tablero lleno")
+    names.append("X wins on a full board")
 
     n = len(boards_l)
     batch = List[Scalar[dtype]]()
@@ -311,10 +311,10 @@ def test_terminal_and_reward(ctx: DeviceContext) raises:
     out = run_outcome(ctx, batch, n)
     for i in range(n):
         assert_close(out.terminal[i], term_exp[i], TOL,
-                     String("terminal incorrecto: ", names[i]))
+                     String("wrong terminal: ", names[i]))
         assert_close(out.reward[i], rew_exp[i], TOL,
-                     String("reward incorrecto: ", names[i]))
-    print("PASS terminal y recompensa (gana X / gana O / empate / no terminal / X en lleno)")
+                     String("wrong reward: ", names[i]))
+    print("PASS terminal and reward (X wins / O wins / draw / non-terminal / X on full)")
 
 
 def run_prior(ctx: DeviceContext, boards: List[Scalar[dtype]],
@@ -337,8 +337,8 @@ def test_prior_masks_illegal(ctx: DeviceContext) raises:
     """
     boards_l = List[List[Scalar[dtype]]]()
     boards_l.append(board9(1,0,-1, 0,1,0, -1,0,0))    # ocupadas 0,2,4,6
-    boards_l.append(board9(0,0,0, 0,0,0, 0,0,0))       # vacio: todo legal
-    boards_l.append(board9(1,-1,1, -1,1,-1, 1,-1,1))   # lleno: todo ilegal (degenerado)
+    boards_l.append(board9(0,0,0, 0,0,0, 0,0,0))       # empty: everything legal
+    boards_l.append(board9(1,-1,1, -1,1,-1, 1,-1,1))   # full: everything illegal (degenerate)
 
     n = len(boards_l)
     batch = List[Scalar[dtype]]()
@@ -352,8 +352,8 @@ def test_prior_masks_illegal(ctx: DeviceContext) raises:
             if boards_l[e][c] != CELL_EMPTY:
                 want = NEG_INF
             assert_close(got[e * NUM_ACTIONS + c], want, TOL,
-                         String("prior raiz env ", e, " casilla ", c))
-    print("PASS prior raiz enmascarado (0 en legales, NEG_INF en ocupadas)")
+                         String("root prior env ", e, " cell ", c))
+    print("PASS masked root prior (0 on legal, NEG_INF on occupied)")
 
 
 @fieldwise_init
@@ -419,19 +419,19 @@ def test_step_all_paths(ctx: DeviceContext) raises:
 
     # the agent wins: it completes row 0.
     boards.append(board9(1,1,0, -1,-1,0, 0,0,0)); acts.append(Scalar[idx_dtype](2)); us.append(Scalar[dtype](0.5))
-    exp_board.append(board9(1,1,1, -1,-1,0, 0,0,0)); exp_reward.append(Scalar[dtype](1)); exp_discount.append(Scalar[dtype](0)); names.append("gana agente")
+    exp_board.append(board9(1,1,1, -1,-1,0, 0,0,0)); exp_reward.append(Scalar[dtype](1)); exp_discount.append(Scalar[dtype](0)); names.append("agent wins")
     # draw: the agent's move fills the board with no line.
     boards.append(board9(1,-1,1, 1,-1,-1, -1,1,0)); acts.append(Scalar[idx_dtype](8)); us.append(Scalar[dtype](0.5))
-    exp_board.append(board9(1,-1,1, 1,-1,-1, -1,1,1)); exp_reward.append(Scalar[dtype](0.5)); exp_discount.append(Scalar[dtype](0)); names.append("empate al llenar")
+    exp_board.append(board9(1,-1,1, 1,-1,-1, -1,1,1)); exp_reward.append(Scalar[dtype](0.5)); exp_discount.append(Scalar[dtype](0)); names.append("draw on filling")
     # the rival wins: after the agent's move, O has only cell 6 and with it makes column 0.
     boards.append(board9(-1,1,0, -1,1,-1, 0,-1,1)); acts.append(Scalar[idx_dtype](2)); us.append(Scalar[dtype](0.5))
-    exp_board.append(board9(-1,1,1, -1,1,-1, -1,-1,1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](0)); names.append("gana rival")
+    exp_board.append(board9(-1,1,1, -1,1,-1, -1,-1,1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](0)); names.append("opponent wins")
     # goes on: u=0.1 -> the rival takes the 1st empty cell (7).
     boards.append(board9(1,-1,1, -1,1,0, -1,0,0)); acts.append(Scalar[idx_dtype](5)); us.append(Scalar[dtype](0.1))
-    exp_board.append(board9(1,-1,1, -1,1,1, -1,-1,0)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("sigue u=0.1 -> O en 7")
+    exp_board.append(board9(1,-1,1, -1,1,1, -1,-1,0)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("continues u=0.1 -> O at 7")
     # goes on: u=0.9 -> the rival takes the 2nd empty cell (8).
     boards.append(board9(1,-1,1, -1,1,0, -1,0,0)); acts.append(Scalar[idx_dtype](5)); us.append(Scalar[dtype](0.9))
-    exp_board.append(board9(1,-1,1, -1,1,1, -1,0,-1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("sigue u=0.9 -> O en 8")
+    exp_board.append(board9(1,-1,1, -1,1,1, -1,0,-1)); exp_reward.append(Scalar[dtype](0)); exp_discount.append(Scalar[dtype](1)); names.append("continues u=0.9 -> O at 8")
 
     n = len(boards)
     flat = List[Scalar[dtype]]()
@@ -442,11 +442,11 @@ def test_step_all_paths(ctx: DeviceContext) raises:
     for p in range(n):
         for c in range(NUM_CELLS):
             assert_close(out.state[p * NUM_CELLS + c], exp_board[p][c], TOL,
-                         String("tablero '", names[p], "' casilla ", c))
+                         String("board '", names[p], "' cell ", c))
         assert_close(out.reward[p], exp_reward[p], TOL, String("reward '", names[p], "'"))
         assert_close(out.discount[p], exp_discount[p], TOL, String("discount '", names[p], "'"))
         assert_close(out.next_value[p], Scalar[dtype](0), TOL, String("next_value '", names[p], "'"))
-    print("PASS step: gana agente / empate / gana rival / sigue (rival al azar 7 u 8)")
+    print("PASS step: agent wins / draw / opponent wins / continues (random opponent at 7 or 8)")
 
 
 def test_step_discounts_reward_by_depth(ctx: DeviceContext) raises:
@@ -482,18 +482,18 @@ def test_step_discounts_reward_by_depth(ctx: DeviceContext) raises:
     want = Scalar[dtype](1)
     for d in range(n):
         assert_close(out.reward[d], want, TOL,
-                     String("la victoria a profundidad ", d, " deberia valer gamma^", d))
+                     String("the win at depth ", d, " should be worth gamma^", d))
         # Terminal in all of them: the discount does not change the discount field, only the reward.
         assert_close(out.discount[d], Scalar[dtype](0), TOL,
-                     String("una victoria es terminal, profundidad ", d))
+                     String("a win is terminal, depth ", d))
         want *= gamma
 
     # And with gamma=1 all four are worth the same: it is the tie the discount breaks.
     flat = run_dynamics_at(ctx, boards, acts, us, depths, n, Scalar[dtype](1))
     for d in range(n):
         assert_close(flat.reward[d], Scalar[dtype](1), TOL,
-                     String("sin descuento toda victoria vale 1, profundidad ", d))
-    print("PASS la recompensa se descuenta por profundidad (gamma^d)")
+                     String("without discount every win is worth 1, depth ", d))
+    print("PASS the reward is discounted by depth (gamma^d)")
 
 
 def ttt_config(num_envs: Int, num_particles: Int) -> SPOConfig:
@@ -534,10 +534,10 @@ def test_model_eval_root(ctx: DeviceContext) raises:
             if boards_list[e][c] != CELL_EMPTY:
                 want = NEG_INF
             assert_close(got_logits[e * NUM_ACTIONS + c], want, TOL,
-                         String("eval_root logit env ", e, " casilla ", c))
+                         String("eval_root logit env ", e, " cell ", c))
         assert_close(got_value[e], Scalar[dtype](0), TOL,
-                     String("eval_root V env ", e, " deberia ser 0"))
-    print("PASS eval_root del modelo: prior enmascarado + V=0")
+                     String("eval_root V env ", e, " should be 0"))
+    print("PASS the model's eval_root: masked prior + V=0")
 
 
 def test_model_step(ctx: DeviceContext) raises:
@@ -562,24 +562,24 @@ def test_model_step(ctx: DeviceContext) raises:
     got_state = download[dtype](particles.state, p_total * NUM_CELLS)
     got_logits = download[dtype](outputs.action_logits, p_total * NUM_ACTIONS)
 
-    # Tablero nuevo: X en 5, O en 7 -> solo queda libre la casilla 8.
+    # New board: X at 5, O at 7 -> only cell 8 is left free.
     new_board = board9(1,-1,1, -1,1,1, -1,-1,0)
     for c in range(NUM_CELLS):
         assert_close(got_state[c], new_board[c], TOL,
-                     String("step estado casilla ", c))
+                     String("step state cell ", c))
     # action_logits = masked prior of the new board: 0 only on cell 8.
     for c in range(NUM_ACTIONS):
         want = Scalar[dtype](0)
         if new_board[c] != CELL_EMPTY:
             want = NEG_INF
         assert_close(got_logits[c], want, TOL,
-                     String("step action_logits casilla ", c))
-    print("PASS step del modelo: avanza el estado y da el prior del estado nuevo")
+                     String("step action_logits cell ", c))
+    print("PASS the model's step: advances the state and gives the new state's prior")
 
 
 def run_encode(ctx: DeviceContext, boards: List[Scalar[dtype]],
                n: Int) raises -> List[Scalar[dtype]]:
-    """Corre ttt_encode_obs_kernel y baja la observacion [n, OBS_DIM]."""
+    """Runs ttt_encode_obs_kernel and brings down the observation [n, OBS_DIM]."""
     state = upload[dtype](ctx, boards)
     obs = filled[dtype](ctx, n * OBS_DIM, Scalar[dtype](-1))   # -1 = sin escribir
     ctx.enqueue_function[ttt_encode_obs_kernel, ttt_encode_obs_kernel](
@@ -606,7 +606,7 @@ def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raise
     for b in board9(1,1,0, -1,-1,0, 0,0,0): boards.append(b)
     # p2 draws: a nearly full board with no lines, X closes the last cell.
     for b in board9(1,-1,1, 1,-1,-1, -1,1,0): boards.append(b)
-    # p3 sigue: tablero vacio.
+    # p3 continues: empty board.
     for b in board9(0,0,0, 0,0,0, 0,0,0): boards.append(b)
 
     acts = List[Scalar[idx_dtype]]()
@@ -626,18 +626,18 @@ def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raise
 
     # Without a penalty: losing and going on give the same, which is exactly the problem.
     plain = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 0)
-    assert_close(plain.reward[0], Scalar[dtype](1), TOL, "sin castigo, ganar")
-    assert_close(plain.reward[1], Scalar[dtype](0), TOL, "sin castigo, perder")
-    assert_close(plain.reward[3], Scalar[dtype](0), TOL, "sin castigo, seguir")
+    assert_close(plain.reward[0], Scalar[dtype](1), TOL, "no penalty, win")
+    assert_close(plain.reward[1], Scalar[dtype](0), TOL, "no penalty, lose")
+    assert_close(plain.reward[3], Scalar[dtype](0), TOL, "no penalty, continue")
     if plain.discount[1] != Scalar[dtype](0):
-        raise Error("la particula 1 deberia haber perdido (discount 0)")
+        raise Error("particle 1 should have lost (discount 0)")
 
     # With penalty 1: games' +1 / 0 / -1 convention.
     pen = run_dynamics_at(ctx, boards, acts, us, depths, 4, 1.0, 1)
-    assert_close(pen.reward[0], Scalar[dtype](1), TOL, "con castigo, ganar")
-    assert_close(pen.reward[1], Scalar[dtype](-1), TOL, "con castigo, perder")
-    assert_close(pen.reward[2], Scalar[dtype](0.5), TOL, "con castigo, empatar")
-    assert_close(pen.reward[3], Scalar[dtype](0), TOL, "con castigo, seguir")
+    assert_close(pen.reward[0], Scalar[dtype](1), TOL, "with penalty, win")
+    assert_close(pen.reward[1], Scalar[dtype](-1), TOL, "with penalty, lose")
+    assert_close(pen.reward[2], Scalar[dtype](0.5), TOL, "with penalty, draw")
+    assert_close(pen.reward[3], Scalar[dtype](0), TOL, "with penalty, continue")
 
     # And the penalty is discounted by depth like any reward: losing later hurts
     # less, just as winning later rewards less.
@@ -645,8 +645,8 @@ def test_loss_penalty_separates_losing_from_continuing(ctx: DeviceContext) raise
     for _ in range(4): deep.append(Scalar[idx_dtype](2))
     d2 = run_dynamics_at(ctx, boards, acts, us, deep, 4, 0.5, 1)
     assert_close(d2.reward[1], Scalar[dtype](-0.25), TOL,
-                 "perder en la profundidad 2 con gamma 0.5")
-    print("PASS loss_penalty separa perder de seguir, y se descuenta igual")
+                 "losing at depth 2 with gamma 0.5")
+    print("PASS loss_penalty separates losing from continuing, and is discounted alike")
 
 
 def test_encode_obs_two_planes(ctx: DeviceContext) raises:
@@ -659,15 +659,15 @@ def test_encode_obs_two_planes(ctx: DeviceContext) raises:
     b = board9(1,0,-1, 0,1,0, 0,0,0)
     got = run_encode(ctx, b, 1)
 
-    # plano 0 = mis fichas (casillas 0 y 4), plano 1 = las suyas (casilla 2).
+    # plane 0 = my pieces (cells 0 and 4), plane 1 = theirs (cell 2).
     want_mine = board9(1,0,0, 0,1,0, 0,0,0)
     want_theirs = board9(0,0,1, 0,0,0, 0,0,0)
     for c in range(NUM_CELLS):
         assert_close(got[c], want_mine[c], TOL,
-                     String("plano propio, casilla ", c))
+                     String("own plane, cell ", c))
         assert_close(got[NUM_CELLS + c], want_theirs[c], TOL,
-                     String("plano del rival, casilla ", c))
-    print("PASS la observacion son dos planos binarios (mias / suyas)")
+                     String("opponent plane, cell ", c))
+    print("PASS the observation is two binary planes (mine / theirs)")
 
 
 def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
@@ -688,7 +688,7 @@ def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
     # The empty one: all 18 values at zero (nothing in either plane).
     for i in range(OBS_DIM):
         assert_close(got[i], Scalar[dtype](0), TOL,
-                     String("tablero vacio, valor ", i))
+                     String("empty board, value ", i))
 
     # The full one and the invariant, over both boards.
     for t in range(2):
@@ -697,15 +697,15 @@ def test_encode_obs_edge_cases(ctx: DeviceContext) raises:
             mine = got[base + c]
             theirs = got[base + NUM_CELLS + c]
             if mine + theirs > Scalar[dtype](1.5):
-                raise Error("la casilla ", c, " del tablero ", t,
-                            " esta en LOS DOS planos")
+                raise Error("cell ", c, " of board ", t,
+                            " is in BOTH planes")
             # The source board comes out of the flat array, without copying lists.
             cell = boards[t * NUM_CELLS + c]
             occupied = Scalar[dtype](0) if cell == CELL_EMPTY else Scalar[dtype](1)
             assert_close(mine + theirs, occupied, TOL,
-                         String("ocupada = en exactamente un plano, tablero ", t,
-                                " casilla ", c))
-    print("PASS bordes: vacio a cero, y cada casilla ocupada en un solo plano")
+                         String("occupied = in exactly one plane, board ", t,
+                                " cell ", c))
+    print("PASS edges: empty to zero, and each occupied cell in a single plane")
 
 
 def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
@@ -714,9 +714,9 @@ def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
     The same kind of check as A1a's layout, but over the OBS_DIM stride instead of
     STATE_DIM.
     """
-    b0 = board9(1,1,1, 0,0,0, 0,0,0)      # solo mias, la fila de arriba
-    b1 = board9(-1,-1,-1, 0,0,0, 0,0,0)   # solo suyas, la misma fila
-    b2 = board9(0,0,0, 0,0,0, 0,0,1)      # una mia, la esquina
+    b0 = board9(1,1,1, 0,0,0, 0,0,0)      # only mine, the top row
+    b1 = board9(-1,-1,-1, 0,0,0, 0,0,0)   # only theirs, the same row
+    b2 = board9(0,0,0, 0,0,0, 0,0,1)      # one of mine, the corner
 
     boards = List[Scalar[dtype]]()
     for c in range(NUM_CELLS): boards.append(b0[c])
@@ -726,23 +726,23 @@ def test_encode_obs_no_overlap(ctx: DeviceContext) raises:
 
     # Board 0: three ones in the own plane, nothing in the rival's.
     for c in range(3):
-        assert_close(got[c], Scalar[dtype](1), TOL, String("t0 mia ", c))
+        assert_close(got[c], Scalar[dtype](1), TOL, String("t0 mine ", c))
     for c in range(NUM_CELLS):
         assert_close(got[NUM_CELLS + c], Scalar[dtype](0), TOL,
-                     String("t0 no deberia tener fichas del rival, ", c))
-    # Tablero 1: al reves, y en su propio hueco.
+                     String("t0 should have no opponent pieces, ", c))
+    # Board 1: the other way round, and in its own slot.
     for c in range(3):
         assert_close(got[OBS_DIM + NUM_CELLS + c], Scalar[dtype](1), TOL,
-                     String("t1 suya ", c))
+                     String("t1 theirs ", c))
         assert_close(got[OBS_DIM + c], Scalar[dtype](0), TOL,
-                     String("t1 no deberia tener fichas mias, ", c))
+                     String("t1 should have none of my pieces, ", c))
     # Board 2: only cell 8 in the own plane.
-    assert_close(got[2 * OBS_DIM + 8], Scalar[dtype](1), TOL, "t2 esquina mia")
+    assert_close(got[2 * OBS_DIM + 8], Scalar[dtype](1), TOL, "t2 my corner")
     total = Scalar[dtype](0)
     for i in range(OBS_DIM):
         total += got[2 * OBS_DIM + i]
-    assert_close(total, Scalar[dtype](1), TOL, "t2 deberia tener una sola ficha")
-    print("PASS tres tableros seguidos, cada observacion en su hueco")
+    assert_close(total, Scalar[dtype](1), TOL, "t2 should have exactly one piece")
+    print("PASS three boards in a row, each observation in its slot")
 
 
 def test_mask_from_obs_matches_mask_from_state(ctx: DeviceContext) raises:
@@ -789,17 +789,17 @@ def test_mask_from_obs_matches_mask_from_state(ctx: DeviceContext) raises:
     b = download[dtype](from_obs, n * NUM_ACTIONS)
     for i in range(n * NUM_ACTIONS):
         if a[i] != b[i]:
-            raise Error("la mascara difiere en ", i, ": del estado ", a[i],
-                        " y de la observacion ", b[i])
+            raise Error("the mask differs at ", i, ": from the state ", a[i],
+                        " and from the observation ", b[i])
         # And against the board, not just one against the other: if both were
         # wrong in the same way, comparing them would not detect it.
         want = Scalar[dtype](1) if boards[(i // NUM_ACTIONS) * NUM_CELLS
                                          + (i % NUM_ACTIONS)] == 0 \
                else Scalar[dtype](0)
         if b[i] != want:
-            raise Error("la mascara de la observacion en ", i, " deberia ser ",
+            raise Error("the observation's mask at ", i, " should be ",
                         want)
-    print("PASS la mascara de la observacion coincide con la del tablero (40 filas)")
+    print("PASS the observation's mask matches the board's (40 rows)")
 
 
 def main() raises:

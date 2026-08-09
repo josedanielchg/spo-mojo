@@ -14,8 +14,8 @@ def read_f32(path: String) raises -> List[Scalar[dtype]]:
         raw = f.read_bytes()
 
     if len(raw) % 4 != 0:
-        raise Error(path, ": ", len(raw), " bytes no es multiplo de 4, "
-                    "no puede ser un array de float32")
+        raise Error(path, ": ", len(raw), " bytes is not a multiple of 4, "
+                    "cannot be a float32 array")
 
     n = len(raw) // 4
     ptr = raw.unsafe_ptr().bitcast[Scalar[dtype]]()

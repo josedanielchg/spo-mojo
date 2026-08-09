@@ -63,19 +63,19 @@ def test_ess_drops_and_recovers_after_resampling(ctx: DeviceContext) raises:
             total += ess[d * cfg.num_envs + e]
         means.append(total / Scalar[dtype](cfg.num_envs))
 
-    print("      ESS por profundidad:")
+    print("      ESS by depth:")
     for d in range(cfg.search_depth):
         print("        depth", d, "->", means[d])
 
-    # Baja dentro del primer tramo...
+    # Falls within the first stretch...
     if means[3] >= means[0]:
-        raise Error("el ESS deberia degradarse entre resamplings: d0=",
+        raise Error("the ESS should degrade between resamplings: d0=",
                     means[0], " d3=", means[3])
     # ...and recovers right after depth 3's resampling.
     if means[4] <= means[3]:
-        raise Error("el ESS deberia recuperarse tras el resampling: d3=",
+        raise Error("the ESS should recover after the resampling: d3=",
                     means[3], " d4=", means[4])
-    print("PASS el ESS cae entre resamplings y se recupera despues")
+    print("PASS the ESS falls between resamplings and recovers afterwards")
 
 
 def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
@@ -95,7 +95,7 @@ def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
 
     root_state = List[Scalar[dtype]]()
     for _ in range(cfg.num_envs):
-        root_state.append(0.0)      # todos en la casilla de salida
+        root_state.append(0.0)      # all on the starting cell
 
     search[ToyChain](ctx, ws, cfg, toy, upload[dtype](ctx, root_state),
                      UInt32(1234))
@@ -117,21 +117,21 @@ def test_search_improves_a_uniform_prior(ctx: DeviceContext) raises:
                 q_good += weights[p]
         # The weights are a per-env softmax, so they already sum to 1.
         assert_close(q_total, 1.0, Scalar[dtype](1e-4),
-                     String("los pesos del env ", e, " deberian sumar 1"))
+                     String("the weights of env ", e, " should sum to 1"))
         if q_good < worst:
             worst = q_good
 
-    print("      q(GOOD) minimo sobre", cfg.num_envs, "envs:", worst)
+    print("      minimum q(GOOD) over", cfg.num_envs, "envs:", worst)
     if worst < 0.8:
-        raise Error("la busqueda no mejoro el prior lo suficiente: q(GOOD)=", worst)
+        raise Error("the search did not improve the prior enough: q(GOOD)=", worst)
 
     # And the action actually executed has to be valid.
     for e in range(cfg.num_envs):
         a = Int(final_action[e])
         if a != ACTION_BAD and a != ACTION_GOOD:
-            raise Error("accion final invalida en el env ", e, ": ", a)
+            raise Error("invalid final action in env ", e, ": ", a)
 
-    print("PASS la busqueda mejora el prior uniforme: q(GOOD) >=", worst)
+    print("PASS the search improves the uniform prior: q(GOOD) >=", worst)
 
 
 def test_search_is_reproducible(ctx: DeviceContext) raises:
@@ -156,8 +156,8 @@ def test_search_is_reproducible(ctx: DeviceContext) raises:
         else:
             for p in range(p_total):
                 assert_close(w[p], first[p], TOL,
-                             String("dos busquedas con la misma seed difieren en ", p))
-    print("PASS la busqueda es reproducible con la misma seed")
+                             String("two searches with the same seed differ at ", p))
+    print("PASS the search is reproducible with the same seed")
 
 
 def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
@@ -201,9 +201,9 @@ def test_more_particles_is_not_worse(ctx: DeviceContext) raises:
         print("      N =", n, "-> q(GOOD) =", q[i])
 
     if q[1] < q[0] or q[2] < q[1]:
-        raise Error("mas particulas deberia mejorar (o al menos no empeorar): ",
+        raise Error("more particles should improve (or at least not worsen): ",
                     q[0], " ", q[1], " ", q[2])
-    print("PASS mas particulas no empeora la busqueda")
+    print("PASS more particles does not worsen the search")
 
 
 def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
@@ -249,20 +249,20 @@ def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
     # And now the same workspace after having run a different search.
     reused = SearchWorkspace(ctx, cfg)
     search[ToyChain](ctx, reused, cfg, toy, upload[dtype](ctx, root_state),
-                     UInt32(1111))          # una busqueda cualquiera, para ensuciarlo
+                     UInt32(1111))          # any search at all, to dirty it
     ctx.synchronize()
     search[ToyChain](ctx, reused, cfg, toy, upload[dtype](ctx, root_state),
-                     UInt32(8080))          # y ahora la que tiene que coincidir
+                     UInt32(8080))          # and now the one that has to match
     ctx.synchronize()
     got_w = download[dtype](reused.output.sampled_action_weights, p_total)
     got_a = download[idx_dtype](reused.output.action, cfg.num_envs)
 
     for p in range(p_total):
         assert_close(got_w[p], want_w[p], TOL,
-                     String("el workspace reutilizado difiere en la particula ", p))
+                     String("the reused workspace differs at particle ", p))
     for e in range(cfg.num_envs):
         if Int(got_a[e]) != Int(want_a[e]):
-            raise Error("el workspace reutilizado eligio otra accion en el env ", e)
+            raise Error("the reused workspace chose a different action in env ", e)
 
     # And that the weights are not all equal: if the bug were present they would
     # all come out at zero and the check above would pass anyway by being identical.
@@ -271,9 +271,9 @@ def test_reusing_the_workspace_gives_the_same_result(ctx: DeviceContext) raises:
         if got_w[p] != got_w[0]:
             spread = True
     if not spread:
-        raise Error("todos los pesos salieron identicos: el readout es uniforme, ",
-                    "que es justo el sintoma del bug de los acumuladores")
-    print("PASS reutilizar el workspace da el mismo resultado que uno nuevo")
+        raise Error("all the weights came out identical: the readout is uniform, ",
+                    "which is exactly the symptom of the accumulator bug")
+    print("PASS reusing the workspace gives the same result as a fresh one")
 
 
 def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
@@ -306,15 +306,15 @@ def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
 
     # The two lists in parallel: the particle's root action and its weight.
     acts = List[Int]();     ws_ = List[Float64]()
-    acts.append(0); ws_.append(0.40)          # env 0, la particula mas pesada
+    acts.append(0); ws_.append(0.40)          # env 0, the heaviest particle
     acts.append(1); ws_.append(0.16)
     acts.append(1); ws_.append(0.16)
     acts.append(1); ws_.append(0.16)
-    acts.append(1); ws_.append(0.12)          # la accion 1 suma 0.60
-    acts.append(1); ws_.append(0.30)          # env 1, la particula mas pesada
+    acts.append(1); ws_.append(0.12)          # action 1 sums to 0.60
+    acts.append(1); ws_.append(0.30)          # env 1, the heaviest particle
     acts.append(0); ws_.append(0.20)
     acts.append(0); ws_.append(0.20)
-    acts.append(0); ws_.append(0.20)          # la accion 0 suma 0.60
+    acts.append(0); ws_.append(0.20)          # action 0 sums to 0.60
     acts.append(1); ws_.append(0.10)
     for i in range(len(acts)):
         roots.append(Scalar[idx_dtype](acts[i]))
@@ -329,20 +329,20 @@ def test_greedy_readout_takes_the_mode_of_q(ctx: DeviceContext) raises:
 
     # First the aggregated q, which is what we really want to check.
     q = download[dtype](q_buf, num_envs * NUM_ACTIONS)
-    assert_close(q[0], Scalar[dtype](0.40), TOL, "q[env0, accion 0]")
-    assert_close(q[1], Scalar[dtype](0.60), TOL, "q[env0, accion 1]")
-    assert_close(q[2], Scalar[dtype](0.60), TOL, "q[env1, accion 0]")
-    assert_close(q[3], Scalar[dtype](0.40), TOL, "q[env1, accion 1]")
+    assert_close(q[0], Scalar[dtype](0.40), TOL, "q[env0, action 0]")
+    assert_close(q[1], Scalar[dtype](0.60), TOL, "q[env0, action 1]")
+    assert_close(q[2], Scalar[dtype](0.60), TOL, "q[env1, action 0]")
+    assert_close(q[3], Scalar[dtype](0.40), TOL, "q[env1, action 1]")
 
     got = download[idx_dtype](ws.output.action, num_envs)
     if Int(got[0]) != 1:
-        raise Error("el env 0 deberia elegir la accion 1 (masa 0.60) y no la ",
-                    Int(got[0]), "; si salio la 0 es que mira particulas "
-                    "sueltas en vez de agregar por accion")
+        raise Error("env 0 should pick action 1 (mass 0.60) and not ",
+                    Int(got[0]), "; if 0 came out it is looking at individual "
+                    "particles instead of aggregating per action")
     if Int(got[1]) != 0:
-        raise Error("el env 1 deberia elegir la accion 0 (masa 0.60), salio ",
+        raise Error("env 1 should pick action 0 (mass 0.60), got ",
                     Int(got[1]))
-    print("PASS el readout codicioso coge la moda de q, no la particula mayor")
+    print("PASS the greedy readout takes the mode of q, not the largest particle")
 
 
 def test_greedy_is_deterministic(ctx: DeviceContext) raises:
@@ -375,8 +375,8 @@ def test_greedy_is_deterministic(ctx: DeviceContext) raises:
 
     for e in range(num_envs):
         if Int(a[e]) != Int(b[e]):
-            raise Error("el readout codicioso deberia ser determinista, env ", e)
-    print("PASS el readout codicioso es determinista")
+            raise Error("the greedy readout should be deterministic, env ", e)
+    print("PASS the greedy readout is deterministic")
 
 
 def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
@@ -428,8 +428,8 @@ def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
     ctx.synchronize()
     spo = download[idx_dtype](ws.output.action, num_envs)
     if Int(spo[0]) != 0:
-        raise Error("con el readout de SPO deberia salir la accion 0 (la de la "
-                    "particula buena), salio ", Int(spo[0]))
+        raise Error("with SPO's readout action 0 should come out (the one from the "
+                    "good particle), got ", Int(spo[0]))
 
     # 2. The variant: it goes for the safe one.
     readout_expected(ctx, ws.particles, ws.output, cfg, logits_buf, q_buf, us,
@@ -437,15 +437,15 @@ def test_expected_readout_punishes_risk(ctx: DeviceContext) raises:
     ctx.synchronize()
     exp_a = download[idx_dtype](ws.output.action, num_envs)
     if Int(exp_a[0]) != 1:
-        raise Error("con la variante deberia salir la accion 1 (media mayor), "
-                    "salio ", Int(exp_a[0]))
+        raise Error("with the variant action 1 should come out (larger mean), "
+                    "got ", Int(exp_a[0]))
 
     # And the means, which are what the variant actually computes.
     logits = download[dtype](logits_buf, num_envs * NUM_ACTIONS)
     tau = Scalar[dtype](0.5)
-    assert_close(logits[0] * tau, Scalar[dtype](-0.5), TOL, "media de la accion 0")
-    assert_close(logits[1] * tau, Scalar[dtype](0.2), TOL, "media de la accion 1")
-    print("PASS la variante castiga el riesgo donde el readout de SPO no puede")
+    assert_close(logits[0] * tau, Scalar[dtype](-0.5), TOL, "mean of action 0")
+    assert_close(logits[1] * tau, Scalar[dtype](0.2), TOL, "mean of action 1")
+    print("PASS the variant penalises risk where SPO's readout cannot")
 
 
 def test_expected_readout_ignores_unsampled_actions(ctx: DeviceContext) raises:
@@ -480,14 +480,14 @@ def test_expected_readout_ignores_unsampled_actions(ctx: DeviceContext) raises:
 
     q = download[dtype](q_buf, num_envs * NUM_ACTIONS)
     assert_close(q[0], Scalar[dtype](0), TOL,
-                 "una accion que nadie probo tiene que quedarse con q = 0")
+                 "an action nobody tried has to stay at q = 0")
     assert_close(q[1], Scalar[dtype](1), TOL,
-                 "toda la masa va a la unica accion probada")
+                 "all the mass goes to the only action tried")
     got = download[idx_dtype](ws.output.action, num_envs)
     if Int(got[0]) != 1:
-        raise Error("deberia jugar la 1 aunque su media sea negativa: es la "
-                    "unica que la busqueda evaluo, salio ", Int(got[0]))
-    print("PASS las acciones sin probar no compiten con las evaluadas")
+        raise Error("should play 1 even though its mean is negative: it is the "
+                    "only one the search evaluated, got ", Int(got[0]))
+    print("PASS untried actions do not compete with evaluated ones")
 
 
 def main() raises:

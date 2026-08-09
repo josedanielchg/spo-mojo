@@ -44,7 +44,7 @@ def test_determinism() raises:
     """Same key -> same sequence. Different streams -> different sequences."""
     for i in range(64):
         if rand_uniform(42, 0, UInt32(i)) != rand_uniform(42, 0, UInt32(i)):
-            raise Error("rand_uniform no es determinista en i=", i)
+            raise Error("rand_uniform is not deterministic at i=", i)
 
     # Two streams from the same seed have to decorrelate. I allow up to 2 out of 64
     # coincidences by pure chance; in practice 0 come out.
@@ -53,12 +53,12 @@ def test_determinism() raises:
         if rand_uniform(42, 0, UInt32(i)) == rand_uniform(42, 1, UInt32(i)):
             same += 1
     if same > 2:
-        raise Error("los streams 0 y 1 se parecen demasiado: ", same, "/64 iguales")
+        raise Error("streams 0 and 1 are far too alike: ", same, "/64 equal")
 
     key = RngKey(42, 0)
     if key.split(1).stream == key.split(2).stream:
-        raise Error("split(1) y split(2) dieron el mismo stream")
-    print("PASS rng determinista y streams independientes")
+        raise Error("split(1) and split(2) gave the same stream")
+    print("PASS rng deterministic and streams independent")
 
 
 def test_uniform_stats(ctx: DeviceContext) raises:
@@ -79,7 +79,7 @@ def test_uniform_stats(ctx: DeviceContext) raises:
     for i in range(n):
         v = Float64(got[i])
         if v < 0.0 or v >= 1.0:
-            raise Error("uniforme fuera de [0,1) en ", i, ": ", got[i])
+            raise Error("uniform outside [0,1) at ", i, ": ", got[i])
         total += v
     mean = total / Float64(n)
 
@@ -90,10 +90,10 @@ def test_uniform_stats(ctx: DeviceContext) raises:
     variance /= Float64(n)
 
     if abs(mean - 0.5) > 0.01:
-        raise Error("media fuera de rango: ", mean)
+        raise Error("mean out of range: ", mean)
     if abs(variance - 1.0 / 12.0) > 0.005:
-        raise Error("varianza fuera de rango: ", variance)
-    print("PASS uniformes: media", mean, "varianza", variance)
+        raise Error("variance out of range: ", variance)
+    print("PASS uniforms: mean", mean, "varianza", variance)
 
 
 def test_categorical_exact(ctx: DeviceContext) raises:
@@ -128,7 +128,7 @@ def test_categorical_exact(ctx: DeviceContext) raises:
     got = download[idx_dtype](o, rows)
     for r in range(rows):
         assert_eq_int(Int(got[r]), want[r], String("u=", us[r]))
-    print("PASS categorical con uniformes inyectados (indices exactos)")
+    print("PASS categorical with injected uniforms (exact indices)")
 
 
 def test_categorical_frequencies(ctx: DeviceContext) raises:
@@ -157,7 +157,7 @@ def test_categorical_frequencies(ctx: DeviceContext) raises:
     for i in range(n):
         k = Int(got[i])
         if k < 0 or k >= row_size:
-            raise Error("indice invalido en ", i, ": ", k, " (el kernel no escribio?)")
+            raise Error("invalid index at ", i, ": ", k, " (did the kernel not write?)")
         counts[k] += 1
 
     chi2 = Float64(0)

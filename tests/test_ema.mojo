@@ -42,8 +42,8 @@ def test_ema_moves_slowly(ctx: DeviceContext) raises:
     got = download[dtype](target, n)
     for i in range(n):
         if abs(got[i] - TAU) > Scalar[dtype](1e-7):
-            raise Error("tras un paso el target deberia valer tau (", TAU,
-                        "), dio ", got[i])
+            raise Error("after one step the target should be worth tau (", TAU,
+                        "), gave ", got[i])
 
     # And after many steps it approaches online, without overshooting.
     for _ in range(200):
@@ -52,9 +52,9 @@ def test_ema_moves_slowly(ctx: DeviceContext) raises:
     got2 = download[dtype](target, n)
     for i in range(n):
         if got2[i] <= got[i] or got2[i] >= Scalar[dtype](1):
-            raise Error("tras 200 pasos el target deberia estar entre ", got[i],
-                        " y 1, dio ", got2[i])
-    print("PASS la EMA mueve el target un tau por paso (tras 201:", got2[0], ")")
+            raise Error("after 200 steps the target should be between ", got[i],
+                        " and 1, gave ", got2[i])
+    print("PASS the EMA moves the target one tau per step (after 201:", got2[0], ")")
 
 
 def test_ema_with_tau_one_copies(ctx: DeviceContext) raises:
@@ -75,7 +75,7 @@ def test_ema_with_tau_one_copies(ctx: DeviceContext) raises:
     got = download[dtype](target, n)
     for i in range(n):
         if got[i] != onl[i]:
-            raise Error("con tau=1 el target deberia ser el online: ", got[i],
+            raise Error("with tau=1 the target should be the online one: ", got[i],
                         " vs ", onl[i])
 
     # And with tau=0 nothing moves.
@@ -85,8 +85,8 @@ def test_ema_with_tau_one_copies(ctx: DeviceContext) raises:
     got2 = download[dtype](target2, n)
     for i in range(n):
         if got2[i] != Scalar[dtype](-7):
-            raise Error("con tau=0 el target no deberia moverse, dio ", got2[i])
-    print("PASS tau=1 copia el online y tau=0 no toca nada")
+            raise Error("with tau=0 the target should not move, gave ", got2[i])
+    print("PASS tau=1 copies the online one and tau=0 touches nothing")
 
 
 def test_against_optax_multiblock(ctx: DeviceContext) raises:
@@ -114,16 +114,16 @@ def test_against_optax_multiblock(ctx: DeviceContext) raises:
         got = download[dtype](target, n)
         want = read_f32(GOLDEN + "ema_target" + String(step) + ".bin")
         if len(want) != n:
-            raise Error("el golden del paso ", step, " no tiene ", n, " valores")
+            raise Error("the golden for step ", step, " does not have ", n, " values")
         for i in range(n):
             d = abs(got[i] - want[i])
             if d > worst:
                 worst = d
             if d > Scalar[dtype](1e-6):
-                raise Error("paso ", step, " valor ", i, ": ", got[i],
+                raise Error("step ", step, " valor ", i, ": ", got[i],
                             " vs optax ", want[i], " (diff ", d, ")")
-    print("      n =", n, "(4 bloques), 10 pasos: peor diferencia", worst)
-    print("PASS la EMA coincide con optax.incremental_update en varios bloques")
+    print("      n =", n, "(4 blocks), 10 steps: worst difference", worst)
+    print("PASS the EMA matches optax.incremental_update across several blocks")
 
 
 def test_ema_ragged_size(ctx: DeviceContext) raises:
@@ -145,9 +145,9 @@ def test_ema_ragged_size(ctx: DeviceContext) raises:
     got = download[dtype](target, n)
     for i in range(n):
         if got[i] != Scalar[dtype](i):
-            raise Error("con tau=1 y n=", n, " el valor ", i, " deberia ser ", i,
-                        " y dio ", got[i])
-    print("PASS tamano ragged (n =", n, ", 2 bloques) sin desbordes")
+            raise Error("with tau=1 and n=", n, " value ", i, " should be ", i,
+                        " and gave ", got[i])
+    print("PASS ragged size (n =", n, ", 2 blocks) with no overruns")
 
 
 def main() raises:

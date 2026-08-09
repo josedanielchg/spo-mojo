@@ -58,8 +58,8 @@ def check_case(ctx: DeviceContext, name: String, batch: Int) raises:
             # "effectively minus infinity". The exact bit pattern of a saturated
             # value is not the contract; that it contributes nothing to the log is.
             if got_logpi[i] > Scalar[dtype](-1e30):
-                raise Error(name, ": el log pi de la casilla ilegal ", i,
-                            " deberia ser muy negativo y vale ", got_logpi[i])
+                raise Error(name, ": the log pi of the illegal cell ", i,
+                            " should be very negative and is ", got_logpi[i])
         else:
             assert_close(got_logpi[i], want_logpi[i], TOL,
                          String(name, " log pi ", i))
@@ -73,7 +73,7 @@ def check_case(ctx: DeviceContext, name: String, batch: Int) raises:
     got_per = download[dtype](per_state, batch)
     for b in range(batch):
         assert_close(got_per[b], want_per[b], TOL,
-                     String(name, " perdida del estado ", b))
+                     String(name, " loss of state ", b))
 
     # 3. La descomposicion H(q,pi) = H(q) + KL(q||pi).
     h = zero_buffer[dtype](ctx, batch)
@@ -87,19 +87,19 @@ def check_case(ctx: DeviceContext, name: String, batch: Int) raises:
     got_h = download[dtype](h, batch)
     got_kl = download[dtype](kl, batch)
     for b in range(batch):
-        assert_close(got_h[b], want_h[b], TOL, String(name, " H(q) del estado ", b))
-        assert_close(got_kl[b], want_kl[b], TOL, String(name, " KL del estado ", b))
+        assert_close(got_h[b], want_h[b], TOL, String(name, " H(q) of state ", b))
+        assert_close(got_kl[b], want_kl[b], TOL, String(name, " KL of state ", b))
         # The KL is a divergence: never negative.
         if got_kl[b] < Scalar[dtype](-1e-5):
-            raise Error(name, ": KL negativa en el estado ", b, ": ", got_kl[b])
+            raise Error(name, ": negative KL on state ", b, ": ", got_kl[b])
         # And the decomposition has to close exactly.
         assert_close(got_h[b] + got_kl[b], got_per[b], TOL,
-                     String(name, " H(q)+KL deberia dar la perdida en ", b))
+                     String(name, " H(q)+KL should give the loss at ", b))
 
     want_loss = read_f32(tag + "loss.bin")
     got_loss = mean_of(got_per, batch)
-    assert_close(got_loss, want_loss[0], TOL, String(name, " perdida media"))
-    print("PASS ce ", name, " (B=", batch, "): perdida ", got_loss,
+    assert_close(got_loss, want_loss[0], TOL, String(name, " mean loss"))
+    print("PASS ce ", name, " (B=", batch, "): loss ", got_loss,
           " = H(q) ", mean_of(got_h, batch), " + KL ", mean_of(got_kl, batch))
 
 
@@ -139,7 +139,7 @@ def test_zero_weight_terms_do_not_produce_nan(ctx: DeviceContext) raises:
     qs = List[Scalar[dtype]]()
     for _ in range(batch):
         for a in range(NUM_ACTIONS):
-            legal = a < 3                      # solo las tres primeras
+            legal = a < 3                      # only the first three
             lp.append(Scalar[dtype](-1.0986123) if legal else inf_neg)
             qs.append(Scalar[dtype](1) / Scalar[dtype](3) if legal
                       else Scalar[dtype](0))
@@ -153,11 +153,11 @@ def test_zero_weight_terms_do_not_produce_nan(ctx: DeviceContext) raises:
 
     for b in range(batch):
         if got[b] != got[b]:                   # nan != nan
-            raise Error("el estado ", b, " dio NaN: falta el guard de q == 0")
-        # Tres acciones equiprobables: -SUM (1/3)*log(1/3) = log(3) = 1.0986123
+            raise Error("state ", b, " gave NaN: the q == 0 guard is missing")
+        # Three equiprobable actions: -SUM (1/3)*log(1/3) = log(3) = 1.0986123
         assert_close(got[b], Scalar[dtype](1.0986123), TOL,
-                     String("perdida del estado ", b))
-    print("PASS los terminos con q=0 se saltan y un -inf de verdad no da NaN")
+                     String("loss of state ", b))
+    print("PASS terms with q=0 are skipped and a genuine -inf gives no NaN")
 
 
 def loss_of(ctx: DeviceContext, log_pi_vals: List[Scalar[dtype]],
@@ -205,7 +205,7 @@ def test_loss_is_minimised_when_pi_equals_q(ctx: DeviceContext) raises:
         entropy += -q_vals[a] * log(q_vals[a])
     got_min = loss_of(ctx, at_min, q_vals)
     assert_close(got_min, entropy, Scalar[dtype](1e-5),
-                 "en pi = q la perdida tiene que valer la entropia de q")
+                 "at pi = q the loss has to equal the entropy of q")
 
     # Two deviations: the uniform one, and another that inverts the preference order.
     uniform = List[Scalar[dtype]]()
@@ -220,12 +220,12 @@ def test_loss_is_minimised_when_pi_equals_q(ctx: DeviceContext) raises:
     got_flipped = loss_of(ctx, flipped, q_vals)
 
     if got_uniform <= got_min:
-        raise Error("la uniforme deberia perder mas que pi=q: ", got_uniform,
+        raise Error("the uniform should lose more than pi=q: ", got_uniform,
                     " vs ", got_min)
     if got_flipped <= got_uniform:
-        raise Error("invertir el orden deberia ser peor que la uniforme: ",
+        raise Error("reversing the order should be worse than the uniform: ",
                     got_flipped, " vs ", got_uniform)
-    print("PASS la perdida es minima en pi=q (=", got_min,
+    print("PASS the loss is minimal at pi=q (=", got_min,
           "), uniforme ", got_uniform, ", invertida ", got_flipped)
 
 
@@ -261,14 +261,14 @@ def test_kl_is_zero_exactly_when_pi_equals_q(ctx: DeviceContext) raises:
     ctx.synchronize()
     got_h = download[dtype](h, 1)[0]
 
-    # H(q) a mano: 1.0296531 para (0.5, 0.3, 0.2).
-    assert_close(got_h, Scalar[dtype](1.0296531), TOL, "H(q) de (0.5,0.3,0.2)")
+    # H(q) by hand: 1.0296531 for (0.5, 0.3, 0.2).
+    assert_close(got_h, Scalar[dtype](1.0296531), TOL, "H(q) of (0.5,0.3,0.2)")
     assert_close(ce_min - got_h, Scalar[dtype](0), Scalar[dtype](1e-5),
-                 "la KL en pi=q tiene que ser 0")
+                 "the KL at pi=q has to be 0")
     if ce_uni - got_h <= Scalar[dtype](0):
-        raise Error("la KL de la uniforme deberia ser positiva: ", ce_uni - got_h)
-    print("PASS KL = 0 en pi=q (perdida ", ce_min, " = H(q) ", got_h,
-          ") y ", ce_uni - got_h, " con la uniforme")
+        raise Error("the uniform's KL should be positive: ", ce_uni - got_h)
+    print("PASS KL = 0 at pi=q (loss ", ce_min, " = H(q) ", got_h,
+          ") and ", ce_uni - got_h, " with the uniform")
 
 
 def test_entropy_edge_cases(ctx: DeviceContext) raises:
@@ -297,12 +297,12 @@ def test_entropy_edge_cases(ctx: DeviceContext) raises:
     got = download[dtype](h, 3)
 
     if got[0] != got[0]:
-        raise Error("H de una one-hot salio NaN: falta el guard de q == 0")
-    assert_close(got[0], Scalar[dtype](0), TOL, "H de una one-hot")
-    assert_close(got[1], log(Scalar[dtype](3)), TOL, "H de la uniforme sobre 3")
+        raise Error("H of a one-hot came out NaN: the q == 0 guard is missing")
+    assert_close(got[0], Scalar[dtype](0), TOL, "H of a one-hot")
+    assert_close(got[1], log(Scalar[dtype](3)), TOL, "H of the uniform over 3")
     assert_close(got[2], log(Scalar[dtype](NUM_ACTIONS)), TOL,
-                 "H de la uniforme sobre 9")
-    print("PASS H(one-hot)=0 sin NaN, H(uniforme sobre k)=log k")
+                 "H of the uniform over 9")
+    print("PASS H(one-hot)=0 with no NaN, H(uniform over k)=log k")
 
 
 def main() raises:

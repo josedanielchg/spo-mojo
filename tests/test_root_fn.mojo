@@ -68,12 +68,12 @@ def test_broadcast(ctx: DeviceContext) raises:
     for p in range(p_total):
         e = p // num_particles
         assert_close(got_state[p * state_dim + 0], Scalar[dtype](10 * e), TOL,
-                     String("estado[0] de la particula ", p))
+                     String("state[0] of particle ", p))
         assert_close(got_state[p * state_dim + 1], Scalar[dtype](10 * e + 1), TOL,
-                     String("estado[1] de la particula ", p))
+                     String("state[1] of particle ", p))
         assert_close(got_value[p], Scalar[dtype](100 + e), TOL,
-                     String("valor de la particula ", p))
-    print("PASS broadcast de estado y valor a las particulas de cada env")
+                     String("value of particle ", p))
+    print("PASS state and value broadcast to each env's particles")
 
 
 def test_exact_actions_with_injected_uniforms(ctx: DeviceContext) raises:
@@ -114,8 +114,8 @@ def test_exact_actions_with_injected_uniforms(ctx: DeviceContext) raises:
 
     got = download[idx_dtype](particles.root_actions, p_total)
     for p in range(p_total):
-        assert_eq_int(Int(got[p]), want[p], String("u=", us[p], " -> accion"))
-    print("PASS acciones exactas con uniformes inyectados")
+        assert_eq_int(Int(got[p]), want[p], String("u=", us[p], " -> action"))
+    print("PASS exact actions with injected uniforms")
 
 
 def test_log_probs_match_prior(ctx: DeviceContext) raises:
@@ -152,8 +152,8 @@ def test_log_probs_match_prior(ctx: DeviceContext) raises:
     for p in range(p_total):
         want = log(p0) if Int(actions[p]) == 0 else log(p1)
         assert_close(logps[p], want, Scalar[dtype](1e-5),
-                     String("log_prob de la particula ", p))
-    print("PASS prior_logits = log pi(a|s) de la accion elegida")
+                     String("log_prob of particle ", p))
+    print("PASS prior_logits = log pi(a|s) of the chosen action")
 
 
 def test_action_frequencies_follow_prior(ctx: DeviceContext) raises:
@@ -198,14 +198,14 @@ def test_action_frequencies_follow_prior(ctx: DeviceContext) raises:
     for p in range(p_total):
         a = Int(actions[p])
         if a < 0 or a > 1:
-            raise Error("accion invalida en ", p, ": ", a)
+            raise Error("invalid action at ", p, ": ", a)
         if a == 1:
             ones += 1
 
     frac = Scalar[dtype](ones) / Scalar[dtype](p_total)
     if abs(frac - want_p1) > 0.01:
-        raise Error("fraccion de la accion 1: ", frac, ", esperada ", want_p1)
-    print("PASS frecuencias de accion ~ prior (accion 1 en el", frac, "de las particulas)")
+        raise Error("fraction of action 1: ", frac, ", esperada ", want_p1)
+    print("PASS action frequencies ~ prior (action 1 in", frac, "of the particles)")
 
 
 def test_accumulators_start_at_zero(ctx: DeviceContext) raises:
@@ -241,11 +241,11 @@ def test_accumulators_start_at_zero(ctx: DeviceContext) raises:
     terminal = download[idx_dtype](particles.terminal, p_total)
     depth = download[idx_dtype](particles.depth, p_total)
     for p in range(p_total):
-        assert_close(weights[p], 0.0, TOL, String("peso inicial ", p))
-        assert_close(gae[p], 0.0, TOL, String("gae inicial ", p))
-        assert_eq_int(Int(terminal[p]), 0, String("terminal inicial ", p))
-        assert_eq_int(Int(depth[p]), 0, String("depth inicial ", p))
-    print("PASS los acumuladores arrancan a cero")
+        assert_close(weights[p], 0.0, TOL, String("initial weight ", p))
+        assert_close(gae[p], 0.0, TOL, String("initial gae ", p))
+        assert_eq_int(Int(terminal[p]), 0, String("initial terminal ", p))
+        assert_eq_int(Int(depth[p]), 0, String("initial depth ", p))
+    print("PASS the accumulators start at zero")
 
 
 def main() raises:

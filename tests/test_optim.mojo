@@ -49,7 +49,7 @@ def check_tensor(ctx: DeviceContext, buf: DeviceBuffer[dtype], prefix: String,
         if d > worst:
             worst = d
         if d > TOL:
-            raise Error("case", which, " paso ", step, " ", name, "[", j, "]: ",
+            raise Error("case", which, " step ", step, " ", name, "[", j, "]: ",
                         got[j], " vs optax ", want[j], " (diff ", d, ")")
     return worst
 
@@ -117,15 +117,15 @@ def run_case(ctx: DeviceContext, which: Int) raises:
                 worst = e
         if step == 1:
             print("      case", which, " norma global", sqrt(total_sq),
-                  " factor del clip", scale)
-        print("        paso", step, ": peor diferencia", worst)
+                  " clip factor", scale)
+        print("        step", step, ": worst difference", worst)
 
 
 def test_against_optax(ctx: DeviceContext) raises:
     """The two cases: without clipping and with clipping."""
     run_case(ctx, 0)
     run_case(ctx, 1)
-    print("PASS adam + clip global coinciden con optax en los dos casos")
+    print("PASS adam + global clip match optax on both cases")
 
 
 def test_global_norm_is_global(ctx: DeviceContext) raises:
@@ -145,17 +145,17 @@ def test_global_norm_is_global(ctx: DeviceContext) raises:
              + sum_squares(ctx, upload[dtype](ctx, c), 1))
     norm = sqrt(total)
     if abs(norm - Scalar[dtype](13)) > Scalar[dtype](1e-5):
-        raise Error("la norma global de (3,4,12) deberia ser 13, dio ", norm)
+        raise Error("the global norm of (3,4,12) should be 13, gave ", norm)
 
     # And the factor clips exactly down to the limit, no further.
     scale = global_clip_scale(total, Scalar[dtype](6.5))
     if abs(scale - Scalar[dtype](0.5)) > Scalar[dtype](1e-6):
-        raise Error("con norma 13 y limite 6.5 el factor deberia ser 0.5, dio ",
+        raise Error("with norm 13 and limit 6.5 the factor should be 0.5, gave ",
                     scale)
     # Below the limit it touches nothing.
     if global_clip_scale(total, Scalar[dtype](20)) != Scalar[dtype](1):
-        raise Error("si la norma cabe, el factor tiene que ser exactamente 1")
-    print("PASS la norma es global (3,4,12 -> 13) y el clip escala al limite")
+        raise Error("if the norm fits, the factor has to be exactly 1")
+    print("PASS the norm is global (3,4,12 -> 13) and the clip scales to the limit")
 
 
 def test_sum_squares_multi_block(ctx: DeviceContext) raises:
@@ -171,8 +171,8 @@ def test_sum_squares_multi_block(ctx: DeviceContext) raises:
         ones.append(Scalar[dtype](1))
     got = sum_squares(ctx, upload[dtype](ctx, ones), n)
     if abs(got - Scalar[dtype](n)) > Scalar[dtype](1e-3):
-        raise Error("la suma de 1000 unos al cuadrado deberia ser 1000, dio ", got)
-    print("PASS suma de cuadrados correcta con varios bloques (n =", n, ")")
+        raise Error("the sum of 1000 ones squared should be 1000, gave ", got)
+    print("PASS sum of squares correct across several blocks (n =", n, ")")
 
 
 def main() raises:

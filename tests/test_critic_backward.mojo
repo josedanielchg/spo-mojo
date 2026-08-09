@@ -48,7 +48,7 @@ def worst_abs(got: List[Scalar[dtype]], want: List[Scalar[dtype]], n: Int,
             worst = d
             at = i
     if worst > tol:
-        raise Error(what, ": diferencia ", worst, " en el indice ", at,
+        raise Error(what, ": difference ", worst, " at index ", at,
                     " (got=", got[at], " want=", want[at], ", tol ", tol, ")")
     return worst
 
@@ -109,7 +109,7 @@ def check_against_jax(ctx: DeviceContext, hidden: Int, m: Int) raises:
     for i in range(len(e)):
         if e[i] > worst:
             worst = e[i]
-    print("      hidden", hidden, " batch", m, " -> peor error en los 6 tensores:",
+    print("      hidden", hidden, " batch", m, " -> worst error across the 6 tensors:",
           worst, " (tol", tol, ")")
 
 
@@ -117,7 +117,7 @@ def test_against_jax_autodiff(ctx: DeviceContext) raises:
     """The 6 gradients against JAX's autodiff, in two configurations."""
     check_against_jax(ctx, 32, 20)    # ragged batch
     check_against_jax(ctx, 64, 64)    # multi-tile
-    print("PASS los 6 gradientes del critico coinciden con el autodiff de JAX")
+    print("PASS the critic's 6 gradients match JAX's autodiff")
 
 
 # --- The second check: finite differences, depending on no golden at all
@@ -248,10 +248,10 @@ def test_finite_differences_through_relu(ctx: DeviceContext) raises:
             raise Error("dW1[", i, "]: analitico ", got_dw1[i], " vs medido ", num,
                         " (error relativo ", rel, ")")
     if checked == 0:
-        raise Error("todos los parametros de dW1 quedaron por debajo del umbral: "
-                    "el test no estaria comprobando nada")
-    print("      dW1 (a traves de 2 ReLU y 3 capas):", checked, "comprobados,",
-          skipped, "sin senal suficiente, peor error relativo", worst)
+        raise Error("every dW1 parameter fell below the threshold: "
+                    "the test would be checking nothing")
+    print("      dW1 (through 2 ReLUs and 3 layers):", checked, "comprobados,",
+          skipped, "without enough signal, worst relative error", worst)
 
     # And the last layer, which is the short path.
     worst3 = Scalar[dtype](0)
@@ -279,10 +279,10 @@ def test_finite_differences_through_relu(ctx: DeviceContext) raises:
             raise Error("dW3[", i, "]: analitico ", got_dw3[i], " vs medido ", num,
                         " (error relativo ", rel, ")")
     if checked3 == 0:
-        raise Error("ningun parametro de dW3 tuvo senal suficiente")
-    print("      dW3 (capa de salida):", checked3, "comprobados,", skipped3,
-          "sin senal, peor error relativo", worst3)
-    print("PASS las diferencias finitas confirman el backward a traves del ReLU")
+        raise Error("no dW3 parameter had enough signal")
+    print("      dW3 (output layer):", checked3, "comprobados,", skipped3,
+          "no signal, worst relative error", worst3)
+    print("PASS finite differences confirm the backward through the ReLU")
 
 
 def test_relu_mask_actually_blocks(ctx: DeviceContext) raises:
@@ -325,16 +325,16 @@ def test_relu_mask_actually_blocks(ctx: DeviceContext) raises:
     a1 = download[dtype](cache.a1, m * hidden)
     for i in range(m * hidden):
         if a1[i] != Scalar[dtype](0):
-            raise Error("el montaje es incorrecto: a1 deberia estar todo a 0")
+            raise Error("the setup is wrong: a1 should be all zeros")
 
     # With the whole first layer switched off, no layer-1 weight can influence the
     # loss: its gradient has to be exactly zero.
     dw1 = download[dtype](grads.dw1, FD_IN * hidden)
     for i in range(FD_IN * hidden):
         if dw1[i] != Scalar[dtype](0):
-            raise Error("dW1[", i, "] = ", dw1[i], " pero el ReLU apago toda la "
-                        "capa: no deberia pasar gradiente")
-    print("PASS la mascara del ReLU bloquea el gradiente donde recorto")
+            raise Error("dW1[", i, "] = ", dw1[i], " but the ReLU switched off the whole "
+                        "layer: no gradient should get through")
+    print("PASS the ReLU's mask blocks the gradient where it clipped")
 
 
 def main() raises:

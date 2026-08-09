@@ -109,8 +109,8 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
         total += ps[b]
     want_loss = read_f32(tag + "loss.bin")
     assert_close(total / Scalar[dtype](batch), want_loss[0], Scalar[dtype](2e-5),
-                 String(name, " la perdida no coincide: no estamos derivando la "
-                        "misma funcion"))
+                 String(name, " the loss does not match: we are not differentiating the "
+                        "same function"))
 
     # 3. dL/dz separately. Separating it matters for localising a fault: if dz
     #    lines up but dW1 does not, the problem is in the network; if dz already
@@ -128,7 +128,7 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
         assert_close(got_dz[i], want_dz[i], Scalar[dtype](2e-6),
                      String(name, " dz ", i))
         if host_mask[i] == Scalar[dtype](0) and got_dz[i] != Scalar[dtype](0):
-            raise Error(name, ": el gradiente se cuela por la casilla "
+            raise Error(name, ": the gradient leaks through cell "
                         "enmascarada ", i, ": ", got_dz[i])
 
     # 4. And the six tensors, after the full backward.
@@ -160,10 +160,10 @@ def check_case(ctx: DeviceContext, name: String, batch: Int,
         if e > worst:
             worst = e
         if e > Scalar[dtype](1e-4):
-            raise Error(name, ": ", names[k], " se aparta del autodiff, error "
+            raise Error(name, ": ", names[k], " departs from autodiff, error "
                         "relativo ", e)
     print("PASS ", name, " (B=", batch, " H=", hidden,
-          "): pi, perdida, dz y los 6 gradientes vs autodiff, peor error ", worst)
+          "): pi, loss, dz and the 6 gradients vs autodiff, worst error ", worst)
 
 
 def test_against_jax_autodiff(ctx: DeviceContext) raises:
@@ -284,10 +284,10 @@ def test_finite_differences(ctx: DeviceContext) raises:
             raise Error("db3[", j, "]: analitico ", db3[j], " vs finitas ", num)
 
     if checked < 5:
-        raise Error("solo ", checked, " parametros con senal suficiente: la "
-                    "prueba no verifica gran cosa")
-    print("PASS diferencias finitas: ", checked, " parametros comprobados, ",
-          skipped, " sin senal, peor error relativo ", worst)
+        raise Error("only ", checked, " parameters with enough signal: the "
+                    "test does not check much")
+    print("PASS diferencias finitas: ", checked, " parameters checked, ",
+          skipped, " no signal, worst relative error ", worst)
 
 
 def test_gradient_vanishes_when_pi_equals_q(ctx: DeviceContext) raises:
@@ -317,8 +317,8 @@ def test_gradient_vanishes_when_pi_equals_q(ctx: DeviceContext) raises:
     got = download[dtype](dz, n * NUM_ACTIONS)
     for i in range(n * NUM_ACTIONS):
         assert_close(got[i], Scalar[dtype](0), Scalar[dtype](1e-7),
-                     String("dz[", i, "] con pi = q deberia ser 0"))
-    print("PASS con pi = q el gradiente de los logits se anula")
+                     String("dz[", i, "] with pi = q should be 0"))
+    print("PASS with pi = q the logits' gradient vanishes")
 
 
 def main() raises:
