@@ -23,8 +23,8 @@ done
 
 echo
 if [ "$failed" -ne 0 ]; then
-  echo "$failed archivo(s) de test fallaron, $passed ok"
+  echo "$failed test file(s) failed, $passed ok"
   exit 1
 fi
 
-echo "todo en verde ($passed archivos)"
+echo "all green ($passed files)"
